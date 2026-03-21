@@ -1,0 +1,41 @@
+CURSORREMOTE — SOURCE-AVAILABLE LICENSE
+
+Copyright (c) 2026 CursorRemote contributors
+
+---
+
+The source is right here. Read it, learn from it, hack on it for yourself.
+The validation is a modulo check — we know.
+
+WHAT YOU CAN DO:
+- Use this software for anything — personal, commercial, whatever —
+  with a valid license key.
+- Modify the source for your own use. Go wild.
+- Run it on as many of your own machines as you like, as long as each
+  concurrent user has their own license key. One key = one seat.
+
+WHAT YOU CAN'T DO:
+- Remove, bypass, or disable the license validation and then distribute
+  the result. Patching it out for yourself is your business; shipping
+  that patch to others is not.
+- Redistribute this software (or a derivative) as a product. Don't
+  resell it, rebrand it, or wrap it in an installer and charge for
+  the software itself. Charging for support, hosting, consulting, or
+  a SaaS built on top is fine — the software, as software, stays free.
+- Share your license key. Keys are non-transferable.
+
+ONE KEY, ONE SEAT:
+Each license key entitles one person to run the software. If your team
+has five people using CursorRemote, that's five keys. Site licenses and
+volume discounts exist — just ask.
+
+ENFORCEMENT:
+We're not going to brick your computer. But if we find a fork circulating
+with the license check stripped out, we'll enforce this license to the
+extent the law allows. That said — the honor system is still the only
+DRM that doesn't ruin computers.
+
+---
+
+Summary: Use it, modify it, keep the license check intact if you
+distribute it, one key per person, don't resell the software.

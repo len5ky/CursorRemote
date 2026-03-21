@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.js.map
+.env
+
+data/
+releases/
+temp/server.log
+scripts/generate-keys.ts
+azure_token
+# marketing/

@@ -1,0 +1,72 @@
+{
+  "chatContainer": {
+    "strategies": [
+      "#workbench\\.parts\\.auxiliarybar",
+      "div.composer-bar.editor",
+      "[class*='composer-bar']",
+      "[class*='composer-panel']",
+      "[class*='chat-widget']"
+    ]
+  },
+  "approveButton": {
+    "strategies": [
+      "button[aria-label*='Accept']",
+      "button[aria-label*='Approve']",
+      "button[aria-label*='Run']",
+      "button[aria-label*='Allow']"
+    ],
+    "textMatch": ["Accept", "Approve", "Run", "Allow", "Accept All"]
+  },
+  "rejectButton": {
+    "strategies": [
+      "button[aria-label*='Reject']",
+      "button[aria-label*='Deny']",
+      "button[aria-label*='Cancel']"
+    ],
+    "textMatch": ["Reject", "Deny", "Cancel", "Skip"]
+  },
+  "chatInput": {
+    "strategies": [
+      "#workbench\\.parts\\.auxiliarybar [contenteditable='true']",
+      "#workbench\\.parts\\.auxiliarybar textarea",
+      "#workbench\\.parts\\.auxiliarybar [role='textbox']",
+      ".composer-bar [contenteditable='true']",
+      ".composer-bar textarea",
+      "[contenteditable='true']",
+      "textarea"
+    ]
+  },
+  "agentStatus": {
+    "strategies": [
+      "span.auxiliary-bar-chat-title",
+      "[class*='auxiliary-bar-chat-title']",
+      "[class*='status']",
+      "[class*='thinking']",
+      "[class*='spinner']",
+      "[class*='loading']"
+    ]
+  },
+  "chatTabList": {
+    "strategies": [
+      ".agent-sidebar-cell"
+    ]
+  },
+  "newChatButton": {
+    "strategies": [
+      "[data-command-id='composer.createNewComposerTab']",
+      "a.codicon-add-two",
+      "[aria-label*='New Chat']"
+    ]
+  },
+  "modeDropdown": {
+    "strategies": [
+      ".composer-unified-dropdown[data-mode]",
+      ".composer-bar-input-buttons[data-mode]"
+    ]
+  },
+  "modelDropdown": {
+    "strategies": [
+      ".composer-unified-dropdown-model"
+    ]
+  }
+}

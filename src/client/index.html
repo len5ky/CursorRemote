@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#1a1a2e">
+  <title>CursorRemote</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <header id="header">
+      <div class="header-left">
+        <span id="connection-dot" class="dot disconnected"></span>
+        <span id="connection-text">Disconnected</span>
+      </div>
+      <div class="header-right">
+        <span id="agent-status-icon"></span>
+        <span id="agent-status-text">Idle</span>
+      </div>
+    </header>
+
+    <nav id="window-bar" class="window-bar hidden">
+      <div id="window-list" class="window-list"></div>
+    </nav>
+
+    <nav id="tab-bar" class="tab-bar hidden">
+      <div id="tab-list" class="tab-list"></div>
+      <button id="btn-new-chat" class="tab-new-btn" aria-label="New Chat">+</button>
+    </nav>
+
+    <main id="messages" role="log" aria-live="polite">
+      <div id="empty-state" class="empty-state">
+        <p>Waiting for connection to Cursor IDE...</p>
+        <p class="hint">Make sure Cursor is running with<br><code>--remote-debugging-port=9222</code></p>
+      </div>
+    </main>
+
+    <div id="approval-bar" class="approval-bar hidden">
+      <div id="approval-desc" class="approval-desc"></div>
+      <div class="approval-actions">
+        <button id="btn-approve" class="btn btn-approve">Accept</button>
+        <button id="btn-reject" class="btn btn-reject">Reject</button>
+      </div>
+    </div>
+
+    <footer id="input-bar">
+      <div id="mode-model-bar" class="mode-model-bar">
+        <button id="pill-mode" class="pill" aria-label="Select mode">
+          <span id="pill-mode-icon" class="pill-icon"></span>
+          <span id="pill-mode-text">Agent</span>
+          <span class="pill-chevron">&#9662;</span>
+        </button>
+        <button id="pill-model" class="pill" aria-label="Select model">
+          <span id="pill-model-text">Auto</span>
+          <span class="pill-chevron">&#9662;</span>
+        </button>
+      </div>
+      <div class="input-wrapper">
+        <textarea
+          id="message-input"
+          placeholder="Send a message..."
+          rows="1"
+          disabled
+        ></textarea>
+        <button id="btn-send" class="btn btn-send" disabled aria-label="Send">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+          </svg>
+        </button>
+      </div>
+    </footer>
+
+    <div id="sheet-overlay" class="sheet-overlay hidden"></div>
+    <div id="sheet-mode" class="bottom-sheet hidden">
+      <div class="sheet-header">Mode</div>
+      <div id="sheet-mode-list" class="sheet-list"></div>
+    </div>
+    <div id="sheet-model" class="bottom-sheet hidden">
+      <div class="sheet-header">Model</div>
+      <div id="sheet-model-list" class="sheet-list"></div>
+    </div>
+  </div>
+
+  <div id="toast-container"></div>
+
+  <script src="socket.io.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

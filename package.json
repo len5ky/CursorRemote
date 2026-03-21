@@ -1,0 +1,246 @@
+{
+  "name": "cursor-remote",
+  "displayName": "CursorRemote",
+  "version": "0.1.37",
+  "description": "Remote control your local Cursor AI agent — monitor, approve, and send tasks from your phone or Telegram.",
+  "publisher": "cursor-remote",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/len5ky/CursorRemote"
+  },
+  "type": "module",
+  "main": "./dist/extension.cjs",
+  "extensionKind": [
+    "ui"
+  ],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "icon": "media/icon.png",
+  "categories": [
+    "Machine Learning",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "cursorRemote.start",
+        "title": "CursorRemote: Start Server"
+      },
+      {
+        "command": "cursorRemote.stop",
+        "title": "CursorRemote: Stop Server"
+      },
+      {
+        "command": "cursorRemote.restart",
+        "title": "CursorRemote: Restart Server"
+      },
+      {
+        "command": "cursorRemote.openWebClient",
+        "title": "CursorRemote: Open Web Client"
+      },
+      {
+        "command": "cursorRemote.showLogs",
+        "title": "CursorRemote: Show Logs"
+      },
+      {
+        "command": "cursorRemote.enterLicenseKey",
+        "title": "CursorRemote: Enter License Key"
+      },
+      {
+        "command": "cursorRemote.buyLicense",
+        "title": "CursorRemote: Buy License"
+      },
+      {
+        "command": "cursorRemote.openSetup",
+        "title": "CursorRemote: Open Setup Panel"
+      }
+    ],
+    "configuration": {
+      "title": "CursorRemote",
+      "properties": {
+        "cursorRemote.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Automatically start the relay server when Cursor launches."
+        },
+        "cursorRemote.cdpUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:9222",
+          "markdownDescription": "Cursor's Chrome DevTools Protocol endpoint URL. Launch Cursor with `--remote-debugging-port=9222` to enable. See the [setup guide](https://github.com/len5ky/CursorRemote/blob/main/docs/setup-guide.md) for details."
+        },
+        "cursorRemote.serverPort": {
+          "type": "number",
+          "default": 3000,
+          "markdownDescription": "Port for the web client server."
+        },
+        "cursorRemote.serverHost": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "markdownDescription": "Bind address for the web client server. Default `127.0.0.1` only allows local access. Set to `0.0.0.0` for LAN/phone access (requires a password). For secure remote access, consider [Tailscale](https://github.com/len5ky/CursorRemote/blob/main/docs/tailscale-setup.md)."
+        },
+        "cursorRemote.pollIntervalMs": {
+          "type": "number",
+          "default": 500,
+          "markdownDescription": "DOM polling frequency in milliseconds."
+        },
+        "cursorRemote.debounceMs": {
+          "type": "number",
+          "default": 300,
+          "markdownDescription": "State broadcast debounce in milliseconds."
+        },
+        "cursorRemote.logLevel": {
+          "type": "string",
+          "default": "info",
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ],
+          "markdownDescription": "Server log level."
+        },
+        "cursorRemote.webappPassword": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Password to protect the web client. A random password is **auto-generated** on first install. See the [security section](https://github.com/len5ky/CursorRemote#security) for best practices."
+        },
+        "cursorRemote.windowTitleQualifier": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Include remote qualifier (e.g. WSL) in window titles."
+        },
+        "cursorRemote.telegram.enabled": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Enable the Telegram bot transport. See the [Telegram setup guide](https://github.com/len5ky/CursorRemote#telegram-setup) for step-by-step instructions."
+        },
+        "cursorRemote.telegram.botToken": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Telegram bot token from [@BotFather](https://t.me/BotFather). See the [Telegram setup guide](https://github.com/len5ky/CursorRemote#telegram-setup)."
+        },
+        "cursorRemote.telegram.allowedUsers": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Comma-separated Telegram user IDs allowed to use the bot. See the [Telegram setup guide](https://github.com/len5ky/CursorRemote#telegram-setup)."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "cursorRemote",
+          "title": "CursorRemote",
+          "icon": "$(radio-tower)"
+        }
+      ]
+    },
+    "views": {
+      "cursorRemote": [
+        {
+          "id": "cursorRemote.status",
+          "name": "Status"
+        }
+      ]
+    },
+    "walkthroughs": [
+      {
+        "id": "cursorRemote.gettingStarted",
+        "title": "Get Started with CursorRemote",
+        "description": "Monitor sessions, approve steps, and send tasks from your phone or Telegram.",
+        "steps": [
+          {
+            "id": "cursorRemote.walkthrough.license",
+            "title": "Enter License Key",
+            "description": "Enter your license key to activate CursorRemote.\n\n[Enter License Key](command:cursorRemote.enterLicenseKey)\n\nDon't have a key? [Buy one here](https://cursor-remote.com/buy?utm_source=extension&utm_medium=walkthrough&utm_campaign=license).",
+            "media": {
+              "markdown": "extension/media/walkthrough/license.md"
+            },
+            "completionEvents": [
+              "onCommand:cursorRemote.enterLicenseKey"
+            ]
+          },
+          {
+            "id": "cursorRemote.walkthrough.cdp",
+            "title": "Verify CDP Connection",
+            "description": "Launch Cursor with `--remote-debugging-port=9222` and start the server.\n\n[Start Server](command:cursorRemote.start)",
+            "media": {
+              "markdown": "extension/media/walkthrough/cdp.md"
+            },
+            "completionEvents": [
+              "onCommand:cursorRemote.start"
+            ]
+          },
+          {
+            "id": "cursorRemote.walkthrough.networking",
+            "title": "Set Up Network Access",
+            "description": "By default, the server only listens on localhost. To access from your phone, open the Setup Panel.\n\n[Open Setup Panel](command:cursorRemote.openSetup)",
+            "media": {
+              "markdown": "extension/media/walkthrough/networking.md"
+            },
+            "completionEvents": [
+              "onCommand:cursorRemote.openSetup"
+            ]
+          },
+          {
+            "id": "cursorRemote.walkthrough.telegram",
+            "title": "Telegram Bot (optional)",
+            "description": "Connect a Telegram bot for mobile notifications and commands.\n\n[Set Up Telegram](command:cursorRemote.openSetup)",
+            "media": {
+              "markdown": "extension/media/walkthrough/telegram.md"
+            },
+            "completionEvents": [
+              "onSettingChanged:cursorRemote.telegram.botToken"
+            ]
+          },
+          {
+            "id": "cursorRemote.walkthrough.done",
+            "title": "Open Web Client",
+            "description": "Everything is set up! Open the web client on your phone.\n\n[Open Web Client](command:cursorRemote.openWebClient)",
+            "media": {
+              "markdown": "extension/media/walkthrough/done.md"
+            },
+            "completionEvents": [
+              "onCommand:cursorRemote.openWebClient"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "dev": "mkdir -p temp data && tsx scripts/dev-wrapper.ts",
+    "build": "tsc && rm -rf dist/client && cp -r src/client dist/client && cp node_modules/socket.io/client-dist/socket.io.min.js dist/client/socket.io.min.js",
+    "build:ext": "node extension/esbuild.js --production",
+    "watch:ext": "node extension/esbuild.js --watch",
+    "package": "tsx scripts/bump-build.ts && mkdir -p releases && npx @vscode/vsce package --no-dependencies --out releases/",
+    "vscode:prepublish": "npm run build && npm run build:ext",
+    "release": "tsx scripts/release.ts",
+    "publish:public": "tsx scripts/publish.ts",
+    "start": "mkdir -p temp data && node dist/server/index.js",
+    "discover": "tsx src/discovery/discover-dom.ts"
+  },
+  "dependencies": {
+    "@grammyjs/auto-retry": "^2.0.2",
+    "dotenv": "^17.3.1",
+    "express": "^4.21.0",
+    "grammy": "^1.41.1",
+    "node-html-parser": "^7.1.0",
+    "socket.io": "^4.8.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.5.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.24.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
