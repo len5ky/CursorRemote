@@ -6,6 +6,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.38] - 2026-03-22
+
+### Added
+- Published to Open VSX registry so extension is searchable in Cursor's Extensions panel
+- `--ovsx` flag in publish script to package and publish to Open VSX in one step
+
+### Fixed
+- Excluded `openvsx_token` from .vsix packaging and public repo sync
+
 ## [0.1.37] - 2026-03-21
 
 ### Added

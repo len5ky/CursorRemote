@@ -8,4 +8,5 @@ releases/
 temp/server.log
 scripts/generate-keys.ts
 azure_token
+openvsx_token
 # marketing/

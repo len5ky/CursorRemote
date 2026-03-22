@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { ChildProcess, spawn, exec } from 'child_process';
 import { join } from 'path';
-import { mkdirSync, existsSync } from 'fs';
+import { mkdirSync, existsSync, writeFileSync, unlinkSync, watch, type FSWatcher } from 'fs';
 import { EventEmitter } from 'events';
 import { buildEnvFromConfig } from './config-bridge.js';
 import { appendLogLine, type UnifiedOutputChannel } from './output-channel.js';
@@ -21,8 +21,11 @@ export class ServerManager extends EventEmitter {
   private _serverState: ServerState = 'stopped';
   private _isOwner = false;
   private _takingOver = false;
+  private _reactingToFlag = false;
   private getLicenseKey: () => Promise<string | undefined>;
   private readonly windowName: string;
+  private readonly manualStopPath: string;
+  private dirWatcher: FSWatcher | null = null;
 
   get serverState(): ServerState {
     return this._serverState;
@@ -50,6 +53,54 @@ export class ServerManager extends EventEmitter {
     this.windowName = vscode.workspace.name
       ?? vscode.workspace.workspaceFolders?.[0]?.name
       ?? 'unknown';
+
+    const dataDir = context.globalStorageUri.fsPath;
+    this.manualStopPath = join(dataDir, 'manual-stop');
+  }
+
+  private isManualStopped(): boolean {
+    return existsSync(this.manualStopPath);
+  }
+
+  private setManualStop(stopped: boolean): void {
+    try {
+      if (stopped) {
+        const dir = join(this.manualStopPath, '..');
+        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+        writeFileSync(this.manualStopPath, String(Date.now()));
+      } else {
+        if (existsSync(this.manualStopPath)) unlinkSync(this.manualStopPath);
+      }
+    } catch (err) {
+      this.outputChannel.warn(`[${this.windowName}] Flag file error: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  startDirWatcher(): void {
+    const dataDir = this.context.globalStorageUri.fsPath;
+    if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
+
+    try {
+      this.dirWatcher = watch(dataDir, (eventType, filename) => {
+        if (filename !== 'manual-stop') return;
+        if (this._reactingToFlag) return;
+
+        const flagExists = this.isManualStopped();
+        if (flagExists && this._serverState !== 'stopped') {
+          this.outputChannel.info(`[${this.windowName}] Manual-stop flag detected — stopping.`);
+          this.stop().catch(err => {
+            this.outputChannel.warn(`[${this.windowName}] Flag-triggered stop failed: ${err}`);
+          });
+        } else if (!flagExists && this._serverState === 'stopped') {
+          this.outputChannel.info(`[${this.windowName}] Manual-stop flag removed — starting.`);
+          this.start().catch(err => {
+            this.outputChannel.warn(`[${this.windowName}] Flag-triggered start failed: ${err}`);
+          });
+        }
+      });
+    } catch (err) {
+      this.outputChannel.warn(`[${this.windowName}] Could not watch data dir: ${err instanceof Error ? err.message : err}`);
+    }
   }
 
   private getHealthUrl(): { port: string; host: string; url: string } {
@@ -74,6 +125,10 @@ export class ServerManager extends EventEmitter {
   }
 
   async start(): Promise<void> {
+    this._reactingToFlag = true;
+    this.setManualStop(false);
+    this._reactingToFlag = false;
+
     if (this.child) {
       vscode.window.showInformationMessage('Server is already running (owned by this window).');
       return;
@@ -171,7 +226,13 @@ export class ServerManager extends EventEmitter {
     this.emit('started');
   }
 
-  async stop(): Promise<void> {
+  async stop(manual = false): Promise<void> {
+    if (manual) {
+      this._reactingToFlag = true;
+      this.setManualStop(true);
+      this._reactingToFlag = false;
+    }
+
     this.stopHealthPolling();
 
     if (!this.child) {
@@ -204,7 +265,7 @@ export class ServerManager extends EventEmitter {
   }
 
   async restart(): Promise<void> {
-    await this.stop();
+    await this.stop(true);
     await this.start();
   }
 
@@ -262,6 +323,13 @@ export class ServerManager extends EventEmitter {
 
   private async attemptTakeover(): Promise<void> {
     if (this._takingOver || this.child) return;
+
+    if (this.isManualStopped()) {
+      this.outputChannel.info(`[${this.windowName}] Manual stop active — not taking over.`);
+      this.setState('stopped');
+      return;
+    }
+
     this._takingOver = true;
 
     const jitter = Math.floor(Math.random() * MAX_TAKEOVER_JITTER_MS);
@@ -323,6 +391,10 @@ export class ServerManager extends EventEmitter {
   }
 
   dispose(): void {
+    if (this.dirWatcher) {
+      this.dirWatcher.close();
+      this.dirWatcher = null;
+    }
     this.stopHealthPolling();
     if (this.child) {
       try { this.child.kill('SIGTERM'); } catch { /* ignore */ }

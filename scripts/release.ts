@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync } from 'fs';
 import { execSync } from 'child_process';
 import { resolve } from 'path';
+import { updateVsixInstallDocs } from './update-vsix-install-docs.js';
 
 const PKG_PATH = resolve(process.cwd(), 'package.json');
 const CHANGELOG_PATH = resolve(process.cwd(), 'CHANGELOG.md');
@@ -39,6 +40,8 @@ function main(): void {
   writeFileSync(PKG_PATH, JSON.stringify(pkg, null, 2) + '\n', 'utf-8');
   console.log(`✓ Updated package.json`);
 
+  updateVsixInstallDocs(newVersion);
+
   const changelog = readFileSync(CHANGELOG_PATH, 'utf-8');
   const unreleasedHeader = '## [Unreleased]';
   const newHeader = `## [Unreleased]\n\n## [${newVersion}] - ${todayDate()}`;
@@ -51,15 +54,17 @@ function main(): void {
     console.warn('⚠ Could not find [Unreleased] header in CHANGELOG.md');
   }
 
-  execSync(`git add package.json CHANGELOG.md`, { stdio: 'inherit' });
+  execSync(
+    `git add package.json CHANGELOG.md README.md docs/setup-guide.md`,
+    { stdio: 'inherit' },
+  );
   execSync(`git commit -m "release: v${newVersion}"`, { stdio: 'inherit' });
   execSync(`git tag v${newVersion}`, { stdio: 'inherit' });
 
   console.log(`\n✓ Created commit and tag v${newVersion}`);
   console.log(`\nNext steps:`);
   console.log(`  git push && git push --tags`);
-  console.log(`  vsce package`);
-  console.log(`  vsce publish`);
+  console.log(`  npm run publish:public -- --commit --push --ovsx`);
 }
 
 main();

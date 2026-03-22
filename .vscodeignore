@@ -20,6 +20,7 @@ extension/esbuild.js
 .env
 .env.example
 azure_token
+openvsx_token
 .gitignore
 dist/server/**
 !dist/server/bundle.mjs

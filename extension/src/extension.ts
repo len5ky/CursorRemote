@@ -49,13 +49,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     () => licenseManager.getKey()
   );
 
+  serverManager.startDirWatcher();
+
   const treeView = new StatusTreeView(serverManager, licenseManager);
 
   context.subscriptions.push(
     outputChannel,
     vscode.window.registerTreeDataProvider('cursorRemote.status', treeView),
     vscode.commands.registerCommand('cursorRemote.start', () => serverManager!.start()),
-    vscode.commands.registerCommand('cursorRemote.stop', () => serverManager!.stop()),
+    vscode.commands.registerCommand('cursorRemote.stop', () => serverManager!.stop(true)),
     vscode.commands.registerCommand('cursorRemote.restart', () => serverManager!.restart()),
     vscode.commands.registerCommand('cursorRemote.openWebClient', () => serverManager!.openWebClient()),
     vscode.commands.registerCommand('cursorRemote.showLogs', () => outputChannel.show()),
