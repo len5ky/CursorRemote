@@ -48,7 +48,7 @@ async function waitForFreshExtraction(stateManager: StateManager, genBefore: num
 
 const TOPIC_CREATE_DELAY_MS = 1500;
 const PURGE_SCAN_MAX = 10000;
-const DEFAULT_HISTORY_COUNT = 30;
+const DEFAULT_HISTORY_COUNT = 5;
 
 // --- /register ---
 

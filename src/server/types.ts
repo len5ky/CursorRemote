@@ -1,3 +1,4 @@
+// Core relay state and chat element typings.
 export interface CursorWindow {
   id: string;
   title: string;
@@ -5,9 +6,52 @@ export interface CursorWindow {
   wsUrl?: string;
 }
 
+/** Raw DOM element snapshot — what was actually in the DOM, independent of parsing. */
+export interface RawElement {
+  flatIndex: number;
+  role?: string;
+  kind?: string;
+  messageId?: string;
+  toolCallId?: string;
+  toolStatus?: string;
+  /** Key CSS class/element indicators found on this wrapper. */
+  indicators: string[];
+  /** First ~120 chars of textContent. */
+  textPreview: string;
+  /** What ChatElement type the parser decided this was (or 'skipped'). */
+  parsedAs: string;
+}
+
+export interface RawSignals {
+  shimmer: Array<{ text: string; inToolCall: boolean; inHeader: boolean }>;
+  loadingIndicator: boolean;
+  statusEl?: { text: string; classes: string };
+  /** Per-element DOM inventory — raw attributes and indicator classes for every [data-flat-index]. */
+  elements: RawElement[];
+  /** Activity-related elements NOT inside any [data-flat-index] wrapper. */
+  orphanIndicators: Array<{ cls: string; text: string; parentCls: string }>;
+}
+
+export interface ComposerQueueItem {
+  id: string;
+  text: string;
+}
+
+export interface ComposerQueueState {
+  items: ComposerQueueItem[];
+  /** e.g. "2 Queued" from toolbar header */
+  queueLabel?: string;
+}
+
 export interface CursorState {
   connected: boolean;
   agentStatus: AgentStatus;
+  /** Live activity label; null means explicitly cleared on the wire. */
+  agentActivityText: string | null;
+  /** True only when the server believes work is actively in progress right now. */
+  agentActivityLive: boolean;
+  /** Provenance of the current activity signal, for transports/debugging. */
+  agentActivitySource: ActivitySource;
   messages: ChatElement[];
   pendingApprovals: Approval[];
   inputAvailable: boolean;
@@ -16,6 +60,9 @@ export interface CursorState {
   model: ModelInfo;
   windows: CursorWindow[];
   activeWindowId: string;
+  /** Prompts queued in composer toolbar (outside transcript). */
+  composerQueue: ComposerQueueState;
+  _rawSignals?: RawSignals;
 }
 
 export interface ChatTab {
@@ -44,6 +91,13 @@ export type AgentStatus =
   | 'waiting_approval'
   | 'error';
 
+export type ActivitySource =
+  | 'none'
+  | 'shimmer'
+  | 'loading_tool'
+  | 'loading_indicator'
+  | 'tail_thought';
+
 export type ChatElement =
   | HumanMessage
   | AssistantMessage
@@ -60,6 +114,21 @@ export interface HumanMessage {
   flatIndex: number;
   text: string;
   mentions: { name: string; mentionType: string }[];
+  /** Quoted / reply preview from composer (e.g. ProseMirror blockquote). */
+  quoted?: { text: string };
+}
+
+export type DiffLineKind = 'add' | 'rem' | 'ctx' | 'meta' | 'hunk';
+
+/** Native web/Telegram rendering: structured code or diff (no mirrored Monaco HTML). */
+export interface CodeBlockItem {
+  blockKind: 'code' | 'diff';
+  filename?: string;
+  language?: string;
+  /** Flat joined text (search, fallback, simple pre) */
+  code: string;
+  /** Present when blockKind === 'diff'; line-level add/rem/ctx from live Monaco DOM */
+  diffLines?: { kind: DiffLineKind; text: string }[];
 }
 
 export interface AssistantMessage {
@@ -68,7 +137,7 @@ export interface AssistantMessage {
   flatIndex: number;
   text: string;
   html: string;
-  codeBlocks: { language?: string; filename?: string; code: string }[];
+  codeBlocks: CodeBlockItem[];
 }
 
 export interface ToolCallElement {
@@ -85,6 +154,8 @@ export interface ToolCallElement {
   summaryText?: string;
   actions?: RunAction[];
   blocked?: string;
+  /** Structured diff/code for edit tools; web client renders natively */
+  diffBlock?: CodeBlockItem;
 }
 
 export interface ThoughtBlock {
@@ -94,6 +165,8 @@ export interface ThoughtBlock {
   duration: string;
   action?: string;
   detail?: string;
+  /** Cursor step-group: umbrella row (e.g. Explored) vs inner thinking row */
+  thoughtKind?: 'step_summary' | 'thinking_step';
 }
 
 export interface PlanTodo {
@@ -116,8 +189,14 @@ export interface PlanBlock {
   todosCompleted: number;
   todosTotal: number;
   description?: string;
+  /** Raw markdown HTML from `.composer-create-plan-text .markdown-root` (web client). */
+  descriptionHtml?: string;
   todos?: PlanTodo[];
+  /** Hidden todo rows behind "N more" in Cursor (estimated). */
+  todosMoreCount?: number;
   model?: string;
+  /** Click to open plan-scoped model dropdown in Cursor. */
+  modelDropdownSelectorPath?: string;
   actions?: PlanAction[];
 }
 
@@ -152,6 +231,7 @@ export interface LoadingIndicator {
   type: 'loading';
   id: string;
   flatIndex: number;
+  text?: string;
 }
 
 export interface Approval {

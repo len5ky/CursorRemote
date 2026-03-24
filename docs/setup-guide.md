@@ -46,7 +46,7 @@ The CursorRemote extension provides the easiest setup experience with built-in s
 Download the latest `.vsix` from [releases](https://github.com/len5ky/CursorRemote/releases) and install:
 
 ```bash
-cursor --install-extension cursor-remote-0.1.38.vsix
+cursor --install-extension cursor-remote-0.1.39.vsix
 ```
 
 Or in Cursor: Command Palette (`Ctrl+Shift+P`) > **Extensions: Install from VSIX...** > select the file.
@@ -77,6 +77,10 @@ Run **CursorRemote: Open Setup Panel** to configure:
 3. Click **Save & Restart** to apply changes.
 
 Open `http://<server-ip>:<port>` in any browser on your phone, tablet, or another computer.
+
+### Web client — code and diffs
+
+Assistant **code** and file-edit **diffs** are not copied as Cursor’s Monaco HTML. The relay sends structured **`codeBlocks`** / **`diffBlock`**; the UI shows a compact card (~**seven lines** with scroll inside the card, momentum scrolling on iOS). Tap the **expand** control to open a **full-screen** reader (large close control, tap outside or Escape to dismiss). This keeps long patches readable on small screens without dominating the chat.
 
 ### Telegram (Extension)
 
@@ -257,7 +261,7 @@ The bot checks permissions and creates topics for all current windows. From now 
 - **Window Monitor** polls all Cursor windows every 10s using **parallel CDP connections** (no visible window switching)
 - New/changed messages are formatted as Telegram HTML and sent to the matching topic
 - If HTML fails (unsupported tags), messages are retried as plain text
-- A **rate-limited send queue** prevents 429 errors (500ms sends, 100ms edits)
+- A **rate-limited send queue** prevents 429 errors (~300ms between Telegram sends, 100ms between edits; see `send-queue.ts` / transport config)
 - **Data files** in `data/` (all gitignored):
   - `license.key` -- license key (required on first run)
   - `telegram-auth.json` -- registration token + registered users with usernames

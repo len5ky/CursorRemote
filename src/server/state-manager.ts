@@ -1,10 +1,14 @@
 import { EventEmitter } from 'events';
 import type { CursorState, CursorWindow } from './types.js';
+import { AGENT_ACTIVITY_STALE_MS } from './activity-stale.js';
 
 function emptyState(): CursorState {
   return {
     connected: false,
     agentStatus: 'idle',
+    agentActivityText: null,
+    agentActivityLive: false,
+    agentActivitySource: 'none',
     messages: [],
     pendingApprovals: [],
     inputAvailable: false,
@@ -13,6 +17,7 @@ function emptyState(): CursorState {
     model: { current: 'Auto', currentId: '' },
     windows: [],
     activeWindowId: '',
+    composerQueue: { items: [] },
   };
 }
 
@@ -24,6 +29,15 @@ export class StateManager extends EventEmitter {
   private consecutiveNulls = 0;
   private readonly nullWarningThreshold = 10;
   private _generation = 0;
+  /** When the current activity string first appeared (unchanged since). */
+  private activityStableSince: number | null = null;
+  private activityStableText: string | undefined = undefined;
+  /**
+   * After staleness clears `agentActivityText`, the DOM often keeps sending the same
+   * string every poll; suppress that exact label until it changes or clears (Telegram
+   * does not re-post activity when the snapshot is otherwise unchanged).
+   */
+  private activitySuppressedMatch: string | undefined = undefined;
 
   get generation(): number {
     return this._generation;
@@ -60,11 +74,83 @@ export class StateManager extends EventEmitter {
     newState.windows = this.currentState.windows;
     newState.activeWindowId = this.currentState.activeWindowId;
 
-    const patch = this.diff(this.currentState, newState);
+    const stateForApply = this.applyActivityStaleness(newState);
+
+    const patch = this.diff(this.currentState, stateForApply);
     if (!patch) return;
 
-    this.currentState = newState;
+    this.currentState = stateForApply;
     this.schedulePatch(patch);
+  }
+
+  /**
+   * Drop `agentActivityText` after AGENT_ACTIVITY_STALE_MS with no text change
+   * (same semantics as Telegram's ephemeral activity deletion) so the web header
+   * does not show "Thinking" forever when Telegram has already removed the line.
+   */
+  private applyActivityStaleness(newState: CursorState): CursorState {
+    const text = newState.agentActivityText?.trim()
+      ? newState.agentActivityText.trim()
+      : null;
+
+    if (!text) {
+      this.activityStableSince = null;
+      this.activityStableText = undefined;
+      this.activitySuppressedMatch = undefined;
+      if (newState.agentActivityText === null || newState.agentActivityText === '') {
+        return newState;
+      }
+      return {
+        ...newState,
+        agentActivityText: null,
+        agentActivityLive: false,
+        agentActivitySource: 'none',
+      };
+    }
+
+    if (
+      this.activitySuppressedMatch != null &&
+      text === this.activitySuppressedMatch
+    ) {
+      return {
+        ...newState,
+        agentStatus:
+          newState.agentStatus === 'waiting_approval' || newState.agentStatus === 'error'
+            ? newState.agentStatus
+            : 'idle',
+        agentActivityText: null,
+        agentActivityLive: false,
+        agentActivitySource: 'none',
+      };
+    }
+
+    if (this.activitySuppressedMatch != null && text !== this.activitySuppressedMatch) {
+      this.activitySuppressedMatch = undefined;
+    }
+
+    const now = Date.now();
+    if (text === this.activityStableText && this.activityStableSince != null) {
+      if (now - this.activityStableSince >= AGENT_ACTIVITY_STALE_MS) {
+        this.activityStableSince = null;
+        this.activityStableText = undefined;
+        this.activitySuppressedMatch = text;
+        return {
+          ...newState,
+          agentStatus:
+            newState.agentStatus === 'waiting_approval' || newState.agentStatus === 'error'
+              ? newState.agentStatus
+              : 'idle',
+          agentActivityText: null,
+          agentActivityLive: false,
+          agentActivitySource: 'none',
+        };
+      }
+      return newState;
+    }
+
+    this.activityStableText = text;
+    this.activityStableSince = now;
+    return newState;
   }
 
   onConnectionChanged(connected: boolean): void {
@@ -97,6 +183,21 @@ export class StateManager extends EventEmitter {
 
     if (prev.agentStatus !== next.agentStatus) {
       patch.agentStatus = next.agentStatus;
+      hasChange = true;
+    }
+
+    if (prev.agentActivityText !== next.agentActivityText) {
+      patch.agentActivityText = next.agentActivityText;
+      hasChange = true;
+    }
+
+    if (prev.agentActivityLive !== next.agentActivityLive) {
+      patch.agentActivityLive = next.agentActivityLive;
+      hasChange = true;
+    }
+
+    if (prev.agentActivitySource !== next.agentActivitySource) {
+      patch.agentActivitySource = next.agentActivitySource;
       hasChange = true;
     }
 
@@ -137,6 +238,11 @@ export class StateManager extends EventEmitter {
 
     if (prev.activeWindowId !== next.activeWindowId) {
       patch.activeWindowId = next.activeWindowId;
+      hasChange = true;
+    }
+
+    if (JSON.stringify(prev.composerQueue) !== JSON.stringify(next.composerQueue)) {
+      patch.composerQueue = next.composerQueue;
       hasChange = true;
     }
 

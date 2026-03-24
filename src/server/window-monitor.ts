@@ -4,7 +4,18 @@ import { extractWorkspaceName } from './cdp-bridge.js';
 import type { CDPBridge } from './cdp-bridge.js';
 import type { StateManager } from './state-manager.js';
 import type { DOMExtractor } from './dom-extractor.js';
-import type { ChatElement, Approval, AgentStatus, ChatTab, CursorWindow, CursorState, ServerConfig, SelectorConfig } from './types.js';
+import type {
+  ChatElement,
+  Approval,
+  AgentStatus,
+  ChatTab,
+  ComposerQueueState,
+  CursorWindow,
+  CursorState,
+  ServerConfig,
+  SelectorConfig,
+} from './types.js';
+import { applyDerivedActivityToState } from './activity-derive.js';
 
 export interface WindowSnapshot {
   windowId: string;
@@ -13,6 +24,10 @@ export interface WindowSnapshot {
   chatTabs: ChatTab[];
   pendingApprovals: Approval[];
   agentStatus: AgentStatus;
+  agentActivityText: string | null;
+  agentActivityLive: boolean;
+  agentActivitySource: CursorState['agentActivitySource'];
+  composerQueue: ComposerQueueState;
   lastUpdated: number;
 }
 
@@ -23,16 +38,52 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Lightweight fingerprint of the last message's content length.
- * Detects streaming content changes without expensive full comparison.
+ * Type-specific content key for a single element.
+ * Returns a string that changes whenever the element's visible content changes.
+ */
+function elementContentKey(el: ChatElement): string {
+  switch (el.type) {
+    case 'assistant': return String(el.html?.length ?? el.text?.length ?? 0);
+    case 'human': return String(el.text.length);
+    case 'tool': return `${el.status}:${el.action}:${el.filename ?? ''}`;
+    case 'run_command': return `${el.command.length}:${el.actions.length}`;
+    case 'thought':
+      return `${el.thoughtKind ?? ''}:${el.action ?? ''}:${el.detail ?? ''}:${el.duration ?? ''}`;
+    case 'plan':
+      return `${el.todosCompleted}/${el.todosTotal}:${(el.descriptionHtml || el.description || '').length}:${el.model ?? ''}`;
+    case 'todo_list': return `${el.todosCompleted}/${el.todosTotal}`;
+    case 'loading': return el.text ?? '';
+  }
+}
+
+/**
+ * Fingerprint of the last message including its type and content.
+ * Detects streaming content changes and element type transitions
+ * (e.g. tool -> run_command at the same data-message-id).
  */
 function messageFingerprint(messages: ChatElement[]): string {
   if (messages.length === 0) return '';
   const last = messages[messages.length - 1];
-  const content = ('html' in last ? (last as { html?: string }).html : undefined)
-    || ('text' in last ? (last as { text?: string }).text : undefined)
-    || '';
-  return `${messages.length}:${last.id}:${content.length}`;
+  return `${messages.length}:${last.type}:${last.id}:${elementContentKey(last)}`;
+}
+
+/**
+ * Lightweight signature over ALL elements' types, ids, and key state.
+ * Catches mid-list changes (tool status transitions, plan progress, type
+ * changes at non-tail positions) that the last-element fingerprint misses.
+ */
+function elementsSignature(messages: ChatElement[]): string {
+  let sig = '';
+  for (const m of messages) {
+    sig += m.type[0] + m.id;
+    if (m.type === 'tool') sig += m.status[0];
+    else if (m.type === 'plan') {
+      sig += m.todosCompleted + (m.descriptionHtml?.length ?? 0) + (m.title?.length ?? 0);
+    }     else if (m.type === 'todo_list') sig += m.todosCompleted;
+    else if (m.type === 'thought') sig += (m.duration || '') + (m.thoughtKind || '');
+    else if (m.type === 'loading' && m.text) sig += m.text.length;
+  }
+  return sig;
 }
 
 /**
@@ -149,16 +200,27 @@ export class WindowMonitor extends EventEmitter {
       chatTabs: state.chatTabs,
       pendingApprovals: state.pendingApprovals,
       agentStatus: state.agentStatus,
+      agentActivityText: state.agentActivityText,
+      agentActivityLive: state.agentActivityLive,
+      agentActivitySource: state.agentActivitySource,
+      composerQueue: state.composerQueue,
       lastUpdated: Date.now(),
     };
 
     const prev = this.snapshots.get(windowId);
+    const queueSig = JSON.stringify(snapshot.composerQueue);
+    const prevQueueSig = prev ? JSON.stringify(prev.composerQueue) : '';
     const changed = !prev
       || prev.messages.length !== snapshot.messages.length
       || (prev.messages.length > 0 && prev.messages[prev.messages.length - 1]?.id !== snapshot.messages[snapshot.messages.length - 1]?.id)
       || prev.agentStatus !== snapshot.agentStatus
+      || prev.agentActivityText !== snapshot.agentActivityText
+      || prev.agentActivityLive !== snapshot.agentActivityLive
+      || prev.agentActivitySource !== snapshot.agentActivitySource
       || prev.pendingApprovals.length !== snapshot.pendingApprovals.length
-      || messageFingerprint(prev.messages) !== messageFingerprint(snapshot.messages);
+      || queueSig !== prevQueueSig
+      || messageFingerprint(prev.messages) !== messageFingerprint(snapshot.messages)
+      || elementsSignature(prev.messages) !== elementsSignature(snapshot.messages);
 
     this.snapshots.set(windowId, snapshot);
 
@@ -247,16 +309,27 @@ export class WindowMonitor extends EventEmitter {
           chatTabs: state.chatTabs,
           pendingApprovals: state.pendingApprovals,
           agentStatus: state.agentStatus,
+          agentActivityText: state.agentActivityText,
+          agentActivityLive: state.agentActivityLive,
+          agentActivitySource: state.agentActivitySource,
+          composerQueue: state.composerQueue,
           lastUpdated: Date.now(),
         };
 
         const prev = this.snapshots.get(win.id);
+        const qSig = JSON.stringify(snapshot.composerQueue);
+        const pqSig = prev ? JSON.stringify(prev.composerQueue) : '';
         const changed = !prev
           || prev.messages.length !== snapshot.messages.length
           || (prev.messages.length > 0 && prev.messages[prev.messages.length - 1]?.id !== snapshot.messages[snapshot.messages.length - 1]?.id)
           || prev.agentStatus !== snapshot.agentStatus
+          || prev.agentActivityText !== snapshot.agentActivityText
+          || prev.agentActivityLive !== snapshot.agentActivityLive
+          || prev.agentActivitySource !== snapshot.agentActivitySource
           || prev.pendingApprovals.length !== snapshot.pendingApprovals.length
-          || messageFingerprint(prev.messages) !== messageFingerprint(snapshot.messages);
+          || qSig !== pqSig
+          || messageFingerprint(prev.messages) !== messageFingerprint(snapshot.messages)
+          || elementsSignature(prev.messages) !== elementsSignature(snapshot.messages);
 
         this.snapshots.set(win.id, snapshot);
 
@@ -298,7 +371,8 @@ export class WindowMonitor extends EventEmitter {
         ),
       ]);
 
-      return result as CursorState | null;
+      const state = result as CursorState | null;
+      return state ? applyDerivedActivityToState(state) : null;
     } catch {
       return null;
     }

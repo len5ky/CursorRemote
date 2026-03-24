@@ -186,7 +186,10 @@ Currently two transports are implemented:
 | Field              | Type               | Description                                  |
 | ------------------ | ------------------ | -------------------------------------------- |
 | `connected`        | `boolean`          | Whether CDP is connected to Cursor           |
-| `agentStatus`      | `AgentStatus`      | Current agent activity state                 |
+| `agentStatus`      | `AgentStatus`      | Durable header status (`idle`, `waiting_approval`, `error`, etc.) |
+| `agentActivityText` | `string \| null` | Live activity label; `null` means explicitly cleared on the wire |
+| `agentActivityLive` | `boolean` | True only when current DOM signals prove active work |
+| `agentActivitySource` | `'none' \| 'shimmer' \| 'loading_tool' \| 'loading_indicator' \| 'tail_thought'` | Provenance of the live activity signal |
 | `messages`         | `ChatElement[]`    | Ordered chat elements (typed union)          |
 | `pendingApprovals` | `Approval[]`       | Tool calls currently awaiting user decision  |
 | `inputAvailable`   | `boolean`          | Whether the chat input is visible/focusable  |
@@ -221,7 +224,7 @@ Each element in the chat is one of eight types, identified by the `type` field:
 | `flatIndex`  | `number`                                                  | Sequential position                |
 | `text`       | `string`                                                  | Plain text content                 |
 | `html`       | `string`                                                  | Sanitized `.markdown-root` HTML    |
-| `codeBlocks` | `{ language?: string; filename?: string; code: string }[]` | Extracted code blocks              |
+| `codeBlocks` | `CodeBlockItem[]` (see §6.11) | Structured code/diff blocks for native web/Telegram rendering |
 
 #### ToolCallElement (`type: 'tool'`)
 
@@ -237,6 +240,7 @@ Each element in the chat is one of eight types, identified by the `type` field:
 | `additions`   | `number?` | Lines added (from edit tool stats)                     |
 | `deletions`   | `number?` | Lines deleted (from edit tool stats)                   |
 | `summaryText` | `string?` | Full compact summary text (fallback)                   |
+| `diffBlock`   | `CodeBlockItem?` | Structured diff/code for edit/review tools (web + Telegram) |
 
 #### ThoughtBlock (`type: 'thought'`)
 
@@ -404,8 +408,8 @@ Mobile-first, single-column layout matching Cursor's dark theme. Four fixed zone
 Each `ChatElement` type renders distinctly:
 
 - **Human messages**: Right-aligned bubble with plain text and mention badges
-- **Assistant messages**: Left-aligned bubble with sanitized HTML from Cursor's markdown renderer, preserving formatting (bold, lists, inline code, links)
-- **Tool calls**: Compact single-line with status icon, action name, target details, and optionally filename with +/- change stats (green/red)
+- **Assistant messages**: Left-aligned bubble with sanitized HTML from Cursor's markdown renderer (prose only: bold, lists, inline code, links). Composer/Shiki widget roots are stripped from `html` so the page does not depend on VS Code theme CSS. **Code and diffs** render from structured `codeBlocks` (`CodeBlockItem`: `blockKind` `code` or `diff`, optional `filename`/`language`, `code` text, and for diffs `diffLines` with `add`/`rem`/`ctx`/`meta`/`hunk`). Blocks are appended after the prose bubble. Each block shows a toolbar (filename or language when known + **full-screen** control). The body sits in **`.code-block-viewport`**: at most ~**7 lines** tall with **scroll** for overflow; full-screen opens a modal (safe areas on mobile, backdrop or Escape closes, large close control).
+- **Tool calls**: Compact single-line with status icon, action name, target details, and optionally filename with +/- change stats (green/red). **Edit / file-review tools** may include **`diffBlock`**: the same `CodeBlockItem` shape as assistant code blocks, rendered under the summary in **`.tool-diff-host`** with the same viewport, scroll, and full-screen behavior.
 - **Thought blocks**: Single line in muted text: "Thought for Xs"
 - **Plan widgets**: Rich card with title, description, scrollable todo list with colored status dots, progress bar, and action buttons (Build, View Plan). See §6.9.
 - **Run commands**: Command card with description header, monospace command text, and action buttons (Run, Skip, Allow). See §6.10.
@@ -483,6 +487,31 @@ An interactive command approval card shown when the agent wants to execute a she
 - "Skip" emits `command:click_action` with the Skip button's `selectorPath`
 - "Allow" emits `command:click_action` with the Allow button's `selectorPath`
 
+### 6.11 Native code blocks & diffs (`codeBlocks`, `diffBlock`, web UX)
+
+**Data model** (`src/server/types.ts` — `CodeBlockItem`):
+
+- `blockKind`: `'code'` | `'diff'`
+- `filename`, `language` (optional)
+- `code`: flat text with real newline preservation for plain blocks (line-aware fallback, not raw `textContent`)
+- `diffLines` (when `blockKind === 'diff'`): `{ kind: 'add'|'rem'|'ctx'|'meta'|'hunk'; text: string }[]` — kinds come from live Monaco line decorations in the extractor, not from parsing mirrored HTML.
+
+**Assistant**: `html` is **`.markdown-root` innerHTML only** (prose). The DOM extractor builds **`codeBlocks`** from `composer-code-block-container` / `composer-message-codeblock` / related paths without merging composer widget HTML into `html`.
+
+**Tools (edit / review)**: When a matching composer block exists, **`diffBlock`** carries the same structured shape; the web client renders it in **`.tool-diff-host`**.
+
+**Patch text without Monaco diff**: If Cursor emits plain patch / unified-diff text (for example `@@` hunks and `+` / `-` lines inside a normal code block), the extractor upgrades it to `blockKind: 'diff'` so the native renderer still shows red/green line styling instead of a flat raw code block.
+
+**Web client** (`src/client/app.js`, `src/client/styles.css`):
+
+- **`createNativeBlockFromItem`**: toolbar + **`.code-block-viewport`** (max height ≈ 7 lines via CSS variables `--cb-font`, `--cb-lh`, `--cb-lines`) + inner `.code-block-diff-plain` (diff rows or `<pre><code>`).
+- **Full screen**: expand control opens **`.code-block-fs-overlay`** (modal, `aria-modal`, safe-area padding, momentum scroll in panel body). Close: control, backdrop, or Escape. Body scroll locked while open.
+- **Mobile**: minimum **44×48px** touch targets on expand and close; `-webkit-overflow-scrolling: touch`; `overscroll-behavior: contain` on scroll regions.
+
+**Telegram**: `formatter.ts` maps composer nodes to `<pre><code>` using structured `codeBlocks` / diff line prefixes where applicable (no Monaco mirror).
+
+**Limitation**: If Cursor has not yet painted editor lines (collapsed widget), `codeBlocks` / `diffBlock` may be empty until a later poll.
+
 ---
 
 ## 7. DOM Extraction Strategy
@@ -508,7 +537,7 @@ The extraction function selects all `[data-flat-index]` elements inside the chat
 | Type        | DOM Indicators                                        | Content Extracted                                     |
 | ----------- | ----------------------------------------------------- | ----------------------------------------------------- |
 | human       | `role=human`, `kind=human`                            | `.aislash-editor-input-readonly` text, `.mention` elements |
-| assistant   | `role=ai`, `kind=assistant`                           | `.markdown-root` innerHTML + textContent, code blocks |
+| assistant   | `role=ai`, `kind=assistant`                           | `.markdown-root` innerHTML + textContent; `codeBlocks` from composer code widgets |
 | tool        | `role=ai`, `kind=tool`                                | `data-tool-call-id`, `data-tool-status`, `.ui-tool-call-line-action/details`, edit stats |
 | plan        | `role=ai`, `kind=tool` + `.composer-create-plan-container` | Plan filename, title, description, todo items with status, Build/View Plan selectors, model |
 | plan (legacy)| `.plan-execution-message-content`                    | Label, title, todo summary counts                     |
@@ -630,10 +659,11 @@ All configuration is via environment variables with sensible defaults:
 | Mobile web client           | Done        | Per-type chat rendering, Cursor-matched theme |
 | Auto-reconnection           | Done        | Both CDP and socket.io sides                  |
 | Browser notifications       | Done        | On pending approvals                          |
-| Plan widget extraction      | Not started | `.composer-create-plan-container` → structured PlanBlock with todos, actions |
-| Plan widget web rendering   | Not started | Rich card with todo list, Build/View Plan buttons |
-| Run command extraction      | Not started | `.composer-terminal-tool-call-block-container` → RunCommand with command text, actions |
-| Run command web rendering   | Not started | Command card with monospace text, Run/Skip/Allow buttons |
+| Plan widget extraction      | Done        | `.composer-create-plan-container` → structured PlanBlock with todos, actions |
+| Plan widget web rendering   | Done        | Rich card with todo list, Build/View Plan buttons |
+| Run command extraction      | Done        | `.composer-terminal-tool-call-block-container` → RunCommand with command text, actions |
+| Run command web rendering   | Done        | Command card with monospace text, Run/Skip/Allow buttons |
+| Native code / diff (web) | Done | `codeBlocks` / `diffBlock` → `.native-code-block`; ~7-line viewport + scroll + full-screen modal; no Monaco HTML mirror |
 | Transport abstraction       | Done        | Transport interface, SendQueue, MessageTracker, WindowMonitor |
 | Telegram transport          | Done        | grammy bot, auto-sync, /register auth, parallel CDP, inline keyboards |
 | Setup documentation         | Partial     | Needs setup guide for new users               |
@@ -665,7 +695,7 @@ All configuration is via environment variables with sensible defaults:
 - **Discord transport**: Reuse the Transport interface for a Discord bot (threads as topics)
 - **Multi-window background sweep**: Periodically cycle through non-active windows to keep all Telegram topics updated
 - **Authentication**: Token-based auth middleware on HTTP and socket.io
-- **File diff preview**: Extract and render code diffs inline in the mobile client
+- **Web code UX**: Optional copy-to-clipboard, configurable inline preview height (default ~7 lines)
 - **Auto-approval rules**: Configurable rules like "auto-approve read operations"
 - **PWA**: Service worker + manifest for "Add to Home Screen"
 - **Push notifications**: Web Push API for alerts when browser is closed
@@ -701,5 +731,5 @@ The system is considered successful when:
 19. Typing in a topic sends the text as a message to the mapped Cursor window+tab
 20. `/mode` and `/model` commands show current state and allow switching via inline keyboards
 21. The bot shows a typing indicator while the agent is active
-22. All outbound API calls are rate-limited via SendQueue (500ms sends, 100ms edits) + auto-retry plugin
+22. All outbound API calls are rate-limited via SendQueue (~300ms sends, 100ms edits in Telegram transport) + auto-retry plugin
 23. Token-based auth (`/register`) with optional `TELEGRAM_ALLOWED_USERS` override. Data persisted in `data/` directory.

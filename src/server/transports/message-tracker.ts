@@ -63,6 +63,11 @@ export class MessageTracker {
     return this.messages.has(this.makeKey(threadId, elementId));
   }
 
+  untrack(threadId: number, elementId: string): void {
+    this.messages.delete(this.makeKey(threadId, elementId));
+    this.scheduleSave();
+  }
+
   clearThread(threadId: number): void {
     for (const [key, msg] of this.messages) {
       if (msg.threadId === threadId) {

@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-Package the CursorRemote relay server as a VS Code / Cursor extension. The extension wraps the server as a managed child process and provides native editor integration: settings UI, setup wizard, status bar, output channel, sidebar tree view, license management, and multi-window coordination. The server code, web client, and Telegram transport are bundled into the extension and run as a single child process.
+Package the CursorRemote relay server as a VS Code / Cursor extension. The extension wraps the server as a managed child process and provides native editor integration: settings UI, setup wizard, status bar, output channel, sidebar tree view, license management, and multi-window coordination. The server code, web client, and Telegram transport are bundled into the extension and run as a single child process. The bundled **web client** renders assistant **`codeBlocks`** and tool **`diffBlock`** as native code/diff UI (~7-line scroll viewport, full-screen reader, mobile touch targets; see `docs/prd.md` §6.11 and `docs/architecture.md` §2.6).
 
 ### 1.1 Problem Statement
 

@@ -14,9 +14,14 @@ import { MessageTracker } from '../message-tracker.js';
 import { SendQueue } from '../send-queue.js';
 import {
   formatElement,
+  formatActivity,
   formatApprovals,
+  formatComposerQueue,
   splitMessage,
+  activityRedundantWithInProgressStepSummary,
+  type FormattedMessage,
 } from './formatter.js';
+import { AGENT_ACTIVITY_STALE_MS } from '../../activity-stale.js';
 import {
   handleSync,
   handleSyncAll,
@@ -40,6 +45,7 @@ const TOPIC_CREATE_DELAY_MS = 1500;
 const dataDir = process.env.DATA_DIR ?? './data';
 const SYNC_STATE_PATH = `${dataDir}/telegram-sync.json`;
 const AUTH_PATH = `${dataDir}/telegram-auth.json`;
+const ACTIVITY_PATH = `${dataDir}/telegram-activity.json`;
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -71,6 +77,7 @@ export class TelegramTransport implements Transport {
   private sendQueue: SendQueue;
 
   private typingInterval: ReturnType<typeof setInterval> | null = null;
+  private activityStaleTimer: ReturnType<typeof setInterval> | null = null;
   private started = false;
   private groupId: number | undefined;
   private seenThreads = new Set<number>();
@@ -78,6 +85,11 @@ export class TelegramTransport implements Transport {
   private pendingSnapshots = new Map<string, WindowSnapshot>();
   private syncEnabled = false;
   private creatingTopic = new Set<string>();
+  private activityMsgIds = new Map<number, number>();
+  private lastActivityText = new Map<number, string>();
+  private activityTimestamps = new Map<number, number>();
+  private queueMsgIds = new Map<number, number>();
+  private lastQueueSig = new Map<number, string>();
   private authState: AuthState;
   private registeredUsers: Set<number>;
 
@@ -109,7 +121,7 @@ export class TelegramTransport implements Transport {
     this.cdpBridge = cdpBridge;
     this.topicManager = new TopicManager();
     this.messageTracker = new MessageTracker(`${dataDir}/telegram-messages.json`);
-    this.sendQueue = new SendQueue({ sendDelayMs: 500, editDelayMs: 100, maxRetries: 3, maxQueueSize: 500 });
+    this.sendQueue = new SendQueue({ sendDelayMs: 300, editDelayMs: 100, maxRetries: 3, maxQueueSize: 500 });
     this.bot = new Bot(config.botToken, { client: { fetch } });
     this.bot.api.config.use(autoRetry({ maxRetryAttempts: 3, maxDelaySeconds: 60 }));
 
@@ -148,26 +160,53 @@ export class TelegramTransport implements Transport {
     console.log(`[telegram] Starting bot (token: ${maskedToken})...`);
 
     const apiBase = `https://api.telegram.org/bot${this.config.botToken}`;
+    const MAX_RETRIES = 5;
+    const BASE_DELAY_MS = 2000;
 
-    try {
-      const resp = await fetch(`${apiBase}/getMe`, { signal: AbortSignal.timeout(10000) });
-      const data = await resp.json() as { ok: boolean; result?: { username?: string } };
-      if (!data.ok) {
-        console.error(`[telegram] getMe returned ok=false — bot token may be invalid`);
-        return;
+    let botUsername: string | undefined;
+    let connected = false;
+
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const resp = await fetch(`${apiBase}/getMe`, { signal: AbortSignal.timeout(10000) });
+        const data = await resp.json() as { ok: boolean; error_code?: number; description?: string; result?: { username?: string } };
+
+        if (data.ok) {
+          botUsername = data.result?.username;
+          connected = true;
+          break;
+        }
+
+        if (resp.status === 401 || data.error_code === 401) {
+          console.error('[telegram] Invalid bot token (401 Unauthorized) — not retrying');
+          return;
+        }
+
+        console.warn(`[telegram] getMe returned ok=false (HTTP ${resp.status}: ${data.description ?? 'unknown'})`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[telegram] Connection attempt ${attempt}/${MAX_RETRIES} failed: ${msg}`);
       }
-      console.log(`[telegram] API reachable — bot: @${data.result?.username}`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[telegram] Cannot reach Telegram API: ${msg}`);
+
+      if (attempt < MAX_RETRIES) {
+        const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        console.log(`[telegram] Retrying in ${(delay / 1000).toFixed(0)}s...`);
+        await sleep(delay);
+      }
+    }
+
+    if (!connected) {
       try {
         await fetch('https://www.google.com', { signal: AbortSignal.timeout(5000) });
         console.error('[telegram] google.com reachable — issue is Telegram-specific (DNS/blocked/token)');
       } catch {
         console.error('[telegram] No outbound HTTPS from this process. Check proxy/firewall for Node.js.');
       }
+      console.error(`[telegram] Giving up after ${MAX_RETRIES} attempts`);
       return;
     }
+
+    console.log(`[telegram] API reachable — bot: @${botUsername}`);
 
     try {
       await fetch(`${apiBase}/deleteWebhook`, { signal: AbortSignal.timeout(5000) });
@@ -176,13 +215,35 @@ export class TelegramTransport implements Transport {
       // non-fatal
     }
 
+    // Probe getUpdates once to detect 409 Conflict (another instance already polling)
+    try {
+      const probe = await fetch(`${apiBase}/getUpdates?limit=1&timeout=0`, { signal: AbortSignal.timeout(10000) });
+      const probeData = await probe.json() as { ok: boolean; error_code?: number; description?: string };
+      if (!probeData.ok && (probe.status === 409 || probeData.error_code === 409)) {
+        console.error('[telegram] 409 Conflict — another bot instance is already polling with this token');
+        console.error('[telegram] Stop the other instance first, or it will fight for updates');
+        return;
+      }
+    } catch {
+      // non-fatal — if getUpdates fails here, bot.start() will handle it
+    }
+
+    this.activityStaleTimer = setInterval(() => this.cleanStaleActivity(), 15000);
+
     this.bot.start({
       onStart: () => {
         console.log(`[telegram] Bot connected (sync: ${this.syncEnabled ? 'on' : 'off'})`);
         this.started = true;
+        this.cleanupPersistedActivity();
       },
     }).catch(err => {
-      console.error(`[telegram] Bot.start() failed: ${err instanceof Error ? err.message : String(err)}`);
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('409') || msg.includes('Conflict')) {
+        console.error('[telegram] 409 Conflict — another bot instance took over polling');
+        console.error('[telegram] Only one process can long-poll per bot token');
+      } else {
+        console.error(`[telegram] Bot.start() failed: ${msg}`);
+      }
     });
   }
 
@@ -191,6 +252,8 @@ export class TelegramTransport implements Transport {
     this.windowMonitor.off('window:update', this.onWindowUpdate);
     this.stateManager.off('state:patch', this.onStatePatch);
     this.stateManager.off('connection:changed', this.onConnectionChanged);
+    if (this.activityStaleTimer) { clearInterval(this.activityStaleTimer); this.activityStaleTimer = null; }
+    this.deleteAllActivityMessages();
     this.stopTyping();
     this.messageTracker.flush();
     try {
@@ -326,7 +389,59 @@ export class TelegramTransport implements Transport {
     this.pendingSnapshots.clear();
     this.topicManager.clearAll();
     this.messageTracker.clearAll();
+    this.deleteAllActivityMessages();
     console.log('[telegram] All state reset');
+  }
+
+  private deleteActivityMessage(threadId: number): void {
+    const msgId = this.activityMsgIds.get(threadId);
+    if (!msgId) return;
+    this.bot.api.deleteMessage(this.chatId!, msgId).catch(() => {});
+    console.log(`[telegram] Activity deleted (msgId=${msgId}, thread=${threadId})`);
+    this.activityMsgIds.delete(threadId);
+    this.lastActivityText.delete(threadId);
+    this.activityTimestamps.delete(threadId);
+    this.saveActivityState();
+  }
+
+  private deleteAllActivityMessages(): void {
+    for (const threadId of [...this.activityMsgIds.keys()]) {
+      this.deleteActivityMessage(threadId);
+    }
+  }
+
+  private cleanStaleActivity(): void {
+    const now = Date.now();
+    for (const [threadId, ts] of this.activityTimestamps) {
+      if (now - ts > AGENT_ACTIVITY_STALE_MS && this.activityMsgIds.has(threadId)) {
+        console.log(`[telegram] Activity stale (${((now - ts) / 1000).toFixed(0)}s), cleaning up`);
+        this.deleteActivityMessage(threadId);
+      }
+    }
+  }
+
+  private saveActivityState(): void {
+    try {
+      const data: Record<string, number> = {};
+      for (const [threadId, msgId] of this.activityMsgIds) data[String(threadId)] = msgId;
+      writeFileSync(ACTIVITY_PATH, JSON.stringify(data));
+    } catch { /* best effort */ }
+  }
+
+  private cleanupPersistedActivity(): void {
+    try {
+      if (!existsSync(ACTIVITY_PATH)) return;
+      const raw = JSON.parse(readFileSync(ACTIVITY_PATH, 'utf-8')) as Record<string, number>;
+      const entries = Object.entries(raw);
+      if (entries.length === 0) return;
+      console.log(`[telegram] Cleaning ${entries.length} persisted activity message(s)`);
+      for (const [, msgId] of entries) {
+        if (this.chatId) {
+          this.bot.api.deleteMessage(this.chatId, msgId).catch(() => {});
+        }
+      }
+      writeFileSync(ACTIVITY_PATH, '{}');
+    } catch { /* ok on first run */ }
   }
 
   // --- Sync state persistence ---
@@ -368,8 +483,8 @@ export class TelegramTransport implements Transport {
       });
     }
 
-    if (patch.agentStatus) {
-      this.updateTypingIndicator(patch.agentStatus);
+    if ('agentStatus' in patch || 'agentActivityLive' in patch || 'agentActivityText' in patch) {
+      this.syncTypingIndicator();
     }
   };
 
@@ -385,9 +500,67 @@ export class TelegramTransport implements Transport {
       () => this.bot.api.sendMessage(this.chatId!, text),
       'send'
     ).catch(() => {});
+
+    if (!connected) {
+      this.deleteAllActivityMessages();
+      this.stopTyping();
+    }
   };
 
   // --- Message processing ---
+
+  private async syncComposerQueueMessage(threadId: number, snapshot: WindowSnapshot): Promise<void> {
+    if (!this.chatId) return;
+    const queue = snapshot.composerQueue ?? { items: [] };
+    const sig = JSON.stringify(queue.items) + '\n' + (queue.queueLabel ?? '');
+    if (this.lastQueueSig.get(threadId) === sig) return;
+
+    const html = formatComposerQueue(queue);
+    const existingId = this.queueMsgIds.get(threadId);
+
+    if (!html) {
+      if (existingId) {
+        try {
+          await this.sendQueue.enqueue(
+            () => this.bot.api.deleteMessage(this.chatId!, existingId),
+            'send'
+          );
+        } catch { /* ok */ }
+        this.queueMsgIds.delete(threadId);
+      }
+      this.lastQueueSig.set(threadId, sig);
+      return;
+    }
+
+    try {
+      if (existingId) {
+        await this.sendQueue.enqueue(
+          () => this.bot.api.editMessageText(this.chatId!, existingId, html, {
+            parse_mode: 'HTML',
+          }),
+          'edit'
+        );
+      } else {
+        const sent = await this.sendQueue.enqueue(
+          () => this.bot.api.sendMessage(this.chatId!, html, {
+            message_thread_id: threadId,
+            parse_mode: 'HTML',
+          }),
+          'send'
+        );
+        this.queueMsgIds.set(threadId, sent.message_id);
+      }
+      this.lastQueueSig.set(threadId, sig);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('message to edit not found')) {
+        this.queueMsgIds.delete(threadId);
+      }
+      if (!msg.includes('message is not modified')) {
+        console.warn(`[telegram] Queue message failed: ${msg}`);
+      }
+    }
+  }
 
   private processWindow(windowId: string, snapshot: WindowSnapshot): void {
     if (this.processing.has(windowId)) {
@@ -450,6 +623,60 @@ export class TelegramTransport implements Transport {
     if (!mapping) return;
 
     const messages = snapshot.messages;
+
+    // --- Activity indicator (runs even when there are zero chat messages) ---
+    const activityText = snapshot.agentActivityLive ? snapshot.agentActivityText : null;
+    const existingActivityMsgId = this.activityMsgIds.get(threadId);
+    const prevActivityText = this.lastActivityText.get(threadId);
+    const now = Date.now();
+    const activitySuppressed = activityRedundantWithInProgressStepSummary(activityText ?? undefined, messages);
+
+    if (activitySuppressed && existingActivityMsgId) {
+      this.deleteActivityMessage(threadId);
+    }
+
+    if (!activitySuppressed) {
+      if (activityText && !this.activityMsgIds.get(threadId)) {
+        const html = formatActivity(activityText);
+        try {
+          const sent = await this.sendQueue.enqueue(
+            () => this.bot.api.sendMessage(this.chatId!, html, {
+              message_thread_id: threadId,
+              parse_mode: 'HTML',
+            }),
+            'send'
+          );
+          this.activityMsgIds.set(threadId, sent.message_id);
+          this.lastActivityText.set(threadId, activityText);
+          this.activityTimestamps.set(threadId, now);
+          this.saveActivityState();
+          console.log(`[telegram] Activity sent: "${activityText}" (msgId=${sent.message_id})`);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[telegram] Activity send failed: ${msg}`);
+        }
+      } else if (activityText && this.activityMsgIds.get(threadId) && activityText !== prevActivityText) {
+        const msgId = this.activityMsgIds.get(threadId)!;
+        const html = formatActivity(activityText);
+        try {
+          await this.sendQueue.enqueue(
+            () => this.bot.api.editMessageText(this.chatId!, msgId, html, {
+              parse_mode: 'HTML',
+            }),
+            'edit'
+          );
+          this.lastActivityText.set(threadId, activityText);
+          this.activityTimestamps.set(threadId, now);
+        } catch { /* message might not have changed */ }
+      }
+    }
+
+    if (!activityText && this.activityMsgIds.has(threadId)) {
+      this.deleteActivityMessage(threadId);
+    }
+
+    await this.syncComposerQueueMessage(threadId, snapshot);
+
     if (messages.length === 0) return;
 
     if (!this.seenThreads.has(threadId)) {
@@ -464,6 +691,7 @@ export class TelegramTransport implements Transport {
       }
     }
 
+    // --- Content messages (real chat elements only, no loading indicators) ---
     const hashCallback = (sp: string) => this.messageTracker.hashSelector(sp);
     const tail = messages.slice(-Math.min(messages.length, MAX_INITIAL_MESSAGES + 10));
 
@@ -486,7 +714,6 @@ export class TelegramTransport implements Transport {
           const parts = splitMessage(formatted.html);
           const allMsgIds = [...tracked.telegramMsgIds];
 
-          // Edit first part
           try {
             await this.sendQueue.enqueue(
               () => this.bot.api.editMessageText(this.chatId!, mainMsgId, parts[0], {
@@ -509,10 +736,8 @@ export class TelegramTransport implements Transport {
             }
           }
 
-          // Send additional parts if message grew
           for (let i = 1; i < parts.length; i++) {
             if (allMsgIds[i]) {
-              // Edit existing continuation
               try {
                 await this.sendQueue.enqueue(
                   () => this.bot.api.editMessageText(this.chatId!, allMsgIds[i], parts[i], {
@@ -523,7 +748,6 @@ export class TelegramTransport implements Transport {
                 );
               } catch { /* ok */ }
             } else {
-              // Send new continuation
               try {
                 const sent = await this.sendQueue.enqueue(
                   () => this.bot.api.sendMessage(this.chatId!, parts[i], {
@@ -548,49 +772,58 @@ export class TelegramTransport implements Transport {
           }
         }
       } else {
-        try {
-          const parts = splitMessage(formatted.html);
-          const msgIds: number[] = [];
-
-          for (let i = 0; i < parts.length; i++) {
-            const isLast = i === parts.length - 1;
-            let sent;
-            try {
-              sent = await this.sendQueue.enqueue(
-                () => this.bot.api.sendMessage(this.chatId!, parts[i], {
-                  message_thread_id: threadId,
-                  parse_mode: 'HTML',
-                  reply_markup: isLast ? formatted.keyboard : undefined,
-                }),
-                'send'
-              );
-            } catch (htmlErr) {
-              const htmlMsg = htmlErr instanceof Error ? htmlErr.message : String(htmlErr);
-              if (htmlMsg.includes('parse entities') || htmlMsg.includes('start tag')) {
-                sent = await this.sendQueue.enqueue(
-                  () => this.bot.api.sendMessage(this.chatId!, parts[i].replace(/<[^>]*>/g, ''), {
-                    message_thread_id: threadId,
-                    reply_markup: isLast ? formatted.keyboard : undefined,
-                  }),
-                  'send'
-                );
-              } else {
-                throw htmlErr;
-              }
-            }
-            msgIds.push(sent.message_id);
-          }
-
-          this.messageTracker.track(threadId, element.id, msgIds, contentHash, element.type);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          if (msg.includes('thread not found') || msg.includes('chat not found')) {
-            this.messageTracker.track(threadId, element.id, [], 'dead-thread', element.type);
-            return;
-          }
-          console.warn(`[telegram] Send failed: ${msg}`);
-        }
+        await this.sendNewMessage(threadId, element, formatted, contentHash);
       }
+    }
+  }
+
+  private async sendNewMessage(
+    threadId: number,
+    element: ChatElement,
+    formatted: FormattedMessage,
+    contentHash: string
+  ): Promise<void> {
+    try {
+      const parts = splitMessage(formatted.html);
+      const msgIds: number[] = [];
+
+      for (let i = 0; i < parts.length; i++) {
+        const isLast = i === parts.length - 1;
+        let sent;
+        try {
+          sent = await this.sendQueue.enqueue(
+            () => this.bot.api.sendMessage(this.chatId!, parts[i], {
+              message_thread_id: threadId,
+              parse_mode: 'HTML',
+              reply_markup: isLast ? formatted.keyboard : undefined,
+            }),
+            'send'
+          );
+        } catch (htmlErr) {
+          const htmlMsg = htmlErr instanceof Error ? htmlErr.message : String(htmlErr);
+          if (htmlMsg.includes('parse entities') || htmlMsg.includes('start tag')) {
+            sent = await this.sendQueue.enqueue(
+              () => this.bot.api.sendMessage(this.chatId!, parts[i].replace(/<[^>]*>/g, ''), {
+                message_thread_id: threadId,
+                reply_markup: isLast ? formatted.keyboard : undefined,
+              }),
+              'send'
+            );
+          } else {
+            throw htmlErr;
+          }
+        }
+        msgIds.push(sent.message_id);
+      }
+
+      this.messageTracker.track(threadId, element.id, msgIds, contentHash, element.type);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('thread not found') || msg.includes('chat not found')) {
+        this.messageTracker.track(threadId, element.id, [], 'dead-thread', element.type);
+        return;
+      }
+      console.warn(`[telegram] Send failed: ${msg}`);
     }
   }
 
@@ -686,8 +919,11 @@ export class TelegramTransport implements Transport {
 
   // --- Typing indicator ---
 
-  private updateTypingIndicator(status: string): void {
-    const active = ['thinking', 'generating', 'running_tool'].includes(status);
+  private syncTypingIndicator(): void {
+    const state = this.stateManager.getCurrentState();
+    const active =
+      state.agentActivityLive &&
+      ['thinking', 'generating', 'running_tool'].includes(state.agentStatus);
 
     if (active && !this.typingInterval) {
       this.sendTyping();

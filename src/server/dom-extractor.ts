@@ -1,12 +1,15 @@
 import type { CdpClient } from './cdp-client.js';
 import type {
+  CodeBlockItem,
   CursorState,
   ChatElement,
   ChatTab,
+  DiffLineKind,
   ModeInfo,
   ModelInfo,
   SelectorConfig,
 } from './types.js';
+import { applyDerivedActivityToState } from './activity-derive.js';
 
 const EVALUATE_TIMEOUT_MS = 5000;
 
@@ -51,6 +54,32 @@ export function extractionFunction(
     return null;
   }
 
+  /**
+   * Line diff stats from Edit tool UI. Tries legacy classes, then +N / -M chip spans
+   * (Cursor sometimes omits or renames .ui-edit-tool-call__additions / __deletions).
+   */
+  function tryParseDiffStatsFromWrapper(scope: Element): { additions?: number; deletions?: number } {
+    let additions: number | undefined;
+    let deletions: number | undefined;
+    const addEl = scope.querySelector('.ui-edit-tool-call__additions');
+    const delEl = scope.querySelector('.ui-edit-tool-call__deletions');
+    const addText = addEl?.textContent?.trim();
+    const delText = delEl?.textContent?.trim();
+    const addM = addText?.match(/\d+/);
+    const delM = delText?.match(/\d+/);
+    if (addM) additions = parseInt(addM[0], 10);
+    if (delM) deletions = parseInt(delM[0], 10);
+    if (additions !== undefined || deletions !== undefined) return { additions, deletions };
+
+    for (const el of Array.from(scope.querySelectorAll('span, div, a'))) {
+      const t = (el.textContent || '').trim();
+      if (additions === undefined && /^\+\d+$/.test(t)) additions = parseInt(t.slice(1), 10);
+      if (deletions === undefined && /^-\d+$/.test(t)) deletions = parseInt(t.slice(1), 10);
+      if (additions !== undefined && deletions !== undefined) break;
+    }
+    return { additions, deletions };
+  }
+
   function buildSelectorPath(el: Element): string {
     const parts: string[] = [];
     let cur: Element | null = el;
@@ -89,6 +118,728 @@ export function extractionFunction(
     }
 
     const elements: ChatElement[] = [];
+    const _rawElements: Array<{
+      flatIndex: number; role?: string; kind?: string; messageId?: string;
+      toolCallId?: string; toolStatus?: string; indicators: string[];
+      textPreview: string; parsedAs: string;
+    }> = [];
+
+    function detectIndicators(el: Element): string[] {
+      const flags: string[] = [];
+      if (el.querySelector('.loading-indicator-v3')) flags.push('loading-v3');
+      if (el.querySelector('.make-shine')) flags.push('make-shine');
+      if (el.querySelector('.ui-collapsible.ui-step-group-collapsible')) flags.push('step-group');
+      if (el.querySelector('.composer-tool-former-message')) flags.push('compact-tool');
+      if (el.querySelector('.composer-terminal-tool-call-block-container') ||
+          el.querySelector('.composer-tool-call-container.composer-terminal-compact-mode')) flags.push('run-command');
+      if (el.querySelector('.plan-execution-message-content')) flags.push('plan-execution');
+      if (el.querySelector('.composer-create-plan-container')) flags.push('plan-create');
+      if (el.querySelector('.composer-edit-file-review-wrapper')) flags.push('edit-review');
+      if (el.querySelector('.todo-list-container')) flags.push('todo-list');
+      if (el.querySelector('.ui-tool-call-line-action')) flags.push('tool-line');
+      if (el.querySelector('.ui-edit-tool-call__filename')) flags.push('edit-file');
+      if (el.querySelector('.composer-message-group')) flags.push('message-group');
+      if (el.querySelector('.markdown-root')) flags.push('markdown');
+      if (el.querySelector('.aislash-editor-input-readonly')) flags.push('human-input');
+      return flags;
+    }
+
+    function durationFromThoughtText(raw: string): string {
+      const t = raw.trim();
+      const forM = t.match(/\bfor\s+([\d.]+\s*s(?:ec(?:onds?)?)?)\b/i);
+      if (forM) return forM[1].replace(/\s+/g, '');
+      const bareM = t.match(/^([\d.]+\s*s(?:ec(?:onds?)?)?)$/i);
+      if (bareM) return bareM[1].replace(/\s+/g, '');
+      return '';
+    }
+
+    function isDurationOnlyThoughtSpan(raw: string): boolean {
+      const t = raw.trim();
+      if (/^for\s+/i.test(t)) return false;
+      return !!durationFromThoughtText(t) && t.length <= 20;
+    }
+
+    /** Header shows a finished timing (for 2s, or trailing 9s). */
+    function collapsibleHeaderTextLooksComplete(ht: string): boolean {
+      const t = ht.replace(/\s+/g, ' ').trim();
+      if (!t) return false;
+      if (/\bfor\s+[\d.]+\s*s(ec(onds?)?)?\b/i.test(t)) return true;
+      if (/\b[\d.]+\s*s(ec(onds?)?)?\s*$/i.test(t)) return true;
+      return false;
+    }
+
+    function parseThoughtSpansFromHeader(headerEl: Element | null): {
+      action: string;
+      detail: string;
+      duration: string;
+    } {
+      if (!headerEl) return { action: '', detail: '', duration: '' };
+      const headerSpans = headerEl.querySelectorAll(':scope > span');
+      let action = '';
+      let detail = '';
+      let duration = '';
+      for (const s of Array.from(headerSpans)) {
+        if (s.classList.contains('cursor-icon') || s.classList.contains('ui-icon')) continue;
+        const t = (s.textContent || '').trim();
+        if (!t) continue;
+        const d = durationFromThoughtText(t);
+        if (d && !duration) duration = d;
+        if (isDurationOnlyThoughtSpan(t)) continue;
+        if (!action) {
+          action = t;
+          continue;
+        }
+        if (t.startsWith('for ')) {
+          duration = duration || t.replace(/^for\s+/i, '').trim();
+          detail = t;
+        } else {
+          detail = detail || t;
+        }
+      }
+      if (!duration) {
+        const fullHeader = (headerEl.textContent || '').replace(/\s+/g, ' ').trim();
+        duration = durationFromThoughtText(fullHeader);
+      }
+      return { action, detail, duration };
+    }
+
+    type RawElRef = {
+      flatIndex: number;
+      role?: string;
+      kind?: string;
+      messageId?: string;
+      toolCallId?: string;
+      toolStatus?: string;
+      indicators: string[];
+      textPreview: string;
+      parsedAs: string;
+    };
+
+    function cleanCodeLine(raw: string): string {
+      return (raw || '').replace(/\u00a0/g, ' ').replace(/\r/g, '').trimEnd();
+    }
+
+    function trimOuterBlankCodeLines(lines: string[]): string[] {
+      const out = [...lines];
+      while (out.length > 0 && out[0].trim().length === 0) out.shift();
+      while (out.length > 0 && out[out.length - 1].trim().length === 0) out.pop();
+      return out;
+    }
+
+    function joinCodeLines(lines: string[]): string {
+      return trimOuterBlankCodeLines(lines.map(cleanCodeLine)).join('\n');
+    }
+
+    function extractStructuredCodeText(root: Element): string {
+      const parts: string[] = [];
+
+      function ensureNewline(): void {
+        if (parts.length === 0) return;
+        const last = parts[parts.length - 1] || '';
+        if (!last.endsWith('\n')) parts.push('\n');
+      }
+
+      function hasBlockishChildren(el: Element): boolean {
+        return Array.from(el.children).some((child) => {
+          const tag = (child.tagName || '').toLowerCase();
+          return (
+            tag === 'div' ||
+            tag === 'p' ||
+            tag === 'li' ||
+            child.matches('.ui-default-code__line-content, .view-line, [data-line], .line')
+          );
+        });
+      }
+
+      function walk(node: Node): void {
+        if (!node) return;
+        if (node.nodeType === Node.TEXT_NODE) {
+          const text = cleanCodeLine(node.textContent || '');
+          if (text) parts.push(text);
+          return;
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) return;
+        const el = node as Element;
+        const tag = (el.tagName || '').toLowerCase();
+        if (tag === 'br') {
+          ensureNewline();
+          return;
+        }
+
+        const lineLike =
+          el.matches('.ui-default-code__line-content, .view-line, [data-line], .line') ||
+          ((tag === 'div' || tag === 'p' || tag === 'li') && !hasBlockishChildren(el));
+
+        const beforeCount = parts.length;
+        el.childNodes.forEach(walk);
+        if (lineLike && parts.length > beforeCount) ensureNewline();
+      }
+
+      walk(root);
+      return joinCodeLines(parts.join('').split('\n'));
+    }
+
+    function extractComposerPlainText(cb: Element): string {
+      const codeContent = cb.querySelector('.ui-default-code__content');
+      const contentRoot =
+        codeContent ||
+        cb.querySelector('.composer-code-block-content, .ui-code-block-content') ||
+        cb;
+      let code = '';
+      if (codeContent) {
+        const lineEls = codeContent.querySelectorAll('.ui-default-code__line-content');
+        code =
+          lineEls.length > 0
+            ? joinCodeLines(
+                Array.from(lineEls).map((l) => l.textContent || '')
+              )
+            : extractStructuredCodeText(codeContent);
+      }
+      if (!code) {
+        const vl = cb.querySelectorAll('.view-line');
+        if (vl.length > 0) {
+          code = joinCodeLines(
+            Array.from(vl)
+              .map((line) => line.textContent || '')
+              .filter((ln) => ln.trim().length > 0)
+          );
+        }
+      }
+      if (!code) {
+        const diffEl = cb.querySelector('.composer-diff-block');
+        if (diffEl) {
+          const vl2 = diffEl.querySelectorAll('.view-line');
+          code = joinCodeLines(Array.from(vl2).map((line) => line.textContent || ''));
+        }
+      }
+      if (!code && contentRoot) code = extractStructuredCodeText(contentRoot);
+      return code;
+    }
+
+    function parseTopPx(style: string | null | undefined): number | undefined {
+      const m = (style || '').match(/top:\s*([\d.]+)px/);
+      return m ? parseFloat(m[1]) : undefined;
+    }
+
+    function parseHeightPx(style: string | null | undefined): number | undefined {
+      const m = (style || '').match(/height:\s*([\d.]+)px/);
+      return m ? parseFloat(m[1]) : undefined;
+    }
+
+    function lineKindFromOverlays(editorRoot: Element, lineTop: number): 'add' | 'rem' | null {
+      const overlayRows = editorRoot.querySelectorAll('.view-overlays > div');
+      for (let i = 0; i < overlayRows.length; i++) {
+        const row = overlayRows[i];
+        const t = parseTopPx(row.getAttribute('style'));
+        if (t === undefined || Math.abs(t - lineTop) > 2) continue;
+        if (row.querySelector('.cdr.line-insert, .cdr.char-insert')) return 'add';
+        if (row.querySelector('.cdr.line-delete, .cdr.char-delete')) return 'rem';
+      }
+      return null;
+    }
+
+    function lineRemFromViewZones(editorRoot: Element, lineTop: number, lineHeight: number): boolean {
+      const zones = editorRoot.querySelectorAll('.view-zones > div');
+      for (let i = 0; i < zones.length; i++) {
+        const z = zones[i];
+        if (!z.classList.contains('diagonal-fill')) continue;
+        const t = parseTopPx(z.getAttribute('style'));
+        const h = parseHeightPx(z.getAttribute('style')) || 16;
+        if (t === undefined) continue;
+        if (lineTop + lineHeight > t && lineTop < t + h) return true;
+      }
+      return false;
+    }
+
+    function extractViewLinesWithKinds(
+      editorRoot: Element,
+      side: 'original' | 'modified'
+    ): { kind: DiffLineKind; text: string }[] {
+      const lines = editorRoot.querySelectorAll('.view-lines > .view-line');
+      const out: { kind: DiffLineKind; text: string }[] = [];
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const text = (line.textContent || '').replace(/\u00a0/g, ' ').replace(/\r/g, '').trimEnd();
+        const lineTop = parseTopPx(line.getAttribute('style'));
+        const ht = parseHeightPx(line.getAttribute('style')) || 16;
+        let kind: DiffLineKind = 'ctx';
+        const topPx = lineTop ?? 0;
+        if (side === 'original') {
+          const o = lineKindFromOverlays(editorRoot, topPx);
+          if (o === 'rem') kind = 'rem';
+          else if (lineRemFromViewZones(editorRoot, topPx, ht)) kind = 'rem';
+        } else if (lineKindFromOverlays(editorRoot, topPx) === 'add') {
+          kind = 'add';
+        }
+        out.push({ kind, text });
+      }
+      return out;
+    }
+
+    function parseUnifiedDiffLines(code: string): { kind: DiffLineKind; text: string }[] | undefined {
+      const lines = (code || '').replace(/\r/g, '').split('\n');
+      if (lines.length === 0) return undefined;
+
+      let addCount = 0;
+      let remCount = 0;
+      let signalCount = 0;
+      const diffLines: { kind: DiffLineKind; text: string }[] = [];
+
+      for (const rawLine of lines) {
+        const line = rawLine.trimEnd();
+        let kind: DiffLineKind = 'ctx';
+
+        if (
+          line.startsWith('*** Begin Patch') ||
+          line.startsWith('*** Update File:') ||
+          line.startsWith('*** Add File:') ||
+          line.startsWith('*** Delete File:') ||
+          line.startsWith('*** End Patch') ||
+          line.startsWith('*** End of File') ||
+          line.startsWith('diff --') ||
+          line.startsWith('index ') ||
+          line.startsWith('--- ') ||
+          line.startsWith('+++ ')
+        ) {
+          kind = 'meta';
+          signalCount++;
+        } else if (line.startsWith('@@')) {
+          kind = 'hunk';
+          signalCount++;
+        } else if (line.startsWith('+') && !line.startsWith('+++')) {
+          kind = 'add';
+          addCount++;
+          signalCount++;
+        } else if (line.startsWith('-') && !line.startsWith('---')) {
+          kind = 'rem';
+          remCount++;
+          signalCount++;
+        }
+
+        diffLines.push({ kind, text: line });
+      }
+
+      const looksDiff =
+        (addCount > 0 || remCount > 0) &&
+        (signalCount >= 2 || lines.some((line) => line.startsWith('@@') || line.startsWith('*** ')));
+
+      return looksDiff ? diffLines : undefined;
+    }
+
+    function extractCodeBlockItem(cb: Element): CodeBlockItem {
+      const headerEl = cb.querySelector('.ui-code-block-header');
+      const filenameEl = cb.querySelector('.composer-code-block-filename, .ui-code-block-filename');
+      const filename = filenameEl ? (filenameEl.textContent || '').trim() || undefined : undefined;
+      const language = headerEl ? headerEl.getAttribute('data-language') || undefined : undefined;
+
+      const diffEditor = cb.querySelector('.monaco-diff-editor');
+      if (diffEditor) {
+        const orig = diffEditor.querySelector('.editor.original');
+        const mod = diffEditor.querySelector('.editor.modified');
+        const diffLines: { kind: DiffLineKind; text: string }[] = [];
+        if (orig) diffLines.push(...extractViewLinesWithKinds(orig, 'original'));
+        if (mod) diffLines.push(...extractViewLinesWithKinds(mod, 'modified'));
+        const code = diffLines.map(function (d) {
+          return d.text;
+        }).join('\n');
+        return { blockKind: 'diff', filename, language, code, diffLines };
+      }
+
+      const code = extractComposerPlainText(cb);
+      const parsedDiffLines = parseUnifiedDiffLines(code);
+      if (parsedDiffLines) {
+        return { blockKind: 'diff', filename, language, code, diffLines: parsedDiffLines };
+      }
+      return { blockKind: 'code', filename, language, code };
+    }
+
+    function extractDiffBlockFromScope(scope: Element): CodeBlockItem | undefined {
+      const block = scope.querySelector('.composer-code-block-container, .composer-message-codeblock');
+      if (!block) return undefined;
+      return extractCodeBlockItem(block);
+    }
+
+    function extractAiTool(
+      toolRoot: Element,
+      flatIndex: number,
+      messageId: string,
+      patchRaw: RawElRef | null
+    ): { element: ChatElement; parsedAs: string } | null {
+      const toolEl = toolRoot.querySelector('[data-tool-call-id]') || toolRoot;
+      const toolCallId = toolEl.getAttribute('data-tool-call-id') || `tool-${flatIndex}`;
+      const toolStatus = (toolEl.getAttribute('data-tool-status') ||
+        toolRoot.getAttribute('data-tool-status') ||
+        'completed') as 'loading' | 'completed';
+      if (patchRaw) {
+        patchRaw.toolCallId = toolCallId;
+        patchRaw.toolStatus = toolStatus;
+      }
+
+      const planContainer = toolRoot.querySelector('.composer-create-plan-container');
+      if (planContainer) {
+        const label = (planContainer.querySelector('.composer-create-plan-label')?.textContent || '').trim();
+        const title = (planContainer.querySelector('.composer-create-plan-title')?.textContent || '').trim();
+        const descRoot = planContainer.querySelector('.composer-create-plan-text .markdown-root');
+        const description = descRoot ? (descRoot.textContent || '').trim() : undefined;
+        const descriptionHtml = descRoot ? (descRoot.innerHTML || '').trim() : undefined;
+
+        const todoItems = planContainer.querySelectorAll('.composer-create-plan-todo-item');
+        const todos: { text: string; status: 'pending' | 'completed' | 'in_progress' }[] = [];
+        let todosCompleted = 0;
+        let todosTotal = 0;
+        let todosMoreCount: number | undefined;
+        for (const item of Array.from(todoItems)) {
+          if (item.querySelector('.composer-plan-todo-ellipsis')) {
+            const moreEl = item.querySelector('.composer-plan-todo-more-text');
+            const moreText = (moreEl?.textContent || '').trim();
+            const moreMatch = moreText.match(/(\d+)\s+more/i);
+            if (moreMatch) todosMoreCount = parseInt(moreMatch[1], 10);
+            continue;
+          }
+          const contentEl = item.querySelector('.composer-create-plan-todo-content');
+          if (!contentEl) continue;
+          const text = (contentEl.textContent || '').trim();
+          if (!text) continue;
+          const indicator = item.querySelector('.composer-plan-todo-indicator');
+          let status: 'pending' | 'completed' | 'in_progress' = 'pending';
+          if (indicator) {
+            const cls = indicator.className || '';
+            if (cls.includes('completed')) {
+              status = 'completed';
+              todosCompleted++;
+            } else if (cls.includes('in_progress') || cls.includes('in-progress')) status = 'in_progress';
+          }
+          todosTotal++;
+          todos.push({ text, status });
+        }
+
+        const todosHeader = (planContainer.querySelector('.composer-create-plan-todos-header')?.textContent || '').trim();
+        const headerMatch = todosHeader.match(/(\d+)/);
+        if (headerMatch && todosTotal === 0) {
+          todosTotal = parseInt(headerMatch[0], 10);
+        }
+
+        const actions: { label: string; type: 'view_plan' | 'build'; selectorPath: string }[] = [];
+        const viewPlanBtn = planContainer.querySelector('.composer-create-plan-view-plan-button');
+        if (viewPlanBtn) {
+          actions.push({
+            label: 'View Plan',
+            type: 'view_plan' as const,
+            selectorPath: buildSelectorPath(viewPlanBtn),
+          });
+        }
+        let buildBtn: Element | null = null;
+        const buildCandidates = planContainer.querySelectorAll('.composer-create-plan-build-button');
+        for (const b of Array.from(buildCandidates)) {
+          const tx = (b.textContent || '').replace(/\s+/g, ' ').trim();
+          if (/build/i.test(tx) && tx.length > 2) {
+            buildBtn = b;
+            break;
+          }
+        }
+        if (!buildBtn && buildCandidates.length > 0) buildBtn = buildCandidates[0];
+        if (buildBtn) {
+          actions.push({ label: 'Build', type: 'build' as const, selectorPath: buildSelectorPath(buildBtn) });
+        }
+
+        const modelEl = planContainer.querySelector('.composer-unified-dropdown-model');
+        let model: string | undefined;
+        let modelDropdownSelectorPath: string | undefined;
+        if (modelEl) {
+          modelDropdownSelectorPath = buildSelectorPath(modelEl);
+          const spans = modelEl.querySelectorAll('span');
+          for (const s of Array.from(spans)) {
+            const t = (s.textContent || '').trim();
+            if (t && !t.includes('chevron') && t.length > 1) {
+              model = t;
+              break;
+            }
+          }
+        }
+
+        return {
+          element: {
+            type: 'plan' as const,
+            id: messageId,
+            flatIndex,
+            label,
+            title,
+            description,
+            descriptionHtml: descriptionHtml || undefined,
+            todosCompleted,
+            todosTotal,
+            todos: todos.length > 0 ? todos : undefined,
+            todosMoreCount,
+            model,
+            modelDropdownSelectorPath,
+            actions: actions.length > 0 ? actions : undefined,
+          },
+          parsedAs: 'plan',
+        };
+      }
+
+      const runContainer =
+        toolRoot.querySelector('.composer-terminal-tool-call-block-container') ||
+        toolRoot.querySelector('.composer-tool-call-container.composer-terminal-compact-mode');
+      if (runContainer) {
+        const descEl = runContainer.querySelector('.composer-terminal-top-header-description');
+        const candidatesEl = runContainer.querySelector('.composer-terminal-top-header-candidates');
+        const commandEl = runContainer.querySelector('.composer-terminal-command-expanded-text');
+        const description = (descEl?.textContent || '').trim();
+        const candidates = (candidatesEl?.textContent || '').trim();
+
+        let command = '';
+        if (commandEl) {
+          const rawCmd = commandEl.textContent || '';
+          const cmdLines = rawCmd.split('\n');
+          const nonEmpty = cmdLines.filter(function (l: string) {
+            return l.trim().length > 0;
+          });
+          let minIndent = 0;
+          if (nonEmpty.length > 0) {
+            minIndent = Infinity;
+            for (let li = 0; li < nonEmpty.length; li++) {
+              const m = nonEmpty[li].match(/^(\s*)/);
+              const len = m ? m[1].length : 0;
+              if (len < minIndent) minIndent = len;
+            }
+          }
+          command = cmdLines
+            .map(function (l: string) {
+              return l.length >= minIndent ? l.substring(minIndent) : l;
+            })
+            .join('\n')
+            .trim();
+        }
+
+        const runActions: { label: string; type: 'run' | 'skip' | 'allow'; selectorPath: string }[] = [];
+        const skipBtn = runContainer.querySelector('.composer-skip-button');
+        if (skipBtn) {
+          runActions.push({ label: 'Skip', type: 'skip' as const, selectorPath: buildSelectorPath(skipBtn) });
+        }
+        const seenPaths = new Set<string>();
+        if (skipBtn) seenPaths.add(buildSelectorPath(skipBtn));
+        const runBtns = runContainer.querySelectorAll('.composer-run-button');
+        for (const btn of Array.from(runBtns)) {
+          const path = buildSelectorPath(btn);
+          if (seenPaths.has(path)) continue;
+          seenPaths.add(path);
+          const btnText = (btn.textContent || '').replace(/[⏎⌘⇧]/g, '').trim();
+          const isAllowlist =
+            btn.classList.contains('anysphere-secondary-button') || btnText.toLowerCase().includes('allow');
+          if (isAllowlist) {
+            runActions.push({ label: btnText, type: 'allow' as const, selectorPath: path });
+          } else {
+            runActions.push({ label: 'Run', type: 'run' as const, selectorPath: path });
+          }
+        }
+
+        return {
+          element: {
+            type: 'run_command' as const,
+            id: messageId,
+            flatIndex,
+            toolCallId,
+            description,
+            candidates,
+            command,
+            actions: runActions,
+          },
+          parsedAs: 'run_command',
+        };
+      }
+
+      const editReviewEl = toolRoot.querySelector('.composer-edit-file-review-wrapper');
+      if (editReviewEl) {
+        const filenameEl = editReviewEl.querySelector('.composer-code-block-filename');
+        const filename = filenameEl ? (filenameEl.textContent || '').trim() : undefined;
+
+        const statusSpans = editReviewEl.querySelectorAll('.composer-code-block-status span');
+        let additions: number | undefined;
+        let deletions: number | undefined;
+        for (const s of Array.from(statusSpans)) {
+          const t = (s.textContent || '').trim();
+          const addM = t.match(/^\+(\d+)$/);
+          const delM = t.match(/^-(\d+)$/);
+          if (addM) additions = parseInt(addM[1], 10);
+          if (delM) deletions = parseInt(delM[1], 10);
+        }
+        const editDiffFb = tryParseDiffStatsFromWrapper(editReviewEl);
+        if (additions === undefined) additions = editDiffFb.additions;
+        if (deletions === undefined) deletions = editDiffFb.deletions;
+
+        const blockedPill = editReviewEl.querySelector('.block-attribution-pill');
+        const blocked = blockedPill
+          ? (blockedPill.getAttribute('aria-label') || blockedPill.textContent || '').trim()
+          : undefined;
+
+        const statusRow = editReviewEl.querySelector('.composer-tool-call-status-row');
+        const editActions: { label: string; type: 'run' | 'skip' | 'allow'; selectorPath: string }[] = [];
+        if (statusRow) {
+          const skipBtn2 = statusRow.querySelector('.composer-skip-button');
+          if (skipBtn2) {
+            editActions.push({ label: 'Skip', type: 'skip' as const, selectorPath: buildSelectorPath(skipBtn2) });
+          }
+          const seenPaths2 = new Set<string>();
+          if (skipBtn2) seenPaths2.add(buildSelectorPath(skipBtn2));
+          const runBtns2 = statusRow.querySelectorAll('.composer-run-button, .anysphere-secondary-button');
+          for (const btn of Array.from(runBtns2)) {
+            const path = buildSelectorPath(btn);
+            if (seenPaths2.has(path)) continue;
+            seenPaths2.add(path);
+            const btnText = (btn.textContent || '').replace(/[⏎⌘⇧]/g, '').trim();
+            const isAllow =
+              btn.classList.contains('anysphere-secondary-button') || btnText.toLowerCase().includes('allow');
+            if (isAllow) {
+              editActions.push({ label: btnText, type: 'allow' as const, selectorPath: path });
+            } else {
+              editActions.push({ label: btnText || 'Accept', type: 'run' as const, selectorPath: path });
+            }
+          }
+        }
+
+        const diffBlock = extractDiffBlockFromScope(editReviewEl);
+        return {
+          element: {
+            type: 'tool' as const,
+            id: messageId,
+            flatIndex,
+            toolCallId,
+            status: toolStatus,
+            action: 'Edit',
+            details: '',
+            filename,
+            additions,
+            deletions,
+            blocked: blocked || undefined,
+            actions: editActions.length > 0 ? editActions : undefined,
+            ...(diffBlock ? { diffBlock } : {}),
+          },
+          parsedAs: 'tool:edit-review',
+        };
+      }
+
+      const todoListContainer = toolRoot.querySelector('.todo-list-container');
+      if (todoListContainer) {
+        const headerElTodo = todoListContainer.querySelector('.todo-list-header-left-title');
+        const title = (headerElTodo?.textContent || 'To-dos').replace(/\d+\s*$/, '').trim();
+        const todoItems2 = todoListContainer.querySelectorAll('.ui-todo-item');
+        const todos2: { text: string; status: 'pending' | 'completed' | 'in_progress' }[] = [];
+        let todosCompleted2 = 0;
+        for (const item of Array.from(todoItems2)) {
+          const contentEl2 = item.querySelector('.ui-todo-item__content');
+          const text = (contentEl2?.textContent || '').trim();
+          if (!text) continue;
+          const cls = item.className || '';
+          let status: 'pending' | 'completed' | 'in_progress' = 'pending';
+          if (cls.includes('completed')) {
+            status = 'completed';
+            todosCompleted2++;
+          } else if (cls.includes('dimmed') || (contentEl2 && contentEl2.className.includes('in-progress'))) {
+            status = 'in_progress';
+          }
+          todos2.push({ text, status });
+        }
+        return {
+          element: {
+            type: 'todo_list' as const,
+            id: messageId,
+            flatIndex,
+            title,
+            todosCompleted: todosCompleted2,
+            todosTotal: todos2.length,
+            todos: todos2,
+          },
+          parsedAs: 'todo_list',
+        };
+      }
+
+      const compactEl = toolRoot.querySelector('.composer-tool-former-message');
+      if (compactEl) {
+        const spans = compactEl.querySelectorAll('span');
+        let actionPart = '';
+        let descPart = '';
+        for (const s of Array.from(spans)) {
+          const txt = (s.textContent || '').trim();
+          if (!txt) continue;
+          if (s.classList.toString().includes('codicon') || s.classList.toString().includes('cursor-icon')) continue;
+          if (s.classList.contains('truncate-one-line') || s.classList.toString().includes('truncate')) {
+            descPart = txt;
+          } else if (!actionPart) {
+            actionPart = txt;
+          }
+        }
+        const summaryText = (compactEl.textContent || '').trim();
+        const compactDiff = tryParseDiffStatsFromWrapper(toolRoot);
+        const diffBlockCompact = extractDiffBlockFromScope(toolRoot);
+        return {
+          element: {
+            type: 'tool' as const,
+            id: messageId,
+            flatIndex,
+            toolCallId,
+            status: toolStatus,
+            action: actionPart || '',
+            details: descPart || '',
+            summaryText: !actionPart && !descPart ? summaryText : undefined,
+            additions: compactDiff.additions,
+            deletions: compactDiff.deletions,
+            ...(diffBlockCompact ? { diffBlock: diffBlockCompact } : {}),
+          },
+          parsedAs: 'tool:compact',
+        };
+      }
+
+      const actionEl = toolRoot.querySelector('.ui-tool-call-line-action');
+      const detailsEl = toolRoot.querySelector('.ui-tool-call-line-details');
+      let action = (actionEl?.textContent || '').trim();
+      let details = (detailsEl?.textContent || '').trim();
+
+      const filenameEl2 = toolRoot.querySelector('.ui-edit-tool-call__filename');
+      const additionsEl = toolRoot.querySelector('.ui-edit-tool-call__additions');
+      const deletionsEl = toolRoot.querySelector('.ui-edit-tool-call__deletions');
+      const filename2 = filenameEl2 ? (filenameEl2.textContent || '').trim() : undefined;
+      const addMatch = additionsEl ? (additionsEl.textContent || '').match(/\d+/) : null;
+      const delMatch = deletionsEl ? (deletionsEl.textContent || '').match(/\d+/) : null;
+      let additions2 = addMatch ? parseInt(addMatch[0], 10) : undefined;
+      let deletions2 = delMatch ? parseInt(delMatch[0], 10) : undefined;
+      const lineDiffFb = tryParseDiffStatsFromWrapper(toolRoot);
+      if (additions2 === undefined) additions2 = lineDiffFb.additions;
+      if (deletions2 === undefined) deletions2 = lineDiffFb.deletions;
+
+      const shellCmd = toolRoot.querySelector('.ui-shell-tool-call__command');
+      if (shellCmd && !details) details = (shellCmd.textContent || '').trim();
+
+      if (!action) {
+        const cardHeader = toolRoot.querySelector('.ui-tool-call-card__header');
+        if (cardHeader) action = (cardHeader.textContent || '').trim().split('\n')[0].trim();
+      }
+
+      if (!action) {
+        const fullText = (toolRoot.textContent || '').trim();
+        if (fullText.length > 0 && fullText.length < 200) {
+          action = fullText.substring(0, 60);
+        }
+      }
+
+      const diffBlockLine = extractDiffBlockFromScope(toolRoot);
+      return {
+        element: {
+          type: 'tool' as const,
+          id: messageId,
+          flatIndex,
+          toolCallId,
+          status: toolStatus,
+          action: action || 'Tool',
+          details,
+          filename: filename2 || (action === 'Edit' || action === 'Write' ? details : undefined),
+          additions: additions2,
+          deletions: deletions2,
+          ...(diffBlockLine ? { diffBlock: diffBlockLine } : {}),
+        },
+        parsedAs: !action && !details && !filename2 ? 'tool:fallback' : 'tool',
+      };
+    }
 
     for (const wrapper of Array.from(flatIndexEls)) {
       const flatIndex = parseInt(wrapper.getAttribute('data-flat-index') || '0', 10);
@@ -98,39 +849,97 @@ export function extractionFunction(
       const kind = msgEl.getAttribute('data-message-kind');
       const messageId = msgEl.getAttribute('data-message-id') || `fi-${flatIndex}`;
 
-      // --- Loading indicator ---
+      const rawEl = {
+        flatIndex,
+        role: role || undefined,
+        kind: kind || undefined,
+        messageId,
+        toolCallId: undefined as string | undefined,
+        toolStatus: undefined as string | undefined,
+        indicators: detectIndicators(wrapper),
+        textPreview: (wrapper.textContent || '').trim().substring(0, 120),
+        parsedAs: 'unknown',
+      };
+      _rawElements.push(rawEl);
+
+      // --- Loading indicator (skip as content — handled as agentActivity) ---
       if (wrapper.querySelector('.loading-indicator-v3')) {
-        elements.push({
-          type: 'loading' as const,
-          id: `loading-${flatIndex}`,
-          flatIndex,
-        });
+        rawEl.parsedAs = 'skipped:loading';
         continue;
       }
 
-      // --- Step-group header (Thought, Explored, Searched, Read, etc.) ---
+      // --- Composer message group: Explored + nested ui-thinking-collapsible + tools (one flat-index) ---
+      const composerGroup = wrapper.querySelector('.composer-message-group');
+      const stepGroupCollapsible = wrapper.querySelector('.ui-collapsible.ui-step-group-collapsible');
+      if (composerGroup && stepGroupCollapsible) {
+        rawEl.parsedAs = 'message-group';
+        const outerHeader = stepGroupCollapsible.querySelector(':scope > .ui-collapsible-header');
+        const outerParsed = parseThoughtSpansFromHeader(outerHeader);
+        if (outerParsed.action || outerParsed.detail || outerParsed.duration) {
+          elements.push({
+            type: 'thought' as const,
+            id: `thought-${flatIndex}-summary`,
+            flatIndex,
+            duration: outerParsed.duration,
+            action: outerParsed.action || undefined,
+            detail: outerParsed.detail || undefined,
+            thoughtKind: 'step_summary' as const,
+          });
+        }
+        const contentEl = stepGroupCollapsible.querySelector(':scope > .ui-collapsible-content');
+        const column = contentEl?.firstElementChild;
+        if (column) {
+          let seq = 0;
+          for (const child of Array.from(column.children)) {
+            if (child.classList.contains('ui-thinking-collapsible')) {
+              const h = child.querySelector(':scope > .ui-collapsible-header');
+              const p = parseThoughtSpansFromHeader(h);
+              if (p.action || p.detail || p.duration) {
+                elements.push({
+                  type: 'thought' as const,
+                  id: `thought-${flatIndex}-s${seq}`,
+                  flatIndex,
+                  duration: p.duration,
+                  action: p.action || undefined,
+                  detail: p.detail || undefined,
+                  thoughtKind: 'thinking_step' as const,
+                });
+              }
+              seq++;
+              continue;
+            }
+            const toolHost =
+              child.getAttribute('data-message-role') === 'ai' && child.getAttribute('data-message-kind') === 'tool'
+                ? child
+                : child.querySelector(':scope > [data-message-role="ai"][data-message-kind="tool"]');
+            if (toolHost) {
+              const mid =
+                toolHost.getAttribute('data-message-id') || `fi-${flatIndex}-g${seq}`;
+              const parsedTool = extractAiTool(toolHost as Element, flatIndex, mid, null);
+              if (parsedTool) {
+                elements.push(parsedTool.element);
+                seq++;
+              }
+            }
+          }
+        }
+        continue;
+      }
+
+      // --- Step-group header (Thought, Explored, Searched, Read, etc.) — lone wrapper, no message-role ---
       const thoughtEl = wrapper.querySelector('.ui-collapsible.ui-step-group-collapsible');
       if (thoughtEl && !role) {
-        const headerSpans = thoughtEl.querySelectorAll('.ui-collapsible-header > span');
-        let action = '';
-        let detail = '';
-        let duration = '';
-        for (const s of Array.from(headerSpans)) {
-          if (s.classList.contains('cursor-icon') || s.classList.contains('ui-icon')) continue;
-          const t = (s.textContent || '').trim();
-          if (!t) continue;
-          if (!action) { action = t; continue; }
-          if (t.startsWith('for ')) { duration = t.replace('for ', ''); detail = t; }
-          else { detail = t; }
-        }
+        const hdr = thoughtEl.querySelector('.ui-collapsible-header');
+        const parsed = parseThoughtSpansFromHeader(hdr);
         elements.push({
           type: 'thought' as const,
           id: `thought-${flatIndex}`,
           flatIndex,
-          duration,
-          action: action || undefined,
-          detail: detail || undefined,
+          duration: parsed.duration,
+          action: parsed.action || undefined,
+          detail: parsed.detail || undefined,
         });
+        rawEl.parsedAs = 'thought';
         continue;
       }
 
@@ -189,12 +998,25 @@ export function extractionFunction(
             todosTotal,
             todos: todos.length > 0 ? todos : undefined,
           });
+          rawEl.parsedAs = 'plan';
           continue;
         }
 
         // Regular human message
         const inputEl = wrapper.querySelector('.aislash-editor-input-readonly');
-        const text = (inputEl?.textContent || wrapper.textContent || '').trim();
+        let text = (inputEl?.textContent || wrapper.textContent || '').trim();
+        let quoted: { text: string } | undefined;
+        const quoteEl = inputEl?.querySelector('blockquote');
+        if (inputEl && quoteEl) {
+          const qt = (quoteEl.textContent || '').trim();
+          if (qt) {
+            quoted = { text: qt };
+            const clone = inputEl.cloneNode(true) as HTMLElement;
+            clone.querySelectorAll('blockquote').forEach((el) => el.remove());
+            const rest = (clone.textContent || '').trim();
+            if (rest) text = rest;
+          }
+        }
         const mentionEls = wrapper.querySelectorAll('.mention');
         const mentions = Array.from(mentionEls).map(m => ({
           name: m.getAttribute('data-mention-name') || (m.textContent || '').trim(),
@@ -207,7 +1029,9 @@ export function extractionFunction(
           flatIndex,
           text,
           mentions,
+          ...(quoted ? { quoted } : {}),
         });
+        rawEl.parsedAs = 'human';
         continue;
       }
 
@@ -217,22 +1041,8 @@ export function extractionFunction(
         const text = (markdownRoot?.textContent || wrapper.textContent || '').trim();
         const html = markdownRoot?.innerHTML || '';
 
-        const codeBlockEls = wrapper.querySelectorAll('.composer-message-codeblock');
-        const codeBlocks = Array.from(codeBlockEls).map(cb => {
-          const headerEl = cb.querySelector('.ui-code-block-header');
-          const filenameEl = cb.querySelector('.ui-code-block-filename');
-          const codeContent = cb.querySelector('.ui-default-code__content');
-          const lines = codeContent
-            ? Array.from(codeContent.querySelectorAll('.ui-default-code__line-content'))
-                .map(l => l.textContent || '')
-                .join('\n')
-            : (cb.textContent || '').trim();
-          return {
-            language: headerEl?.getAttribute('data-language') || undefined,
-            filename: filenameEl?.textContent?.trim() || undefined,
-            code: lines,
-          };
-        });
+        const codeBlockEls = wrapper.querySelectorAll('.composer-message-codeblock, .composer-code-block-container');
+        const codeBlocks = Array.from(codeBlockEls).map(cb => extractCodeBlockItem(cb));
 
         elements.push({
           type: 'assistant' as const,
@@ -242,321 +1052,17 @@ export function extractionFunction(
           html,
           codeBlocks,
         });
+        rawEl.parsedAs = 'assistant';
         continue;
       }
 
       // --- Tool call ---
       if (role === 'ai' && kind === 'tool') {
-        // Tool call ID and status can be on msgEl or on a nested element
-        const toolEl = wrapper.querySelector('[data-tool-call-id]') || msgEl;
-        const toolCallId = toolEl.getAttribute('data-tool-call-id') || `tool-${flatIndex}`;
-        const toolStatus = (toolEl.getAttribute('data-tool-status') || msgEl.getAttribute('data-tool-status') || 'completed') as 'loading' | 'completed';
-
-        // --- Plan widget (must check before compact summary) ---
-        const planContainer = wrapper.querySelector('.composer-create-plan-container');
-        if (planContainer) {
-          const label = (planContainer.querySelector('.composer-create-plan-label')?.textContent || '').trim();
-          const title = (planContainer.querySelector('.composer-create-plan-title')?.textContent || '').trim();
-          const descRoot = planContainer.querySelector('.composer-create-plan-text .markdown-root');
-          const description = descRoot ? (descRoot.textContent || '').trim() : undefined;
-
-          const todoItems = planContainer.querySelectorAll('.composer-create-plan-todo-item');
-          const todos: { text: string; status: 'pending' | 'completed' | 'in_progress' }[] = [];
-          let todosCompleted = 0;
-          let todosTotal = 0;
-          for (const item of Array.from(todoItems)) {
-            const contentEl = item.querySelector('.composer-create-plan-todo-content');
-            if (!contentEl) continue;
-            const text = (contentEl.textContent || '').trim();
-            if (!text) continue;
-            const indicator = item.querySelector('.composer-plan-todo-indicator');
-            let status: 'pending' | 'completed' | 'in_progress' = 'pending';
-            if (indicator) {
-              const cls = indicator.className || '';
-              if (cls.includes('completed')) { status = 'completed'; todosCompleted++; }
-              else if (cls.includes('in_progress') || cls.includes('in-progress')) status = 'in_progress';
-            }
-            todosTotal++;
-            todos.push({ text, status });
-          }
-
-          const todosHeader = (planContainer.querySelector('.composer-create-plan-todos-header')?.textContent || '').trim();
-          const headerMatch = todosHeader.match(/(\d+)/);
-          if (headerMatch && todosTotal === 0) {
-            todosTotal = parseInt(headerMatch[0], 10);
-          }
-
-          const actions: { label: string; type: 'view_plan' | 'build'; selectorPath: string }[] = [];
-          const viewPlanBtn = planContainer.querySelector('.composer-create-plan-view-plan-button');
-          if (viewPlanBtn) {
-            actions.push({ label: 'View Plan', type: 'view_plan' as const, selectorPath: buildSelectorPath(viewPlanBtn) });
-          }
-          const buildBtn = planContainer.querySelector('.composer-create-plan-build-button');
-          if (buildBtn) {
-            actions.push({ label: 'Build', type: 'build' as const, selectorPath: buildSelectorPath(buildBtn) });
-          }
-
-          const modelEl = planContainer.querySelector('.composer-unified-dropdown-model');
-          let model: string | undefined;
-          if (modelEl) {
-            const spans = modelEl.querySelectorAll('span');
-            for (const s of Array.from(spans)) {
-              const t = (s.textContent || '').trim();
-              if (t && !t.includes('chevron') && t.length > 1) { model = t; break; }
-            }
-          }
-
-          elements.push({
-            type: 'plan' as const,
-            id: messageId,
-            flatIndex,
-            label,
-            title,
-            description,
-            todosCompleted,
-            todosTotal,
-            todos: todos.length > 0 ? todos : undefined,
-            model,
-            actions: actions.length > 0 ? actions : undefined,
-          });
-          continue;
+        const parsedTool = extractAiTool(msgEl as Element, flatIndex, messageId, rawEl);
+        if (parsedTool) {
+          elements.push(parsedTool.element);
+          rawEl.parsedAs = parsedTool.parsedAs;
         }
-
-        // --- Run command widget (must check before compact summary) ---
-        const runContainer = wrapper.querySelector('.composer-terminal-tool-call-block-container') ||
-          wrapper.querySelector('.composer-tool-call-container.composer-terminal-compact-mode');
-        if (runContainer) {
-          const descEl = runContainer.querySelector('.composer-terminal-top-header-description');
-          const candidatesEl = runContainer.querySelector('.composer-terminal-top-header-candidates');
-          const commandEl = runContainer.querySelector('.composer-terminal-command-expanded-text');
-          const description = (descEl?.textContent || '').trim();
-          const candidates = (candidatesEl?.textContent || '').trim();
-
-          // Dedent command text: .textContent includes HTML source indentation
-          let command = '';
-          if (commandEl) {
-            const rawCmd = commandEl.textContent || '';
-            const cmdLines = rawCmd.split('\n');
-            const nonEmpty = cmdLines.filter(function(l: string) { return l.trim().length > 0; });
-            let minIndent = 0;
-            if (nonEmpty.length > 0) {
-              minIndent = Infinity;
-              for (let li = 0; li < nonEmpty.length; li++) {
-                const m = nonEmpty[li].match(/^(\s*)/);
-                const len = m ? m[1].length : 0;
-                if (len < minIndent) minIndent = len;
-              }
-            }
-            command = cmdLines.map(function(l: string) { return l.length >= minIndent ? l.substring(minIndent) : l; }).join('\n').trim();
-          }
-
-          // Collect buttons: distinguish Run from Allowlist (both use .composer-run-button)
-          const runActions: { label: string; type: 'run' | 'skip' | 'allow'; selectorPath: string }[] = [];
-          const skipBtn = runContainer.querySelector('.composer-skip-button');
-          if (skipBtn) {
-            runActions.push({ label: 'Skip', type: 'skip' as const, selectorPath: buildSelectorPath(skipBtn) });
-          }
-          const seenPaths = new Set<string>();
-          if (skipBtn) seenPaths.add(buildSelectorPath(skipBtn));
-          const runBtns = runContainer.querySelectorAll('.composer-run-button');
-          for (const btn of Array.from(runBtns)) {
-            const path = buildSelectorPath(btn);
-            if (seenPaths.has(path)) continue;
-            seenPaths.add(path);
-            const btnText = (btn.textContent || '').replace(/[⏎⌘⇧]/g, '').trim();
-            const isAllowlist = btn.classList.contains('anysphere-secondary-button')
-              || btnText.toLowerCase().includes('allow');
-            if (isAllowlist) {
-              runActions.push({ label: btnText, type: 'allow' as const, selectorPath: path });
-            } else {
-              runActions.push({ label: 'Run', type: 'run' as const, selectorPath: path });
-            }
-          }
-
-          elements.push({
-            type: 'run_command' as const,
-            id: messageId,
-            flatIndex,
-            toolCallId,
-            description,
-            candidates,
-            command,
-            actions: runActions,
-          });
-          continue;
-        }
-
-        // --- Edit file review widget (external file approval) ---
-        const editReviewEl = wrapper.querySelector('.composer-edit-file-review-wrapper');
-        if (editReviewEl) {
-          const filenameEl = editReviewEl.querySelector('.composer-code-block-filename');
-          const filename = filenameEl ? (filenameEl.textContent || '').trim() : undefined;
-
-          const statusSpans = editReviewEl.querySelectorAll('.composer-code-block-status span');
-          let additions: number | undefined;
-          let deletions: number | undefined;
-          for (const s of Array.from(statusSpans)) {
-            const t = (s.textContent || '').trim();
-            const addM = t.match(/^\+(\d+)$/);
-            const delM = t.match(/^-(\d+)$/);
-            if (addM) additions = parseInt(addM[1], 10);
-            if (delM) deletions = parseInt(delM[1], 10);
-          }
-
-          const blockedPill = editReviewEl.querySelector('.block-attribution-pill');
-          const blocked = blockedPill
-            ? (blockedPill.getAttribute('aria-label') || blockedPill.textContent || '').trim()
-            : undefined;
-
-          const statusRow = editReviewEl.querySelector('.composer-tool-call-status-row');
-          const editActions: { label: string; type: 'run' | 'skip' | 'allow'; selectorPath: string }[] = [];
-          if (statusRow) {
-            const skipBtn = statusRow.querySelector('.composer-skip-button');
-            if (skipBtn) {
-              editActions.push({ label: 'Skip', type: 'skip' as const, selectorPath: buildSelectorPath(skipBtn) });
-            }
-            const seenPaths = new Set<string>();
-            if (skipBtn) seenPaths.add(buildSelectorPath(skipBtn));
-            const runBtns = statusRow.querySelectorAll('.composer-run-button, .anysphere-secondary-button');
-            for (const btn of Array.from(runBtns)) {
-              const path = buildSelectorPath(btn);
-              if (seenPaths.has(path)) continue;
-              seenPaths.add(path);
-              const btnText = (btn.textContent || '').replace(/[⏎⌘⇧]/g, '').trim();
-              const isAllow = btn.classList.contains('anysphere-secondary-button')
-                || btnText.toLowerCase().includes('allow');
-              if (isAllow) {
-                editActions.push({ label: btnText, type: 'allow' as const, selectorPath: path });
-              } else {
-                editActions.push({ label: btnText || 'Accept', type: 'run' as const, selectorPath: path });
-              }
-            }
-          }
-
-          elements.push({
-            type: 'tool' as const,
-            id: messageId,
-            flatIndex,
-            toolCallId,
-            status: toolStatus,
-            action: 'Edit',
-            details: '',
-            filename,
-            additions,
-            deletions,
-            blocked: blocked || undefined,
-            actions: editActions.length > 0 ? editActions : undefined,
-          });
-          continue;
-        }
-
-        // --- Standalone todo list widget ---
-        const todoListContainer = wrapper.querySelector('.todo-list-container');
-        if (todoListContainer) {
-          const headerEl = todoListContainer.querySelector('.todo-list-header-left-title');
-          const title = (headerEl?.textContent || 'To-dos').replace(/\d+\s*$/, '').trim();
-          const todoItems = todoListContainer.querySelectorAll('.ui-todo-item');
-          const todos: { text: string; status: 'pending' | 'completed' | 'in_progress' }[] = [];
-          let todosCompleted = 0;
-          for (const item of Array.from(todoItems)) {
-            const contentEl = item.querySelector('.ui-todo-item__content');
-            const text = (contentEl?.textContent || '').trim();
-            if (!text) continue;
-            const cls = item.className || '';
-            let status: 'pending' | 'completed' | 'in_progress' = 'pending';
-            if (cls.includes('completed')) { status = 'completed'; todosCompleted++; }
-            else if (cls.includes('dimmed') || (contentEl && contentEl.className.includes('in-progress'))) { status = 'in_progress'; }
-            todos.push({ text, status });
-          }
-          elements.push({
-            type: 'todo_list' as const,
-            id: messageId,
-            flatIndex,
-            title,
-            todosCompleted,
-            todosTotal: todos.length,
-            todos,
-          });
-          continue;
-        }
-
-        // Compact tool summary (collapsed tool messages)
-        const compactEl = wrapper.querySelector('.composer-tool-former-message');
-        if (compactEl) {
-          const spans = compactEl.querySelectorAll('span');
-          let actionPart = '';
-          let descPart = '';
-          for (const s of Array.from(spans)) {
-            const txt = (s.textContent || '').trim();
-            if (!txt) continue;
-            // Skip icon spans (codicon, cursor-icon)
-            if (s.classList.toString().includes('codicon') || s.classList.toString().includes('cursor-icon')) continue;
-            if (s.classList.contains('truncate-one-line') || s.classList.toString().includes('truncate')) {
-              descPart = txt;
-            } else if (!actionPart) {
-              actionPart = txt;
-            }
-          }
-          const summaryText = (compactEl.textContent || '').trim();
-          elements.push({
-            type: 'tool' as const,
-            id: messageId,
-            flatIndex,
-            toolCallId,
-            status: toolStatus,
-            action: actionPart || '',
-            details: descPart || '',
-            summaryText: !actionPart && !descPart ? summaryText : undefined,
-          });
-          continue;
-        }
-
-        // Tool call line (e.g. Read terminal, Edit file, etc.)
-        const actionEl = wrapper.querySelector('.ui-tool-call-line-action');
-        const detailsEl = wrapper.querySelector('.ui-tool-call-line-details');
-        let action = (actionEl?.textContent || '').trim();
-        let details = (detailsEl?.textContent || '').trim();
-
-        // Edit tool card: filename and change stats
-        const filenameEl = wrapper.querySelector('.ui-edit-tool-call__filename');
-        const additionsEl = wrapper.querySelector('.ui-edit-tool-call__additions');
-        const deletionsEl = wrapper.querySelector('.ui-edit-tool-call__deletions');
-        const filename = filenameEl ? (filenameEl.textContent || '').trim() : undefined;
-        const addMatch = additionsEl ? (additionsEl.textContent || '').match(/\d+/) : null;
-        const delMatch = deletionsEl ? (deletionsEl.textContent || '').match(/\d+/) : null;
-        const additions = addMatch ? parseInt(addMatch[0], 10) : undefined;
-        const deletions = delMatch ? parseInt(delMatch[0], 10) : undefined;
-
-        // Shell tool: command text
-        const shellCmd = wrapper.querySelector('.ui-shell-tool-call__command');
-        if (shellCmd && !details) details = (shellCmd.textContent || '').trim();
-
-        // Tool card header fallback (for expanded cards without line action)
-        if (!action) {
-          const cardHeader = wrapper.querySelector('.ui-tool-call-card__header');
-          if (cardHeader) action = (cardHeader.textContent || '').trim().split('\n')[0].trim();
-        }
-
-        // If still no action, try to get it from the full text content
-        if (!action) {
-          const fullText = (wrapper.textContent || '').trim();
-          if (fullText.length > 0 && fullText.length < 200) {
-            action = fullText.substring(0, 60);
-          }
-        }
-
-        elements.push({
-          type: 'tool' as const,
-          id: messageId,
-          flatIndex,
-          toolCallId,
-          status: toolStatus,
-          action: action || 'Tool',
-          details,
-          filename: filename || (action === 'Edit' || action === 'Write' ? details : undefined),
-          additions,
-          deletions,
-        });
         continue;
       }
 
@@ -568,13 +1074,33 @@ export function extractionFunction(
           let action = '';
           let detail = '';
           let duration = '';
+          const durationFromTextFb = (raw: string): string => {
+            const t = raw.trim();
+            const forM = t.match(/\bfor\s+([\d.]+\s*s(?:ec(?:onds?)?)?)\b/i);
+            if (forM) return forM[1].replace(/\s+/g, '');
+            const bareM = t.match(/^([\d.]+\s*s(?:ec(?:onds?)?)?)$/i);
+            if (bareM) return bareM[1].replace(/\s+/g, '');
+            return '';
+          };
+          const isDurationOnlySpanFb = (raw: string): boolean => {
+            const t = raw.trim();
+            if (/^for\s+/i.test(t)) return false;
+            return !!durationFromTextFb(t) && t.length <= 20;
+          };
           for (const s of Array.from(spans)) {
             if (s.classList.contains('cursor-icon') || s.classList.contains('ui-icon')) continue;
             const t = (s.textContent || '').trim();
             if (!t) continue;
+            const d = durationFromTextFb(t);
+            if (d && !duration) duration = d;
+            if (isDurationOnlySpanFb(t)) continue;
             if (!action) { action = t; continue; }
-            if (t.startsWith('for ')) { duration = t.replace('for ', ''); detail = t; }
-            else { detail = t; }
+            if (t.startsWith('for ')) { duration = duration || t.replace(/^for\s+/i, '').trim(); detail = t; }
+            else { detail = detail || t; }
+          }
+          if (!duration) {
+            const fullHeader = (collapseEl.textContent || '').replace(/\s+/g, ' ').trim();
+            duration = durationFromTextFb(fullHeader);
           }
           elements.push({
             type: 'thought' as const,
@@ -584,8 +1110,21 @@ export function extractionFunction(
             action: action || undefined,
             detail: detail || undefined,
           });
+          rawEl.parsedAs = 'thought:fallback';
         }
       }
+    }
+
+    // --- Orphan activity indicators (not inside any [data-flat-index]) ---
+    const _orphanIndicators: Array<{ cls: string; text: string; parentCls: string }> = [];
+    const allIndicators = container.querySelectorAll('.loading-indicator-v3, .make-shine');
+    for (const ind of Array.from(allIndicators)) {
+      if (ind.closest('[data-flat-index]')) continue;
+      _orphanIndicators.push({
+        cls: ind.className.substring(0, 200),
+        text: (ind.textContent || '').trim().substring(0, 120),
+        parentCls: (ind.parentElement?.className || '').substring(0, 200),
+      });
     }
 
     // --- Approval buttons ---
@@ -667,10 +1206,9 @@ export function extractionFunction(
     }
     if (pendingApprovals.length > 0) agentStatus = 'waiting_approval';
 
-    // Check for loading tools as running_tool status
-    if (agentStatus === 'idle' && elements.some(e => e.type === 'loading' || (e.type === 'tool' && e.status === 'loading') || e.type === 'run_command')) {
-      agentStatus = 'running_tool';
-    }
+    // Element-based status detection removed: tool loading badges and
+    // run_command elements persist in the DOM long after completion.
+    // Shimmer + .loading-indicator-v3 (checked below) are the ground truth.
 
     const inputEl = findFirst(inputSelectors);
 
@@ -812,9 +1350,79 @@ export function extractionFunction(
       currentId: modelId,
     };
 
+    // --- Raw activity signals (objective DOM snapshot for recording) ---
+    const _shimmer: Array<{ text: string; inToolCall: boolean; inHeader: boolean }> = [];
+    const hasLoadingIndicator = container.querySelector('.loading-indicator-v3') !== null;
+    const hasLoadingTool = container.querySelector('[data-tool-status="loading"]') !== null;
+    const shineEls = container.querySelectorAll('.make-shine');
+    for (const sh of Array.from(shineEls).reverse()) {
+      const inToolCall = !!sh.closest('[data-tool-call-id]') || !!sh.closest('.composer-terminal-tool');
+      const header = sh.closest('.ui-collapsible-header');
+      let text = '';
+      if (header) {
+        const spans = header.querySelectorAll(':scope > span');
+        const parts: string[] = [];
+        for (const s of Array.from(spans)) {
+          if (s.classList.contains('cursor-icon') || s.classList.contains('ui-icon')) continue;
+          const t = (s.textContent || '').trim();
+          if (t) parts.push(t);
+        }
+        text = parts.join(' ');
+      } else if (sh.classList.contains('composer-terminal-top-header-description') ||
+                 sh.closest('.composer-terminal-top-header-text')) {
+        text = (sh.textContent || '').trim();
+      } else {
+        const descEl = (sh.closest('[data-flat-index]') || sh.parentElement)
+          ?.querySelector('.composer-terminal-top-header-description, .ui-tool-call-line-action, .ui-edit-tool-call__filename');
+        text = descEl ? (descEl.textContent || '').trim() : (sh.textContent || '').trim();
+      }
+      if (text.length > 2) {
+        const entry = { text: text.substring(0, 80), inToolCall, inHeader: !!header };
+        _shimmer.push(entry);
+      }
+    }
+
+    const _rawSignals = {
+      shimmer: _shimmer,
+      loadingIndicator: hasLoadingIndicator,
+      statusEl: statusEl ? { text: (statusEl.textContent || '').trim(), classes: statusEl.className } : undefined,
+      elements: _rawElements,
+      orphanIndicators: _orphanIndicators,
+    };
+
+    const queueItems: { id: string; text: string }[] = [];
+    let queueLabel: string | undefined;
+    const toolbarSection = document.querySelector('#composer-toolbar-section');
+    if (toolbarSection) {
+      for (const lc of Array.from(toolbarSection.querySelectorAll('.opacity-80'))) {
+        const lt = (lc.textContent || '').trim();
+        if (lt && /queued/i.test(lt)) {
+          queueLabel = lt;
+          break;
+        }
+      }
+      if (!queueLabel) {
+        const fb = toolbarSection.querySelector('.group .opacity-80');
+        const t0 = (fb?.textContent || '').trim();
+        if (t0) queueLabel = t0;
+      }
+      for (const item of Array.from(toolbarSection.querySelectorAll('.composer-toolbar-queue-item'))) {
+        const qid = item.getAttribute('data-queue-item-id') || '';
+        let qtext = (item.getAttribute('data-queue-item-query') || '').trim();
+        if (!qtext) {
+          const ro = item.querySelector('.aislash-editor-input-readonly');
+          qtext = (ro?.textContent || '').trim();
+        }
+        if (qid || qtext) queueItems.push({ id: qid || `qi-${queueItems.length}`, text: qtext });
+      }
+    }
+
     return {
       connected: true,
       agentStatus,
+      agentActivityText: null,
+      agentActivityLive: false,
+      agentActivitySource: 'none',
       messages: elements,
       pendingApprovals,
       inputAvailable: inputEl !== null,
@@ -823,6 +1431,8 @@ export function extractionFunction(
       model,
       windows: [],
       activeWindowId: '',
+      composerQueue: { items: queueItems, ...(queueLabel ? { queueLabel } : {}) },
+      _rawSignals,
     };
   } catch {
     return null;
@@ -893,17 +1503,19 @@ export class DOMExtractor {
         ),
       ]) as CursorState | null;
 
-      if (state && !this.loggedFirstExtraction) {
+      const derivedState = state ? applyDerivedActivityToState(state) : null;
+
+      if (derivedState && !this.loggedFirstExtraction) {
         this.loggedFirstExtraction = true;
         console.log(`[dom-extractor] First successful extraction:`);
-        console.log(`  status: ${state.agentStatus}`);
-        console.log(`  messages: ${state.messages.length}`);
-        console.log(`  approvals: ${state.pendingApprovals.length}`);
-        console.log(`  inputAvailable: ${state.inputAvailable}`);
-        console.log(`  chatTabs: ${state.chatTabs.length}`);
-        console.log(`  mode: ${state.mode.current}, model: ${state.model.current}`);
-        if (state.messages.length > 0) {
-          const last = state.messages[state.messages.length - 1];
+        console.log(`  status: ${derivedState.agentStatus}${derivedState.agentActivityText ? ` (${derivedState.agentActivityText})` : ''}`);
+        console.log(`  messages: ${derivedState.messages.length}`);
+        console.log(`  approvals: ${derivedState.pendingApprovals.length}`);
+        console.log(`  inputAvailable: ${derivedState.inputAvailable}`);
+        console.log(`  chatTabs: ${derivedState.chatTabs.length}`);
+        console.log(`  mode: ${derivedState.mode.current}, model: ${derivedState.model.current}`);
+        if (derivedState.messages.length > 0) {
+          const last = derivedState.messages[derivedState.messages.length - 1];
           const preview = last.type === 'human' ? last.text
             : last.type === 'assistant' ? last.text
             : last.type === 'tool' ? `${last.action} ${last.details}`
@@ -916,7 +1528,7 @@ export class DOMExtractor {
         }
       }
 
-      this.onExtract(state);
+      this.onExtract(derivedState);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (!message.includes('WebSocket closed') && !message.includes('Intentional disconnect')) {

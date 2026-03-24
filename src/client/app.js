@@ -16,10 +16,21 @@
 
   async function checkAuth() {
     try {
-      const res = await fetch('/health');
+      const res = await fetch('/health', {
+        credentials: 'same-origin',
+        headers: getAuthHeaders(),
+      });
       if (res.ok) {
         const data = await res.json();
-        if (data.authRequired && !getAuthToken()) {
+        if (data.authRequired) {
+          if (data.sessionValid === true) return true;
+          if (data.sessionValid === false) {
+            localStorage.removeItem(AUTH_TOKEN_KEY);
+            window.location.href = '/login';
+            return false;
+          }
+          // Older relay without sessionValid: fall back to presence of stored token
+          if (getAuthToken()) return true;
           window.location.href = '/login';
           return false;
         }
@@ -38,6 +49,9 @@
   let state = {
     connected: false,
     agentStatus: 'idle',
+    agentActivityText: null,
+    agentActivityLive: false,
+    agentActivitySource: 'none',
     messages: [],
     pendingApprovals: [],
     inputAvailable: false,
@@ -46,6 +60,7 @@
     model: { current: 'Auto', currentId: '' },
     windows: [],
     activeWindowId: '',
+    composerQueue: { items: [] },
   };
 
   let userScrolledUp = false;
@@ -53,10 +68,13 @@
 
   const $messages = document.getElementById('messages');
   const $emptyState = document.getElementById('empty-state');
+  const $emptyPrimary = document.getElementById('empty-state-primary');
+  const $emptyHint = document.getElementById('empty-state-hint');
   const $connDot = document.getElementById('connection-dot');
   const $connText = document.getElementById('connection-text');
   const $statusIcon = document.getElementById('agent-status-icon');
   const $statusText = document.getElementById('agent-status-text');
+  const $headerRight = document.querySelector('#header .header-right');
   const $approvalBar = document.getElementById('approval-bar');
   const $approvalDesc = document.getElementById('approval-desc');
   const $btnApprove = document.getElementById('btn-approve');
@@ -85,7 +103,14 @@
     reconnection: true,
     reconnectionDelay: 1000,
     reconnectionDelayMax: 10000,
-    auth: { token: getAuthToken() },
+    withCredentials: true,
+    auth: (cb) => {
+      try {
+        cb({ token: getAuthToken() || '' });
+      } catch {
+        cb({ token: '' });
+      }
+    },
   });
 
   socket.on('connect', () => updateConnectionUI('reconnecting'));
@@ -187,6 +212,7 @@
   function renderAll() {
     renderConnectionStatus();
     renderAgentStatus();
+    renderComposerQueue();
     renderWindows();
     renderMessages();
     renderApprovals();
@@ -209,18 +235,67 @@
 
   function renderAgentStatus() {
     const icons = {
-      idle: '', thinking: '...', generating: '...', running_tool: '...', waiting_approval: '!', error: 'x',
+      idle: '',
+      thinking: '',
+      generating: '',
+      running_tool: '',
+      waiting_approval: '!',
+      error: '\u2715',
     };
     const labels = {
       idle: 'Idle', thinking: 'Thinking...', generating: 'Generating...',
       running_tool: 'Running tool...', waiting_approval: 'Needs approval', error: 'Error',
     };
     $statusIcon.textContent = icons[state.agentStatus] || '';
-    $statusText.textContent = labels[state.agentStatus] || state.agentStatus;
+    const activity = (state.agentActivityText || '').trim();
+    const activityLive = !!state.agentActivityLive;
+    const baseLabel = labels[state.agentStatus] || state.agentStatus;
+    if ($headerRight) {
+      if (state.agentStatus !== 'idle') $headerRight.classList.remove('header-right-hidden');
+      else $headerRight.classList.add('header-right-hidden');
+    }
+    if (activityLive && activity && state.agentStatus !== 'idle') {
+      const max = 56;
+      $statusText.textContent = activity.length > max ? activity.slice(0, max - 1) + '…' : activity;
+      $statusText.classList.add('agent-status-shimmer');
+    } else {
+      $statusText.textContent = baseLabel;
+      $statusText.classList.remove('agent-status-shimmer');
+    }
 
     if (state.agentStatus === 'waiting_approval') $statusText.style.color = 'var(--accent-yellow)';
     else if (state.agentStatus === 'error') $statusText.style.color = 'var(--accent-red)';
     else $statusText.style.color = '';
+  }
+
+  function renderComposerQueue() {
+    const bar = document.getElementById('composer-queue-bar');
+    const labelEl = document.getElementById('composer-queue-label');
+    const itemsEl = document.getElementById('composer-queue-items');
+    if (!bar || !labelEl || !itemsEl) return;
+    const q = state.composerQueue && Array.isArray(state.composerQueue.items)
+      ? state.composerQueue
+      : { items: [] };
+    if (q.items.length === 0) {
+      bar.classList.add('hidden');
+      itemsEl.innerHTML = '';
+      return;
+    }
+    bar.classList.remove('hidden');
+    labelEl.textContent = q.queueLabel || `${q.items.length} queued`;
+    itemsEl.innerHTML = '';
+    q.items.forEach((it) => {
+      const row = document.createElement('div');
+      row.className = 'composer-queue-row';
+      const dot = document.createElement('span');
+      dot.className = 'composer-queue-dot';
+      const tx = document.createElement('span');
+      tx.className = 'composer-queue-text';
+      tx.textContent = it.text || '';
+      row.appendChild(dot);
+      row.appendChild(tx);
+      itemsEl.appendChild(row);
+    });
   }
 
   // --- Message rendering ---
@@ -229,6 +304,16 @@
     if (state.messages.length === 0) {
       $emptyState.style.display = '';
       $messages.querySelectorAll('.chat-el').forEach(el => el.remove());
+      if (state.connected) {
+        $emptyPrimary.textContent = 'No messages in this chat yet.';
+        $emptyHint.innerHTML = 'Send a message below or switch chat tab / window in Cursor.';
+      } else if (socket.connected) {
+        $emptyPrimary.textContent = 'Connecting to Cursor IDE...';
+        $emptyHint.innerHTML = 'Make sure Cursor is running with<br><code>--remote-debugging-port=9222</code>';
+      } else {
+        $emptyPrimary.textContent = 'Waiting for relay connection...';
+        $emptyHint.innerHTML = 'Check that this page can reach the CursorRemote server.';
+      }
       return;
     }
 
@@ -272,6 +357,7 @@
       case 'tool': return createToolEl(msg);
       case 'thought': return createThoughtEl(msg);
       case 'plan': return createPlanEl(msg);
+      case 'todo_list': return createTodoListEl(msg);
       case 'run_command': return createRunCommandEl(msg);
       case 'loading': return createLoadingEl(msg);
       default: return createFallbackEl(msg);
@@ -283,14 +369,29 @@
       case 'human': updateHumanEl(el, msg); break;
       case 'assistant': updateAssistantEl(el, msg); break;
       case 'tool': updateToolEl(el, msg); break;
-      case 'thought': break;
+      case 'thought': updateThoughtEl(el, msg); break;
       case 'plan': updatePlanEl(el, msg); break;
+      case 'todo_list': updateTodoListEl(el, msg); break;
       case 'run_command': updateRunCommandEl(el, msg); break;
       case 'loading': break;
     }
   }
 
   // --- Human message ---
+
+  function createQuotedWidget(text) {
+    const wrap = document.createElement('div');
+    wrap.className = 'quoted-widget';
+    const lab = document.createElement('div');
+    lab.className = 'quoted-label';
+    lab.textContent = 'Quoted';
+    const body = document.createElement('div');
+    body.className = 'quoted-text';
+    body.textContent = text;
+    wrap.appendChild(lab);
+    wrap.appendChild(body);
+    return wrap;
+  }
 
   function createHumanEl(msg) {
     const el = document.createElement('div');
@@ -299,6 +400,10 @@
 
     const bubble = document.createElement('div');
     bubble.className = 'human-bubble';
+
+    if (msg.quoted && msg.quoted.text) {
+      bubble.appendChild(createQuotedWidget(msg.quoted.text));
+    }
 
     if (msg.mentions && msg.mentions.length > 0) {
       const mentionsRow = document.createElement('div');
@@ -321,11 +426,157 @@
   }
 
   function updateHumanEl(el, msg) {
+    const bubble = el.querySelector('.human-bubble');
+    let qw = el.querySelector('.quoted-widget');
+    if (msg.quoted && msg.quoted.text) {
+      if (!qw && bubble) {
+        qw = createQuotedWidget(msg.quoted.text);
+        bubble.insertBefore(qw, bubble.firstChild);
+      } else if (qw) {
+        const body = qw.querySelector('.quoted-text');
+        if (body) body.textContent = msg.quoted.text;
+      }
+    } else if (qw) {
+      qw.remove();
+    }
     const text = el.querySelector('.human-text');
     if (text) text.textContent = msg.text;
   }
 
   // --- Assistant message ---
+
+  let codeBlockFsOverlay = null;
+
+  function closeCodeBlockFullscreen() {
+    if (!codeBlockFsOverlay) return;
+    codeBlockFsOverlay.remove();
+    codeBlockFsOverlay = null;
+    document.body.style.overflow = '';
+    document.removeEventListener('keydown', onCodeBlockFsKeydown);
+  }
+
+  function onCodeBlockFsKeydown(e) {
+    if (e.key === 'Escape') closeCodeBlockFullscreen();
+  }
+
+  /** Full-screen overlay for long code/diff (mobile-friendly scroll + safe areas). */
+  function openCodeBlockFullscreen(wrapper) {
+    closeCodeBlockFullscreen();
+    const viewport = wrapper.querySelector('.code-block-viewport');
+    const headerEl = wrapper.querySelector('.code-block-header');
+    const title = (headerEl && headerEl.textContent.trim()) || 'Code';
+
+    const overlay = document.createElement('div');
+    overlay.className = 'code-block-fs-overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-label', title);
+
+    const backdrop = document.createElement('div');
+    backdrop.className = 'code-block-fs-backdrop';
+    backdrop.addEventListener('click', closeCodeBlockFullscreen);
+
+    const panel = document.createElement('div');
+    panel.className = 'code-block-fs-panel';
+
+    const panelHead = document.createElement('div');
+    panelHead.className = 'code-block-fs-panel-header';
+    const titleSpan = document.createElement('span');
+    titleSpan.className = 'code-block-fs-title';
+    titleSpan.textContent = title;
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'code-block-fs-close';
+    closeBtn.setAttribute('aria-label', 'Close');
+    closeBtn.textContent = '\u2715';
+    closeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeCodeBlockFullscreen();
+    });
+    panelHead.appendChild(titleSpan);
+    panelHead.appendChild(closeBtn);
+
+    const scroll = document.createElement('div');
+    scroll.className = 'code-block-fs-scroll';
+    if (viewport && viewport.firstElementChild) {
+      scroll.appendChild(viewport.firstElementChild.cloneNode(true));
+    }
+
+    panel.appendChild(panelHead);
+    panel.appendChild(scroll);
+    overlay.appendChild(backdrop);
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+    codeBlockFsOverlay = overlay;
+    document.body.style.overflow = 'hidden';
+    document.addEventListener('keydown', onCodeBlockFsKeydown);
+    closeBtn.focus();
+  }
+
+  /** Native code/diff from server `CodeBlockItem` (no mirrored Monaco HTML). */
+  function createNativeBlockFromItem(item, filenameFallback) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'code-block native-code-block';
+
+    const title = (item.filename || item.language || filenameFallback || '').trim();
+    const toolbar = document.createElement('div');
+    toolbar.className =
+      'code-block-toolbar' + (title ? '' : ' code-block-toolbar--actions-only');
+    if (title) {
+      const header = document.createElement('div');
+      header.className = 'code-block-header';
+      header.textContent = title;
+      toolbar.appendChild(header);
+    }
+
+    const expandBtn = document.createElement('button');
+    expandBtn.type = 'button';
+    expandBtn.className = 'code-block-fullscreen-btn';
+    expandBtn.setAttribute('aria-label', 'View full screen');
+    expandBtn.innerHTML =
+      '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>';
+    expandBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openCodeBlockFullscreen(wrapper);
+    });
+    toolbar.appendChild(expandBtn);
+    wrapper.appendChild(toolbar);
+
+    const viewport = document.createElement('div');
+    viewport.className = 'code-block-viewport';
+
+    const body = document.createElement('div');
+    body.className = 'code-block-diff-plain';
+    if (item.blockKind === 'diff' && item.diffLines && item.diffLines.length > 0) {
+      for (const line of item.diffLines) {
+        const row = document.createElement('div');
+        const k = ['add', 'rem', 'ctx', 'meta', 'hunk'].includes(line.kind) ? line.kind : 'ctx';
+        row.className = 'code-block-diff-line code-block-diff-line--' + k;
+        row.textContent = line.text;
+        body.appendChild(row);
+      }
+    } else {
+      const pre = document.createElement('pre');
+      const code = document.createElement('code');
+      code.textContent = item.code || '';
+      pre.appendChild(code);
+      body.appendChild(pre);
+      body.classList.add('code-block-diff-plain--raw');
+    }
+    viewport.appendChild(body);
+    wrapper.appendChild(viewport);
+    return wrapper;
+  }
+
+  function appendAssistantNativeBlocks(bubble, msg) {
+    if (!bubble) return;
+    bubble.querySelectorAll(':scope > .native-code-block').forEach((n) => n.remove());
+    if (!msg.codeBlocks?.length) return;
+    for (const item of msg.codeBlocks) {
+      if (!item || (!item.code?.trim() && !(item.diffLines && item.diffLines.length))) continue;
+      bubble.appendChild(createNativeBlockFromItem(item));
+    }
+  }
 
   function createAssistantEl(msg) {
     const el = document.createElement('div');
@@ -339,6 +590,7 @@
       const content = document.createElement('div');
       content.className = 'assistant-content markdown-body';
       content.innerHTML = sanitizeHtml(msg.html);
+      normalizeMarkdownCodeBlocks(content);
       bubble.appendChild(content);
     } else {
       const content = document.createElement('div');
@@ -347,44 +599,25 @@
       bubble.appendChild(content);
     }
 
-    if (msg.codeBlocks && msg.codeBlocks.length > 0) {
-      msg.codeBlocks.forEach(cb => {
-        bubble.appendChild(createCodeBlockEl(cb));
-      });
-    }
+    appendAssistantNativeBlocks(bubble, msg);
 
     el.appendChild(bubble);
     return el;
   }
 
   function updateAssistantEl(el, msg) {
+    const bubble = el.querySelector('.assistant-bubble');
     const content = el.querySelector('.assistant-content');
     if (!content) return;
     if (msg.html) {
       content.innerHTML = sanitizeHtml(msg.html);
+      normalizeMarkdownCodeBlocks(content);
       content.classList.add('markdown-body');
     } else {
       content.textContent = msg.text;
+      content.classList.remove('markdown-body');
     }
-  }
-
-  function createCodeBlockEl(cb) {
-    const wrapper = document.createElement('div');
-    wrapper.className = 'code-block';
-
-    if (cb.filename || cb.language) {
-      const header = document.createElement('div');
-      header.className = 'code-block-header';
-      header.textContent = cb.filename || cb.language || '';
-      wrapper.appendChild(header);
-    }
-
-    const pre = document.createElement('pre');
-    const code = document.createElement('code');
-    code.textContent = cb.code;
-    pre.appendChild(code);
-    wrapper.appendChild(pre);
-    return wrapper;
+    appendAssistantNativeBlocks(bubble, msg);
   }
 
   // --- Tool call ---
@@ -449,7 +682,41 @@
     }
 
     el.appendChild(line);
+    syncToolDiffHost(el, msg);
     return el;
+  }
+
+  /** Tool edit diff: native block from `diffBlock` (structured lines). */
+  function syncToolDiffHost(el, msg) {
+    const db = msg.diffBlock;
+    const hasBody =
+      db &&
+      ((db.diffLines && db.diffLines.length > 0) || (db.code && String(db.code).trim().length > 0));
+    let host = el.querySelector('.tool-diff-host');
+
+    if (!hasBody) {
+      if (host) {
+        delete host._nativeDiffKey;
+        host.remove();
+      }
+      return;
+    }
+
+    const key = JSON.stringify({
+      bk: db.blockKind,
+      c: db.code,
+      d: db.diffLines,
+      f: db.filename || msg.filename,
+    });
+    if (!host) {
+      host = document.createElement('div');
+      host.className = 'tool-diff-host';
+      el.appendChild(host);
+    }
+    if (host._nativeDiffKey === key) return;
+    host._nativeDiffKey = key;
+    host.innerHTML = '';
+    host.appendChild(createNativeBlockFromItem(db, msg.filename));
   }
 
   function updateToolEl(el, msg) {
@@ -457,9 +724,43 @@
     if (icon) icon.textContent = msg.status === 'completed' ? '\u2713' : '\u23F3';
     const line = el.querySelector('.tool-line');
     if (line) line.className = 'tool-line ' + msg.status;
+    syncToolDiffHost(el, msg);
   }
 
   // --- Thought block ---
+
+  function formatThoughtLine(msg) {
+    const dur = (msg.duration || '').trim();
+    const detail = (msg.detail || '').trim();
+    if (msg.thoughtKind === 'step_summary') {
+      const a = (msg.action || '').trim();
+      return detail ? `${a || 'Steps'} — ${detail}` : (a || 'Steps');
+    }
+    if (msg.thoughtKind === 'thinking_step') {
+      const a = (msg.action || '').trim();
+      if (dur) return `${a || 'Step'} · ${dur}`;
+      if (a) {
+        if (/^thought$/i.test(a)) return 'Thought';
+        if (/ing$/i.test(a)) return `${a.replace(/\.\.\.?$/, '')}…`;
+        return a;
+      }
+      return 'Thinking…';
+    }
+    if (dur) return `Thought for ${dur}`;
+    const action = (msg.action || '').trim();
+    if (action) {
+      if (/^thought$/i.test(action)) return 'Thought';
+      if (/ing$/i.test(action)) return `${action.replace(/\.\.\.?$/, '')}…`;
+      return action;
+    }
+    return 'Thinking…';
+  }
+
+  function syncThoughtLineClasses(inner, msg) {
+    inner.classList.remove('thought-line-summary', 'thought-line-step');
+    if (msg.thoughtKind === 'step_summary') inner.classList.add('thought-line-summary');
+    else if (msg.thoughtKind === 'thinking_step') inner.classList.add('thought-line-step');
+  }
 
   function createThoughtEl(msg) {
     const el = document.createElement('div');
@@ -468,26 +769,46 @@
 
     const inner = document.createElement('div');
     inner.className = 'thought-line';
-    inner.textContent = msg.duration ? `Thought for ${msg.duration}` : 'Thinking...';
+    syncThoughtLineClasses(inner, msg);
+    inner.textContent = formatThoughtLine(msg);
     el.appendChild(inner);
     return el;
   }
 
+  function updateThoughtEl(el, msg) {
+    const inner = el.querySelector('.thought-line');
+    if (inner) {
+      syncThoughtLineClasses(inner, msg);
+      inner.textContent = formatThoughtLine(msg);
+    }
+  }
+
   // --- Plan block ---
 
-  function createPlanEl(msg) {
-    const el = document.createElement('div');
-    el.className = 'chat-el el-plan';
-    el.dataset.id = msg.id;
+  function emitClickAction(selectorPath) {
+    socket.emit('command:click_action', {
+      commandId: crypto.randomUUID(),
+      selectorPath,
+    });
+  }
 
+  function buildPlanCard(msg) {
     const card = document.createElement('div');
-    card.className = 'plan-card';
+    card.className = 'plan-card plan-card-widget';
 
     if (msg.label) {
-      const labelEl = document.createElement('div');
-      labelEl.className = 'plan-label';
-      labelEl.textContent = msg.label;
-      card.appendChild(labelEl);
+      const header = document.createElement('div');
+      header.className = 'plan-widget-header';
+      const icon = document.createElement('span');
+      icon.className = 'plan-widget-icon';
+      icon.setAttribute('aria-hidden', 'true');
+      icon.textContent = '\u2712';
+      const fn = document.createElement('span');
+      fn.className = 'plan-widget-filename';
+      fn.textContent = msg.label;
+      header.appendChild(icon);
+      header.appendChild(fn);
+      card.appendChild(header);
     }
 
     const title = document.createElement('div');
@@ -495,7 +816,13 @@
     title.textContent = msg.title;
     card.appendChild(title);
 
-    if (msg.description) {
+    if (msg.descriptionHtml) {
+      const desc = document.createElement('div');
+      desc.className = 'plan-description markdown-body';
+      desc.innerHTML = sanitizeHtml(msg.descriptionHtml);
+      normalizeMarkdownCodeBlocks(desc);
+      card.appendChild(desc);
+    } else if (msg.description) {
       const desc = document.createElement('div');
       desc.className = 'plan-description';
       desc.textContent = msg.description;
@@ -505,7 +832,7 @@
     if (msg.todos && msg.todos.length > 0) {
       const todoList = document.createElement('div');
       todoList.className = 'plan-todo-list';
-      msg.todos.forEach(function (todo) {
+      msg.todos.forEach((todo) => {
         const item = document.createElement('div');
         item.className = 'plan-todo-item';
         const dot = document.createElement('span');
@@ -518,6 +845,13 @@
         todoList.appendChild(item);
       });
       card.appendChild(todoList);
+    }
+
+    if (msg.todosMoreCount && msg.todosMoreCount > 0) {
+      const more = document.createElement('div');
+      more.className = 'plan-todos-more';
+      more.textContent = `${msg.todosMoreCount} more`;
+      card.appendChild(more);
     }
 
     if (msg.todosTotal > 0) {
@@ -538,56 +872,121 @@
       card.appendChild(progress);
     }
 
-    const actionsRow = document.createElement('div');
-    actionsRow.className = 'plan-actions-row';
-    if (msg.actions && msg.actions.length > 0) {
-      msg.actions.forEach(function (action) {
-        const btn = document.createElement('button');
-        btn.className = action.type === 'build' ? 'plan-btn plan-btn-build' : 'plan-btn plan-btn-view';
-        btn.textContent = action.label;
-        btn.addEventListener('click', function () {
-          socket.emit('command:click_action', {
-            commandId: crypto.randomUUID(),
-            selectorPath: action.selectorPath,
-          });
-        });
-        actionsRow.appendChild(btn);
-      });
-    }
-    if (msg.model) {
-      const modelBadge = document.createElement('span');
-      modelBadge.className = 'plan-model-badge';
-      modelBadge.textContent = msg.model;
-      actionsRow.appendChild(modelBadge);
-    }
-    if (actionsRow.childNodes.length > 0) card.appendChild(actionsRow);
+    const hasActions = (msg.actions && msg.actions.length > 0) || msg.modelDropdownSelectorPath || msg.model;
+    if (hasActions) {
+      const toolbar = document.createElement('div');
+      toolbar.className = 'plan-actions-toolbar';
 
-    el.appendChild(card);
+      const left = document.createElement('div');
+      left.className = 'plan-actions-left';
+      if (msg.actions) {
+        const viewAct = msg.actions.find((a) => a.type === 'view_plan');
+        if (viewAct) {
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'plan-btn plan-btn-view';
+          btn.textContent = viewAct.label || 'View Plan';
+          btn.addEventListener('click', () => emitClickAction(viewAct.selectorPath));
+          left.appendChild(btn);
+        }
+      }
+      toolbar.appendChild(left);
+
+      const center = document.createElement('div');
+      center.className = 'plan-actions-center';
+      if (msg.modelDropdownSelectorPath) {
+        const pill = document.createElement('button');
+        pill.type = 'button';
+        pill.className = 'plan-model-pill';
+        const lab = document.createElement('span');
+        lab.className = 'plan-model-pill-text';
+        lab.textContent = msg.model || 'Model';
+        const chev = document.createElement('span');
+        chev.className = 'plan-model-pill-chev';
+        chev.textContent = '\u25BE';
+        pill.appendChild(lab);
+        pill.appendChild(chev);
+        pill.addEventListener('click', () => emitClickAction(msg.modelDropdownSelectorPath));
+        center.appendChild(pill);
+      } else if (msg.model) {
+        const badge = document.createElement('span');
+        badge.className = 'plan-model-badge-inline';
+        badge.textContent = msg.model;
+        center.appendChild(badge);
+      }
+      toolbar.appendChild(center);
+
+      const right = document.createElement('div');
+      right.className = 'plan-actions-right';
+      if (msg.actions) {
+        const buildAct = msg.actions.find((a) => a.type === 'build');
+        if (buildAct) {
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'plan-btn plan-btn-build';
+          btn.textContent = buildAct.label || 'Build';
+          btn.addEventListener('click', () => emitClickAction(buildAct.selectorPath));
+          right.appendChild(btn);
+        }
+      }
+      toolbar.appendChild(right);
+      card.appendChild(toolbar);
+    }
+
+    return card;
+  }
+
+  function createPlanEl(msg) {
+    const el = document.createElement('div');
+    el.className = 'chat-el el-plan';
+    el.dataset.id = msg.id;
+    el.appendChild(buildPlanCard(msg));
     return el;
   }
 
   function updatePlanEl(el, msg) {
-    const title = el.querySelector('.plan-title');
-    if (title) title.textContent = msg.title;
-    const bar = el.querySelector('.plan-progress-bar');
-    if (bar && msg.todosTotal > 0) {
-      bar.style.width = Math.round((msg.todosCompleted / msg.todosTotal) * 100) + '%';
-    }
-    const text = el.querySelector('.plan-progress-text');
-    if (text) text.textContent = msg.todosCompleted + '/' + msg.todosTotal;
+    const oldCard = el.querySelector('.plan-card');
+    if (oldCard) el.replaceChild(buildPlanCard(msg), oldCard);
+  }
 
-    if (msg.todos) {
-      const todoList = el.querySelector('.plan-todo-list');
-      if (todoList) {
-        const items = todoList.querySelectorAll('.plan-todo-item');
-        msg.todos.forEach(function (todo, i) {
-          if (items[i]) {
-            const dot = items[i].querySelector('.plan-todo-dot');
-            if (dot) dot.className = 'plan-todo-dot plan-todo-' + todo.status;
-          }
-        });
-      }
-    }
+  // --- Standalone todo list (matches Telegram §3.9) ---
+
+  function createTodoListEl(msg) {
+    const el = document.createElement('div');
+    el.className = 'chat-el el-todo-list';
+    el.dataset.id = msg.id;
+    const card = document.createElement('div');
+    card.className = 'todo-list-card';
+    const head = document.createElement('div');
+    head.className = 'todo-list-card-title';
+    head.textContent = `${msg.title} (${msg.todosCompleted}/${msg.todosTotal})`;
+    card.appendChild(head);
+    const list = document.createElement('div');
+    list.className = 'todo-list-card-items';
+    msg.todos.forEach((todo) => {
+      const row = document.createElement('div');
+      row.className = 'todo-list-card-row';
+      const icon = document.createElement('span');
+      icon.className = 'todo-list-card-icon';
+      icon.textContent = todo.status === 'completed' ? '✅'
+        : todo.status === 'in_progress' ? '🔵' : '⚪';
+      const tx = document.createElement('span');
+      tx.className = 'todo-list-card-text';
+      tx.textContent = todo.text;
+      row.appendChild(icon);
+      row.appendChild(tx);
+      list.appendChild(row);
+    });
+    card.appendChild(list);
+    el.appendChild(card);
+    return el;
+  }
+
+  function updateTodoListEl(el, msg) {
+    const fresh = createTodoListEl(msg);
+    const newCard = fresh.querySelector('.todo-list-card');
+    const oldCard = el.querySelector('.todo-list-card');
+    if (newCard && oldCard) el.replaceChild(newCard, oldCard);
   }
 
   // --- Run command ---
@@ -689,6 +1088,9 @@
     const tmp = document.createElement('div');
     tmp.innerHTML = html;
     tmp.querySelectorAll('script, iframe, object, embed, form').forEach(el => el.remove());
+    tmp
+      .querySelectorAll('.composer-message-codeblock, .composer-code-block-container, .ui-code-block')
+      .forEach((el) => el.remove());
     tmp.querySelectorAll('*').forEach(el => {
       for (const attr of Array.from(el.attributes)) {
         if (attr.name.startsWith('on') || attr.name === 'srcdoc') {
@@ -701,6 +1103,62 @@
       }
     });
     return tmp.innerHTML;
+  }
+
+  function normalizeMarkdownCodeBlocks(root) {
+    if (!root) return;
+    function extractStructuredCodeText(el) {
+      let out = '';
+      function walk(node) {
+        if (!node) return;
+        if (node.nodeType === Node.TEXT_NODE) {
+          out += node.textContent || '';
+          return;
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) return;
+        const tag = (node.tagName || '').toLowerCase();
+        if (tag === 'br') {
+          out += '\n';
+          return;
+        }
+        const before = out.length;
+        node.childNodes.forEach(walk);
+        const isLineLike =
+          tag === 'div' ||
+          tag === 'p' ||
+          tag === 'li' ||
+          node.matches?.('[data-line], .line');
+        if (isLineLike && out.length > before && !out.endsWith('\n')) {
+          out += '\n';
+        }
+      }
+      walk(el);
+      return out.replace(/\n{3,}/g, '\n\n').replace(/\s+\n/g, '\n').trimEnd();
+    }
+
+    root.querySelectorAll('code').forEach((codeEl) => {
+      if (codeEl.closest('pre')) return;
+      if (
+        codeEl.className.includes('md-inline-') ||
+        codeEl.closest('p, li, a, h1, h2, h3, h4, h5, h6')
+      ) {
+        return;
+      }
+
+      const text = extractStructuredCodeText(codeEl);
+      const looksBlockLike =
+        text.includes('\n') ||
+        !!codeEl.querySelector('br,[data-line],.line,div,p') ||
+        /(?:^|\s)(?:language-|shiki)/.test(codeEl.className);
+      if (!looksBlockLike) return;
+
+      const pre = document.createElement('pre');
+      const code = document.createElement('code');
+      code.className = codeEl.className || '';
+      code.textContent = text;
+      pre.appendChild(code);
+      codeEl.replaceWith(pre);
+    });
   }
 
   // --- Approvals ---

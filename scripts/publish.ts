@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync, existsSync, writeFileSync, unlinkSync } from 'fs';
 import { execSync } from 'child_process';
 import { resolve } from 'path';
 
@@ -69,21 +69,47 @@ function publicHasChanges(): boolean {
   return status.trim().length > 0;
 }
 
-function commitAndTag(version: string, body: string): void {
-  const message = body ? `v${version}\n\n${body}` : `v${version}`;
-  execSync(`git commit -m ${JSON.stringify(message)}`, { cwd: PUBLIC_ROOT, stdio: 'inherit' });
-
+function ensureTag(version: string, cwd: string, label: string): void {
   try {
-    execSync(`git tag v${version}`, { cwd: PUBLIC_ROOT, stdio: 'inherit' });
-    console.log(`✓ Tagged v${version}`);
+    execSync(`git tag v${version}`, { cwd, stdio: 'inherit' });
+    console.log(`✓ Tagged v${version} in ${label}`);
   } catch {
-    console.log(`⚠ Tag v${version} already exists, skipping`);
+    console.log(`⚠ Tag v${version} already exists in ${label}, skipping`);
   }
 }
 
-const OVSX_TOKEN_PATH = resolve(DEV_ROOT, 'openvsx_token');
+function commitAndTag(version: string, body: string): void {
+  const message = body ? `v${version}\n\n${body}` : `v${version}`;
+  const msgFile = resolve(PUBLIC_ROOT, '.git', 'COMMIT_MSG_TMP');
+  writeFileSync(msgFile, message, 'utf-8');
+  try {
+    execSync(`git commit -F ${JSON.stringify(msgFile)}`, { cwd: PUBLIC_ROOT, stdio: 'inherit' });
+  } finally {
+    try { unlinkSync(msgFile); } catch {}
+  }
 
-function publishToOpenVsx(): void {
+  ensureTag(version, PUBLIC_ROOT, 'public');
+  ensureTag(version, DEV_ROOT, 'dev');
+}
+
+const OVSX_TOKEN_PATH = resolve(DEV_ROOT, 'openvsx_token');
+const RELEASES_DIR = resolve(DEV_ROOT, 'releases');
+
+function vsixPath(version: string): string {
+  return resolve(RELEASES_DIR, `cursor-remote-${version}.vsix`);
+}
+
+function packageVsix(version: string): string {
+  const out = vsixPath(version);
+  console.log('\n— Packaging .vsix —');
+  execSync(`npx @vscode/vsce package --no-dependencies --out ${JSON.stringify(out)}`, {
+    cwd: DEV_ROOT,
+    stdio: 'inherit',
+  });
+  return out;
+}
+
+function publishToOpenVsx(vsix: string): void {
   if (!existsSync(OVSX_TOKEN_PATH)) {
     console.error('✗ openvsx_token file not found. Create it with your Open VSX access token.');
     process.exit(1);
@@ -95,19 +121,28 @@ function publishToOpenVsx(): void {
     process.exit(1);
   }
 
-  console.log('\n— Packaging .vsix —');
-  execSync('npx @vscode/vsce package --no-dependencies --out /tmp/cursor-remote.vsix', {
-    cwd: DEV_ROOT,
-    stdio: 'inherit',
-  });
-
   console.log('\n— Publishing to Open VSX —');
-  execSync(`npx ovsx publish /tmp/cursor-remote.vsix -p ${token}`, {
+  execSync(`npx ovsx publish ${JSON.stringify(vsix)} -p ${token}`, {
     cwd: DEV_ROOT,
     stdio: 'inherit',
   });
 
   console.log('✓ Published to Open VSX');
+}
+
+function createGitHubRelease(version: string, body: string, vsix: string): void {
+  console.log('\n— Creating GitHub Release —');
+  const notesFile = resolve(PUBLIC_ROOT, '.git', 'RELEASE_NOTES_TMP');
+  writeFileSync(notesFile, body, 'utf-8');
+  try {
+    execSync(
+      `gh release create v${version} ${JSON.stringify(vsix)} --title "v${version}" --notes-file ${JSON.stringify(notesFile)} --latest`,
+      { cwd: PUBLIC_ROOT, stdio: 'inherit' },
+    );
+  } finally {
+    try { unlinkSync(notesFile); } catch {}
+  }
+  console.log(`✓ Created GitHub Release v${version} with .vsix asset`);
 }
 
 function main(): void {
@@ -152,17 +187,28 @@ function main(): void {
 
       if (doPush) {
         execSync('git push && git push --tags', { cwd: PUBLIC_ROOT, stdio: 'inherit' });
-        console.log('✓ Pushed to origin');
+        console.log('✓ Pushed public repo to origin');
+        execSync('git push && git push --tags', { cwd: DEV_ROOT, stdio: 'inherit' });
+        console.log('✓ Pushed dev repo to origin');
       } else {
         console.log(`\n✓ Committed v${version} to public repo`);
-        console.log(`\nNext step:`);
+        console.log(`\nNext steps:`);
         console.log(`  cd ${PUBLIC_ROOT} && git push && git push --tags`);
+        console.log(`  cd ${DEV_ROOT} && git push --tags`);
       }
     }
   }
 
   if (doOvsx) {
-    publishToOpenVsx();
+    const vsix = existsSync(vsixPath(version))
+      ? vsixPath(version)
+      : packageVsix(version);
+
+    publishToOpenVsx(vsix);
+
+    if (changelogBody && doPush) {
+      createGitHubRelease(version, changelogBody, vsix);
+    }
   }
 }
 

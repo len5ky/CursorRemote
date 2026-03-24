@@ -5,6 +5,7 @@ import { InlineKeyboard } from 'grammy';
 import { parse as parseHtml, HTMLElement as ParsedEl, TextNode } from 'node-html-parser';
 import type {
   ChatElement,
+  CodeBlockItem,
   HumanMessage,
   AssistantMessage,
   ToolCallElement,
@@ -13,7 +14,9 @@ import type {
   PlanTodo,
   TodoListBlock,
   RunCommand,
+  LoadingIndicator,
   Approval,
+  ComposerQueueState,
 } from '../../types.js';
 
 const TG_MSG_LIMIT = 4096;
@@ -35,12 +38,35 @@ export function formatElement(
     case 'plan': return formatPlan(element, hashCallback);
     case 'todo_list': return formatTodoList(element);
     case 'run_command': return formatRunCommand(element, hashCallback);
-    case 'loading': return { html: '' };
+    case 'loading': return formatLoading(element);
   }
 }
 
+export function formatActivity(text: string): string {
+  return `<i>● ${escapeHtml(text)}…</i>`;
+}
+
+/** Forum message body for composer toolbar queue; empty string if no queue. */
+export function formatComposerQueue(queue: ComposerQueueState | undefined): string {
+  if (!queue?.items?.length) return '';
+  const hdr = queue.queueLabel?.trim() || 'Queued';
+  const lines: string[] = [`<b>${escapeHtml(hdr)}</b>`, ''];
+  for (const it of queue.items) {
+    const t = it.text.trim() || '(empty)';
+    lines.push(`▸ ${escapeHtml(t.length > 220 ? `${t.slice(0, 219)}…` : t)}`);
+  }
+  return lines.join('\n');
+}
+
 function formatHuman(msg: HumanMessage): FormattedMessage {
-  let html = `<b>You:</b> ${escapeHtml(msg.text)}`;
+  const parts: string[] = [];
+  if (msg.quoted?.text) {
+    parts.push(
+      `<blockquote expandable="false">${escapeHtml(msg.quoted.text)}</blockquote>`
+    );
+  }
+  parts.push(`<b>You:</b> ${escapeHtml(msg.text)}`);
+  let html = parts.join('\n');
   if (msg.mentions.length > 0) {
     const mentionStr = msg.mentions.map(m => `@${escapeHtml(m.name)}`).join(' ');
     html += `\n<i>${mentionStr}</i>`;
@@ -53,6 +79,13 @@ function formatAssistant(msg: AssistantMessage): FormattedMessage {
   return { html };
 }
 
+function toolDiffStatsSuffix(msg: Pick<ToolCallElement, 'additions' | 'deletions'>): string {
+  const stats: string[] = [];
+  if (msg.additions !== undefined) stats.push(`<b>+${msg.additions}</b>`);
+  if (msg.deletions !== undefined) stats.push(`<b>-${msg.deletions}</b>`);
+  return stats.length > 0 ? `  ${stats.join(' ')}` : '';
+}
+
 function formatTool(
   msg: ToolCallElement,
   hashCallback: (selectorPath: string) => string
@@ -60,12 +93,12 @@ function formatTool(
   const icon = msg.status === 'completed' ? '✓' : '●';
 
   if (msg.filename) {
-    const stats: string[] = [];
-    if (msg.additions !== undefined) stats.push(`<b>+${msg.additions}</b>`);
-    if (msg.deletions !== undefined) stats.push(`<b>-${msg.deletions}</b>`);
-    const statsStr = stats.length > 0 ? `  ${stats.join(' ')}` : '';
+    const statsStr = toolDiffStatsSuffix(msg);
     const action = msg.action ? `<b>${escapeHtml(msg.action)}</b> ` : '';
-    let html = `${icon} ${action}<code>${escapeHtml(msg.filename)}</code>${statsStr}`;
+    const detailSuffix = msg.details && msg.details !== msg.filename
+      ? msg.details.replace(msg.filename, '').trim() : '';
+    const rangeInfo = detailSuffix ? ` ${escapeHtml(detailSuffix)}` : '';
+    let html = `${icon} ${action}<code>${escapeHtml(msg.filename)}</code>${rangeInfo}${statsStr}`;
 
     if (msg.blocked) {
       html += `\n⚠️ ${escapeHtml(msg.blocked)}`;
@@ -101,20 +134,83 @@ function formatTool(
       keyboard.text('📄 View Full', `dif:${msg.toolCallId.substring(0, 8)}:${hash}`);
       return { html, keyboard };
     }
-    return { html: `${icon} <b>${escapeHtml(msg.action || '')}</b> ${escapeHtml(firstLine)}` };
+    return { html: `${icon} <b>${escapeHtml(msg.action || '')}</b> ${escapeHtml(firstLine)}${toolDiffStatsSuffix(msg)}` };
   }
 
   let line = `${icon} <b>${escapeHtml(msg.action || 'Tool')}</b>`;
   if (msg.details) line += ` <code>${escapeHtml(msg.details)}</code>`;
+  line += toolDiffStatsSuffix(msg);
   return { html: line };
 }
 
+/** True while the thought header still looks in-flight (not a completed step summary). */
+export function thoughtAppearsInProgress(msg: ThoughtBlock): boolean {
+  if (msg.duration) return false;
+  if (msg.thoughtKind === 'step_summary' && (msg.detail || '').trim().length > 0) return false;
+  const d = msg.detail?.trim() ?? '';
+  if (d && !/^for\s/i.test(d)) return false;
+  return true;
+}
+
+function activityLabelMatchesThoughtAction(activity: string, thoughtAction: string): boolean {
+  const norm = (s: string) =>
+    s
+      .trim()
+      .toLowerCase()
+      .replace(/…+/gu, '')
+      .replace(/\.+$/u, '')
+      .replace(/\s+/g, ' ');
+  const a = norm(activity);
+  const b = norm(thoughtAction);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (b.startsWith(a) || a.startsWith(b)) return true;
+  if (a.length <= 24 && b.includes(a)) return true;
+  if (b.length <= 24 && a.includes(b)) return true;
+  return false;
+}
+
+/**
+ * When agentActivityText duplicates an in-flight 📎 step-summary line, skip the ephemeral
+ * ● activity message — otherwise Telegram shows two near-identical lines (and two spoilers).
+ */
+export function activityRedundantWithInProgressStepSummary(
+  activityText: string | undefined,
+  elements: ChatElement[]
+): boolean {
+  if (!activityText?.trim()) return false;
+  const recent = elements.slice(-24);
+  for (let i = recent.length - 1; i >= 0; i--) {
+    const el = recent[i];
+    if (el.type !== 'thought') continue;
+    if (el.thoughtKind !== 'step_summary' || !el.action) continue;
+    if (!thoughtAppearsInProgress(el)) continue;
+    if (activityLabelMatchesThoughtAction(activityText, el.action)) return true;
+  }
+  return false;
+}
+
 function formatThought(msg: ThoughtBlock): FormattedMessage {
+  const spoiler = thoughtAppearsInProgress(msg) ? ' <tg-spoiler>*spoiler*</tg-spoiler>' : '';
+  if (msg.thoughtKind === 'step_summary' && msg.action) {
+    const detail = msg.detail ? ` — <code>${escapeHtml(msg.detail)}</code>` : '';
+    return { html: `<b>📎 ${escapeHtml(msg.action)}</b>${detail}${spoiler}` };
+  }
+  if (msg.thoughtKind === 'thinking_step' && msg.action) {
+    const timing = msg.duration ? ` · ${escapeHtml(msg.duration)}` : '';
+    const detail = msg.detail && !msg.duration ? ` ${escapeHtml(msg.detail)}` : '';
+    return { html: `<i>◆ ${escapeHtml(msg.action)}${detail}${timing}</i>${spoiler}` };
+  }
   if (msg.action) {
     const detail = msg.detail ? ` ${escapeHtml(msg.detail)}` : '';
-    return { html: `<i>💭 ${escapeHtml(msg.action)}${detail}</i>` };
+    return { html: `<i>💭 ${escapeHtml(msg.action)}${detail}</i>${spoiler}` };
   }
   return { html: `<i>💭 Thought for ${escapeHtml(msg.duration)}</i>` };
+}
+
+function formatLoading(msg: LoadingIndicator): FormattedMessage {
+  const text = msg.text ? `● ${escapeHtml(msg.text)}…` : '💭 Thinking…';
+  return { html: `<i>${text}</i>` };
 }
 
 function formatPlan(
@@ -445,10 +541,20 @@ export function escapeHtml(text: string): string {
     .replace(/>/g, '&gt;');
 }
 
-function cursorHtmlToTelegram(
-  html: string,
-  codeBlocks?: { language?: string; filename?: string; code: string }[]
-): string {
+function codeBlockItemTelegramBody(cb: CodeBlockItem): string {
+  if (cb.blockKind === 'diff' && cb.diffLines && cb.diffLines.length > 0) {
+    return cb.diffLines
+      .map(l => {
+        const prefix =
+          l.kind === 'add' ? '+ ' : l.kind === 'rem' ? '- ' : l.kind === 'meta' || l.kind === 'hunk' ? '  ' : '  ';
+        return prefix + l.text;
+      })
+      .join('\n');
+  }
+  return cb.code || '';
+}
+
+function cursorHtmlToTelegram(html: string, codeBlocks?: CodeBlockItem[]): string {
   const root = parseHtml(html);
   let cbIdx = 0;
 
@@ -468,7 +574,10 @@ function cursorHtmlToTelegram(
     for (const node of parent.childNodes) {
       if (node instanceof TextNode) {
         const text = node.textContent;
-        if (!text.trim()) continue;
+        if (!text.trim()) {
+          if (result && !result.endsWith(' ') && !result.endsWith('\n')) result += ' ';
+          continue;
+        }
         result += escapeHtml(text);
       } else if (node instanceof ParsedEl) {
         result += walkElement(node);
@@ -485,12 +594,15 @@ function cursorHtmlToTelegram(
     if (tag === 'div' && hasClass(el, 'ui-scroll-area__scrollbar')) return '';
     if (tag === 'div' && hasClass(el, 'ui-code-block-copy-overlay')) return '';
 
-    // Cursor's Shiki code block
-    if (tag === 'div' && hasClass(el, 'composer-message-codeblock')) {
+    // Cursor composer / Shiki code block (markdown may still embed these)
+    if (
+      tag === 'div' &&
+      (hasClass(el, 'composer-message-codeblock') || hasClass(el, 'composer-code-block-container'))
+    ) {
       if (codeBlocks && cbIdx < codeBlocks.length) {
         const cb = codeBlocks[cbIdx++];
         const lang = cb.language ? ` class="language-${escapeHtml(cb.language)}"` : '';
-        return `\n<pre><code${lang}>${escapeHtml(cb.code)}</code></pre>\n`;
+        return `\n<pre><code${lang}>${escapeHtml(codeBlockItemTelegramBody(cb))}</code></pre>\n`;
       }
       return '\n' + extractShikiCode(el) + '\n';
     }

@@ -1,7 +1,7 @@
 {
   "name": "cursor-remote",
   "displayName": "CursorRemote",
-  "version": "0.1.38",
+  "version": "0.1.39",
   "description": "Remote control your local Cursor AI agent — monitor, approve, and send tasks from your phone or Telegram.",
   "publisher": "cursor-remote",
   "repository": {
@@ -214,7 +214,7 @@
   },
   "scripts": {
     "dev": "mkdir -p temp data && tsx scripts/dev-wrapper.ts",
-    "build": "tsc && rm -rf dist/client && cp -r src/client dist/client && cp node_modules/socket.io/client-dist/socket.io.min.js dist/client/socket.io.min.js",
+    "build": "tsc && rm -rf dist/client && cp -r src/client dist/client",
     "build:ext": "node extension/esbuild.js --production",
     "watch:ext": "node extension/esbuild.js --watch",
     "package": "tsx scripts/bump-build.ts && mkdir -p releases && npx @vscode/vsce package --no-dependencies --out releases/",
@@ -222,7 +222,11 @@
     "release": "tsx scripts/release.ts",
     "publish:public": "tsx scripts/publish.ts",
     "start": "mkdir -p temp data && node dist/server/index.js",
-    "discover": "tsx src/discovery/discover-dom.ts"
+    "discover": "tsx src/discovery/discover-dom.ts",
+    "record": "mkdir -p data && tsx scripts/record-cdp.ts",
+    "replay": "tsx scripts/replay-cdp.ts",
+    "probe": "tsx scripts/probe-cdp.ts",
+    "wait-record": "tsx scripts/wait-record.ts"
   },
   "dependencies": {
     "@grammyjs/auto-retry": "^2.0.2",

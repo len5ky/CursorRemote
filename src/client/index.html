@@ -20,6 +20,14 @@
       </div>
     </header>
 
+    <div id="composer-queue-bar" class="composer-queue-bar hidden" aria-live="polite">
+      <div class="composer-queue-header">
+        <span class="composer-queue-chevron" aria-hidden="true">&#9660;</span>
+        <span id="composer-queue-label" class="composer-queue-label"></span>
+      </div>
+      <div id="composer-queue-items" class="composer-queue-items"></div>
+    </div>
+
     <nav id="window-bar" class="window-bar hidden">
       <div id="window-list" class="window-list"></div>
     </nav>
@@ -31,8 +39,8 @@
 
     <main id="messages" role="log" aria-live="polite">
       <div id="empty-state" class="empty-state">
-        <p>Waiting for connection to Cursor IDE...</p>
-        <p class="hint">Make sure Cursor is running with<br><code>--remote-debugging-port=9222</code></p>
+        <p id="empty-state-primary">Waiting for connection to Cursor IDE...</p>
+        <p id="empty-state-hint" class="hint">Make sure Cursor is running with<br><code>--remote-debugging-port=9222</code></p>
       </div>
     </main>
 
@@ -84,7 +92,7 @@
 
   <div id="toast-container"></div>
 
-  <script src="socket.io.min.js"></script>
+  <script src="/socket.io/socket.io.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

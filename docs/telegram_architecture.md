@@ -74,6 +74,8 @@ TelegramTransport.onStatePatch(patch)
   └─ patch.chatTabs? / patch.windows? → (no automatic push, shown on /topics /status)
 ```
 
+**Window snapshots**: In production, `WindowMonitor` fires `window:update` → `TelegramTransport.processWindow` → `doProcessWindow` for each connected window. That path sends **ephemeral activity** (with thought dedup), **composer queue** summary, and **content messages** using the same `formatter` + `MessageTracker` as above — not only `state:patch`.
+
 ### 3.2 Inbound: Telegram → Cursor
 
 ```
@@ -128,16 +130,23 @@ The main class that implements the `Transport` interface.
 
 **Rate limiting**:
 - `@grammyjs/auto-retry` plugin on the bot: catches 429 responses, waits `retry_after`, retries up to 3 times (max 60s delay)
-- `SendQueue` class: serializes all outbound `sendMessage`/`editMessageText` calls with 3s pacing between sends and 1s between edits
+- `SendQueue` class (configured in `TelegramTransport`): serializes outbound `sendMessage` / `editMessageText` with **~300ms** between sends and **100ms** between edits (see `send-queue.ts` defaults vs. transport override)
 - `seenThreads` set: on first encounter with a thread, only last 5 messages are sent (older ones marked as "skipped" in tracker)
+
+**Activity messages** (ephemeral status line):
+
+- On each window snapshot, `doProcessWindow` compares `snapshot.agentActivityText` to tracked state per `threadId`, but only when `snapshot.agentActivityLive` is true.
+- If activity is **redundant** with a matching in-progress `step_summary` thought in recent messages, any existing activity Telegram message is **deleted** and no new one is sent (`activityRedundantWithInProgressStepSummary` in `formatter.ts`).
+- Otherwise: send → edit on label change → delete when live activity clears; `cleanStaleActivity()` removes stuck rows after `AGENT_ACTIVITY_STALE_MS` (`src/server/activity-stale.ts`, 30s). The same timeout clears the web header via `StateManager`.
+- Persists activity `message_id` map to `data/telegram-activity.json` so restarts can clean orphaned messages.
 
 **State subscription**:
 - `stateManager.on('state:patch', this.onStatePatch)`
 - `stateManager.on('connection:changed', this.onConnectionChanged)`
 
 **Typing loop**:
-- When `agentStatus` is `thinking`, `generating`, or `running_tool`, a `setInterval` calls `sendChatAction('typing')` every 4 seconds to the active topic
-- The interval is cleared when status returns to `idle` or `waiting_approval`
+- When `agentActivityLive` is true and `agentStatus` is `thinking`, `generating`, or `running_tool`, a `setInterval` calls `sendChatAction('typing')` every 4 seconds to the active topic
+- The interval is cleared as soon as live activity drops, even if a stale status label remains in Cursor's DOM
 - Typing actions bypass the SendQueue (cheap and non-critical)
 
 ### 4.2 Formatter (`formatter.ts`)
@@ -147,6 +156,9 @@ Pure functions that convert `ChatElement` objects to Telegram HTML strings and o
 **Key functions**:
 - `formatElement(element: ChatElement): { html: string; keyboard?: InlineKeyboard }` — dispatch by element type
 - `formatAssistant(msg: AssistantMessage): string` — convert Cursor HTML to Telegram HTML, passes `msg.codeBlocks` for accurate code rendering
+- `formatActivity(text: string): string` — ephemeral activity line (`● label…`), no spoiler tag
+- `thoughtAppearsInProgress(msg: ThoughtBlock): boolean` — exported; used for activity dedup and thought formatting
+- `activityRedundantWithInProgressStepSummary(activityText, elements): boolean` — suppresses duplicate activity vs. `📎` step-summary thoughts
 - `formatPlan(plan: PlanBlock): { html: string; keyboard: InlineKeyboard }` — full plan card with todo list
 - `formatRunCommand(cmd: RunCommand): { html: string; keyboard: InlineKeyboard }` — command card with buttons
 - `formatApprovals(approvals: Approval[]): { html: string; keyboard: InlineKeyboard }` — approval message with buttons
@@ -157,7 +169,7 @@ Pure functions that convert `ChatElement` objects to Telegram HTML strings and o
 Uses `node-html-parser` to parse Cursor's HTML into a DOM tree, then recursively walks it to produce Telegram-safe HTML. This replaced the original regex approach, which could not handle Cursor's complex nested structures (Shiki code blocks with per-line divs, class-based bold spans, tables).
 
 Key conversions:
-- Shiki code blocks (`div.composer-message-codeblock`) → `<pre><code>` using pre-extracted `codeBlocks` array (with proper line breaks), falling back to walking `.ui-default-code__line-content` elements
+- Composer code blocks (`composer-message-codeblock`, `composer-code-block-container`) → `<pre><code>` using structured **`codeBlocks`** (`CodeBlockItem`: joined `code` or diff lines with `+`/`-` prefixes), falling back to walking `.ui-default-code__line-content` / Monaco line elements when needed
 - Headings (`<h1>`–`<h6>`) → `<b>text</b>` with newline boundaries
 - Bold spans (`<span class="font-semibold">`, `data-streamdown="strong"`) → `<b>`
 - Paragraphs (`<p>`) → content with line breaks

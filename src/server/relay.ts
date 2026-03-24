@@ -1,6 +1,6 @@
 import express from 'express';
 import { createServer } from 'http';
-import { Server as SocketServer } from 'socket.io';
+import { Server as SocketServer, type Socket } from 'socket.io';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { randomBytes, timingSafeEqual } from 'crypto';
@@ -9,6 +9,12 @@ import type { ServerConfig, CursorState, CommandPayload, CommandResult } from '.
 import type { StateManager } from './state-manager.js';
 import type { CommandExecutor } from './command-executor.js';
 import type { CDPBridge } from './cdp-bridge.js';
+import {
+  WEBAPP_SESSION_COOKIE,
+  createWebappSessionStore,
+  parseSessionCookie,
+  type WebappSessionStore,
+} from './webapp-sessions.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -78,6 +84,7 @@ const LOGIN_PAGE_HTML = `<!DOCTYPE html>
       try {
         const res = await fetch('/api/login', {
           method: 'POST',
+          credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ password: pw.value }),
         });
@@ -108,8 +115,11 @@ export class Relay {
   private commandExecutor: CommandExecutor;
   private cdpBridge: CDPBridge;
 
-  private sessions = new Set<string>();
+  private sessionStore: WebappSessionStore;
   private loginAttempts = new Map<string, RateLimitEntry>();
+
+  /** Max-Age for session cookie (30 days), aligned with typical “stay signed in” expectation. */
+  private static readonly SESSION_COOKIE_MAX_AGE_SEC = 30 * 24 * 60 * 60;
 
   private get authEnabled(): boolean {
     return this.config.webappPassword.length > 0;
@@ -125,12 +135,16 @@ export class Relay {
     this.stateManager = stateManager;
     this.commandExecutor = commandExecutor;
     this.cdpBridge = cdpBridge;
+    this.sessionStore = createWebappSessionStore(config.dataDir);
 
     this.app = express();
     this.httpServer = createServer(this.app);
     this.io = new SocketServer(this.httpServer, {
-      serveClient: false,
-      cors: { origin: '*', methods: ['GET', 'POST'] },
+      cors: {
+        origin: true,
+        methods: ['GET', 'POST'],
+        credentials: true,
+      },
     });
 
     this.setupRoutes();
@@ -184,9 +198,31 @@ export class Relay {
     return { allowed: true, retryAfter: 0 };
   }
 
-  private isValidSession(token: string | undefined): boolean {
-    if (!this.authEnabled) return true;
-    return typeof token === 'string' && this.sessions.has(token);
+  /** First matching credential that exists in the persisted session store. */
+  private resolveHttpSession(req: express.Request): string | undefined {
+    if (!this.authEnabled) return undefined;
+    const authHeader = req.headers.authorization;
+    if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+      const t = authHeader.slice(7).trim();
+      if (this.sessionStore.has(t)) return t;
+    }
+    const fromCookie = parseSessionCookie(req.headers.cookie, WEBAPP_SESSION_COOKIE);
+    if (fromCookie && this.sessionStore.has(fromCookie)) return fromCookie;
+    return undefined;
+  }
+
+  private resolveSocketSession(socket: Socket): string | undefined {
+    if (!this.authEnabled) return undefined;
+    const raw = socket.handshake.auth?.token;
+    const bearer = typeof raw === 'string' ? raw.trim() : '';
+    if (bearer && this.sessionStore.has(bearer)) return bearer;
+    const cookieHeader = socket.handshake.headers.cookie;
+    const fromCookie = parseSessionCookie(
+      typeof cookieHeader === 'string' ? cookieHeader : undefined,
+      WEBAPP_SESSION_COOKIE
+    );
+    if (fromCookie && this.sessionStore.has(fromCookie)) return fromCookie;
+    return undefined;
   }
 
   private setupRoutes(): void {
@@ -223,16 +259,28 @@ export class Relay {
       }
 
       const token = randomBytes(32).toString('hex');
-      this.sessions.add(token);
+      this.sessionStore.add(token);
       console.log(`[relay] Successful login from ${ip}`);
+      res.setHeader(
+        'Set-Cookie',
+        [
+          `${WEBAPP_SESSION_COOKIE}=${token}`,
+          'HttpOnly',
+          'Path=/',
+          'SameSite=Lax',
+          `Max-Age=${Relay.SESSION_COOKIE_MAX_AGE_SEC}`,
+        ].join('; ')
+      );
       return res.json({ token });
     });
 
-    this.app.get('/health', (_req, res) => {
+    this.app.get('/health', (req, res) => {
       const state = this.stateManager.getCurrentState();
+      const sessionOk = !this.authEnabled || this.resolveHttpSession(req) !== undefined;
       res.json({
         ok: true,
         authRequired: this.authEnabled,
+        sessionValid: sessionOk,
         connected: state.connected,
         agentStatus: state.agentStatus,
         clients: this.io.engine.clientsCount,
@@ -272,9 +320,7 @@ export class Relay {
     const authMiddleware: express.RequestHandler = (req, res, next) => {
       if (!this.authEnabled) return next();
 
-      const authHeader = req.headers.authorization;
-      const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
-      if (this.isValidSession(token)) return next();
+      if (this.resolveHttpSession(req)) return next();
 
       if (req.path.startsWith('/api/')) {
         return res.status(401).json({ error: 'Unauthorized' });
@@ -288,9 +334,21 @@ export class Relay {
   private setupSocketHandlers(): void {
     if (this.authEnabled) {
       this.io.use((socket, next) => {
-        const token = socket.handshake.auth?.token as string | undefined;
-        if (this.isValidSession(token)) return next();
-        console.warn(`[relay] Socket.io auth rejected (${socket.id}) — token: ${token ? token.slice(0, 8) + '...' : 'empty'}`);
+        const resolved = this.resolveSocketSession(socket);
+        if (resolved) return next();
+        const raw = socket.handshake.auth?.token;
+        const hint =
+          typeof raw === 'string' && raw.length > 0
+            ? raw.slice(0, 8) + '...'
+            : parseSessionCookie(
+                typeof socket.handshake.headers.cookie === 'string'
+                  ? socket.handshake.headers.cookie
+                  : undefined,
+                WEBAPP_SESSION_COOKIE
+              )
+              ? 'cookie-present'
+              : 'empty';
+        console.warn(`[relay] Socket.io auth rejected (${socket.id}) — ${hint}`);
         next(new Error('Unauthorized'));
       });
     }

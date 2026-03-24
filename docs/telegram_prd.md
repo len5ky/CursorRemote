@@ -103,7 +103,7 @@ Cursor's HTML is converted to Telegram-safe HTML using `node-html-parser` DOM tr
 - `<p>` → content with paragraph breaks
 - `<code>` → `<code>` (preserved)
 - `<pre>` with language → `<pre><code class="language-X">`
-- `<div class="composer-message-codeblock">` (Shiki code blocks) → `<pre><code>` with line breaks from pre-extracted `codeBlocks` or by walking `.ui-default-code__line-content` elements
+- `<div class="composer-message-codeblock">` / `composer-code-block-container` (composer code + diff widgets) → `<pre><code>` using structured **`codeBlocks`** (`CodeBlockItem`: plain `code` or diff lines with `+`/`-` prefixes) or, when needed, walking `.ui-default-code__line-content` / Monaco `.view-line` text
 - `<table>` with `<th>`/`<td>` → pipe-separated rows with bold headers
 - `<a href>` → `<a href>`
 - `<blockquote>` → `<blockquote>`
@@ -192,6 +192,17 @@ Buttons are generated from `approval.actions`. Only shown actions appear as butt
 ```
 
 The standalone todo list widget (`.todo-list-container`) is extracted separately from the plan widget. Status icons: `✅` completed, `🔵` in progress, `⚪` pending. No inline keyboard — todo lists are informational only.
+
+### 3.10 Ephemeral activity indicator
+
+While the agent is busy, the transport may show a **short status line** in the topic (from the shared live-activity contract: `agentActivityText` + `agentActivityLive`), separate from synced chat messages:
+
+- **Format**: Italic line `● {label}…` via `formatActivity()` in `formatter.ts`. It does **not** use `<tg-spoiler>` (spoilers are reserved for in-progress **thought** lines where hiding detail is intentional).
+- **Lifecycle**: Sent when activity text first appears; **edited** when the label changes; **deleted** when activity clears or goes stale. Message IDs are tracked per forum thread (`activityMsgIds`, persisted in `data/telegram-activity.json` for cleanup).
+- **Typing**: Independently, `sendChatAction('typing')` is refreshed on an interval while `agentActivityLive` is true (and status is an active mode), so stale status text alone cannot keep Telegram typing alive.
+- **Dedup against thoughts**: If recent `ChatElement`s already include an in-flight **`step_summary` thought** whose title matches the activity label (`📎` formatted line), the bot **suppresses** the ephemeral activity line and **deletes** any existing activity message for that topic. This avoids two parallel lines (e.g. both “Exploring…”) with redundant spoilers. Implemented by `activityRedundantWithInProgressStepSummary()` using exported `thoughtAppearsInProgress()`.
+
+Stale activity rows are also removed on a timer if timestamps stop updating (`AGENT_ACTIVITY_STALE_MS` in `activity-stale.ts`, used by Telegram and `StateManager` for the web UI).
 
 ---
 
@@ -289,7 +300,7 @@ When the bot receives a message in a topic:
 
 | Constraint | Limit | Our Usage |
 |-----------|-------|-----------|
-| Message send rate (per chat) | ~20/min | Send queue paces at 500ms between sends. Safe. |
+| Message send rate (per chat) | ~20/min | Send queue paces at ~300ms between sends (transport override). Safe. |
 | Message edit rate (per message) | ~30/sec | Edit queue paces at 100ms between edits. Safe. |
 | Message text length | 4096 chars | Split long messages at paragraph boundaries |
 | Callback data length | 64 bytes | Use hash-based lookup map for selector paths |
@@ -302,7 +313,7 @@ Three layers of protection:
 
 1. **grammy auto-retry plugin** (`@grammyjs/auto-retry`): Automatically catches 429 responses and waits the `retry_after` duration before retrying (up to 3 attempts, max 60s delay).
 
-2. **SendQueue**: All outbound `sendMessage` and `editMessageText` calls are serialized through a queue with 500ms pacing between sends and 100ms between edits. Edits have priority over sends. Typing actions bypass the queue. HTML parse errors trigger automatic plain-text fallback.
+2. **SendQueue**: All outbound `sendMessage` and `editMessageText` calls are serialized through a queue with **~300ms** pacing between sends and **100ms** between edits (`TelegramTransport` constructor; see `send-queue.ts`). Edits have priority over sends. Typing actions bypass the queue. HTML parse errors trigger automatic plain-text fallback.
 
 3. **Topic creation pacing**: `createForumTopic` calls during `/sync` and auto-creation are spaced 500ms apart.
 

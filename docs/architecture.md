@@ -94,8 +94,11 @@ Cursor IDE  ←──CDP──→  Relay Server  ←──socket.io──→  Ph
 2. Inside Cursor's renderer, it selects all `[data-flat-index]` elements
 3. For each element, reads `data-message-role` + `data-message-kind` to classify
 4. Extracts type-specific content into typed `ChatElement` objects
-5. Also extracts approval buttons, agent status, chat tabs, mode, and model info
-6. Returns a complete `CursorState` object or `null` on failure
+5. **Assistant messages**: `html` is **`.markdown-root` innerHTML only** (prose). **`codeBlocks`** is an array of **`CodeBlockItem`** structs built from composer code widgets (Shiki lines, Monaco `.view-line` text, line-aware plain-code fallback, diff decorations → `diffLines` with `add`/`rem`/`ctx`/…).
+6. **ToolCallElement**: when a composer code block is present on edit-review / compact / line tools, **`diffBlock`** stores the same **`CodeBlockItem`** shape for native web (and Telegram) rendering — not mirrored widget HTML.
+7. Also extracts approval buttons, base status UI, chat tabs, mode, model info, composer queue, and raw activity signals (`_rawSignals`)
+8. A shared helper (`activity-derive.ts`) converts `_rawSignals` + parsed messages into `agentStatus`, `agentActivityText`, `agentActivityLive`, and `agentActivitySource` so web + Telegram use the same live-activity contract
+9. Returns a complete `CursorState` object or `null` on failure
 
 **Element classification**:
 
@@ -109,8 +112,9 @@ Cursor IDE  ←──CDP──→  Relay Server  ←──socket.io──→  Ph
 Within the `ai`/`tool` branch, classification priority:
 1. `.composer-create-plan-container` → **PlanBlock** (widget variant with todos, actions)
 2. `.composer-terminal-tool-call-block-container` → **RunCommand** (command text, Run/Skip/Allow)
-3. `.composer-tool-former-message` → **ToolCallElement** (compact summary)
-4. `.ui-tool-call-line-action` → **ToolCallElement** (expanded tool call)
+3. `.composer-edit-file-review-wrapper` → **ToolCallElement** (edit/review card; optional **`diffBlock`** when a code block is present)
+4. `.composer-tool-former-message` → **ToolCallElement** (compact summary; may include **`diffBlock`**)
+5. `.ui-tool-call-line-action` → **ToolCallElement** (expanded tool call line; may include **`diffBlock`**)
 
 **Key DOM selectors used inside extraction**:
 
@@ -119,8 +123,9 @@ Within the `ai`/`tool` branch, classification priority:
 | Message wrappers        | `[data-flat-index]`                                     |
 | Human text              | `.aislash-editor-input-readonly`                        |
 | Mentions                | `.mention[data-mention-name]`                           |
-| AI markdown content     | `.markdown-root`                                        |
-| Code blocks             | `.composer-message-codeblock .ui-code-block`            |
+| AI markdown content     | `.markdown-root` innerHTML → assistant `html` (prose only) |
+| Code blocks             | `.composer-message-codeblock`, `.composer-code-block-container`, `.ui-code-block` → `codeBlocks[]` / `diffBlock` |
+| Tool structured diff    | Composer block inside tool host → `ToolCallElement.diffBlock` (`CodeBlockItem`) |
 | Tool call line          | `.ui-tool-call-line-action`, `.ui-tool-call-line-details` |
 | Compact tool summary    | `.composer-tool-former-message`                         |
 | Edit tool stats         | `.ui-edit-tool-call__filename`, `__additions`, `__deletions` |
@@ -204,6 +209,12 @@ The system uses a transport-agnostic architecture. The State Manager emits event
 - Route `command:switch_window` to CDP Bridge directly
 - Forward State Manager events to all connected sockets
 
+**Web client** (`src/client/app.js`, `src/client/styles.css`):
+
+- Renders `ChatElement` types into `#messages`; assistant HTML is passed through `sanitizeHtml` (strips scripts, event handlers, and embedded composer/Shiki roots).
+- **Native code/diff**: `createNativeBlockFromItem()` builds `.code-block.native-code-block` with a toolbar (title + full-screen), **`.code-block-viewport`** capped at ~7 lines (`--cb-font`, `--cb-lh`, `--cb-lines`) with scroll, and green/red line styles for structured diffs. Assistant **`codeBlocks`** append after prose; tool **`diffBlock`** mounts under **`.tool-diff-host`** (`syncToolDiffHost` / `updateToolEl`). Plain patch text is also classified to `diffLines` server-side so non-Monaco diffs still render with add/remove colors.
+- **Full-screen reader**: Expand opens **`.code-block-fs-overlay`** (modal, safe-area padding, backdrop + Escape close, 44px+ controls). Body scroll is locked while open.
+
 #### Telegram Transport (`transports/telegram/`)
 
 **Responsibility**: Bridge Cursor state to a Telegram supergroup with forum topics via the grammy bot framework.
@@ -221,11 +232,12 @@ The system uses a transport-agnostic architecture. The State Manager emits event
 3. User sends `/mode` command → bot replies with current mode + inline keyboard → user taps → `commandExecutor.setMode(modeId)`
 
 **Outbound flow** (Cursor → Telegram):
-1. State Manager emits `state:patch` with changed `messages`
-2. Transport diffs new vs. tracked messages per topic
-3. New elements → `sendMessage` with formatted HTML + optional inline keyboard
-4. Changed elements (e.g. streaming assistant text) → `editMessageText` on tracked message ID
-5. While `agentStatus` is active → `sendChatAction('typing')` every 4 seconds
+1. State Manager emits `state:patch` with changed `messages` (and related fields)
+2. `WindowMonitor` drives `doProcessWindow` per mapped topic: **activity line** (send/edit/delete from `agentActivityText` only when `agentActivityLive` is true, with dedup against in-flight step-summary thoughts), **composer queue** message, then chat elements
+3. Transport diffs new vs. tracked messages per topic
+4. New elements → `sendMessage` with formatted HTML + optional inline keyboard
+5. Changed elements (e.g. streaming assistant text) → `editMessageText` on tracked message ID
+6. While `agentActivityLive` is true and `agentStatus` is an active mode → `sendChatAction('typing')` every 4 seconds
 
 **Access control**: Middleware checks `update.from.id` against `TELEGRAM_ALLOWED_USERS` allowlist. Bot must be group admin with privacy mode OFF.
 
