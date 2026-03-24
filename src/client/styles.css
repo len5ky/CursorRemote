@@ -647,6 +647,14 @@ header {
 .tool-line.completed .tool-icon { color: var(--text-tertiary); }
 .tool-line.loading .tool-icon { color: var(--accent-yellow); }
 
+.tool-actions-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px 8px 2px;
+}
+
 .tool-icon {
   flex-shrink: 0;
   font-size: 12px;
@@ -952,6 +960,91 @@ header {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.plan-card-modal {
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+.plan-card-modal .plan-description.markdown-body,
+.plan-card-modal .plan-todo-list {
+  max-height: none;
+}
+
+.plan-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  background: rgba(0, 0, 0, 0.66);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 16px 12px;
+}
+
+.plan-modal-overlay.hidden { display: none; }
+
+.plan-modal {
+  width: 100%;
+  max-width: 600px;
+  max-height: min(82vh, 720px);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+}
+
+.plan-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+}
+
+.plan-modal-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.plan-modal-label {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-modal-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.3;
+}
+
+.plan-modal-close {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 26px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+
+.plan-modal-body {
+  overflow-y: auto;
+  padding: 16px;
 }
 
 /* --- Composer queue strip --- */

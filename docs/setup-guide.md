@@ -46,7 +46,7 @@ The CursorRemote extension provides the easiest setup experience with built-in s
 Download the latest `.vsix` from [releases](https://github.com/len5ky/CursorRemote/releases) and install:
 
 ```bash
-cursor --install-extension cursor-remote-0.1.39.vsix
+cursor --install-extension cursor-remote-0.1.40.vsix
 ```
 
 Or in Cursor: Command Palette (`Ctrl+Shift+P`) > **Extensions: Install from VSIX...** > select the file.
@@ -81,6 +81,16 @@ Open `http://<server-ip>:<port>` in any browser on your phone, tablet, or anothe
 ### Web client — code and diffs
 
 Assistant **code** and file-edit **diffs** are not copied as Cursor’s Monaco HTML. The relay sends structured **`codeBlocks`** / **`diffBlock`**; the UI shows a compact card (~**seven lines** with scroll inside the card, momentum scrolling on iOS). Tap the **expand** control to open a **full-screen** reader (large close control, tap outside or Escape to dismiss). This keeps long patches readable on small screens without dominating the chat.
+
+### Web client -- plan widgets and connection states
+
+Plan widgets in the web app now mirror the remote-control flow more closely:
+
+- **View Plan** opens a web modal and loads the full saved plan file when available, not just the compact widget summary.
+- **Plan model** opens a web picker with the real model options scraped from Cursor, then applies the selected option back in Cursor.
+- **Build** still triggers the underlying Cursor action directly.
+
+Connection labels are also more specific now. If the phone is still connected to the relay but Cursor/CDP extraction is stalled, the UI shows a waiting/extractor state instead of a generic browser disconnect. This is especially useful on macOS when backgrounded Cursor windows throttle CDP evaluation.
 
 ### Telegram (Extension)
 
@@ -310,14 +320,26 @@ Ensure `data/license.key` exists before running `npm start` (no prompt in produc
 - Get a valid key from the [store](https://cursor-remote.com/buy?utm_source=github&utm_medium=setup_guide&utm_campaign=license)
 
 #### "Disconnected" in web UI
-- Cursor running with `--remote-debugging-port=9222`?
-- `curl -m 5 http://localhost:9222/json` from the server machine
-- CDP has a 5s timeout; server retries with exponential backoff
+- First check `http://<server>:<port>/health` from the phone or tablet
+- `connected: false` means the relay is not attached to Cursor/CDP yet
+- `connected: true` with `extractorStatus: "waiting"` means the relay is attached to Cursor but is still waiting for the first DOM snapshot
+- `connected: true` with `extractorStatus: "stale"` means Cursor/CDP is still connected but DOM extraction is failing or background-throttled
+- `lastExtractionError` shows the latest extractor failure reason
+
+#### macOS: Cursor backgrounds and the phone stops updating
+- On macOS, Electron/Chromium can throttle a backgrounded Cursor window enough for `Runtime.evaluate` to time out
+- If `/health` shows `connected: true` and `extractorStatus: "stale"`, bring Cursor back to the foreground and wait for the next successful snapshot
+- The relay now backs off repeated extractor timeouts instead of hammering CDP continuously
 
 #### Phone/tablet can't connect
 - `curl http://<ip>:<port>/health` from another device
 - Check firewall, port forwarding, WSL2 networking
 - Verify the server is bound to `0.0.0.0` or your specific IP (not `127.0.0.1`)
+
+#### Older mobile browser shows a blank or broken UI
+- Recent builds no longer require `crypto.randomUUID()` support in the browser
+- If the page still fails to load, open the browser console and check for other unsupported Web APIs
+- Upgrade to the latest CursorRemote build before testing older iOS/Android browsers
 
 ### Extension-Specific
 

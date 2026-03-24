@@ -5,6 +5,10 @@ import { AGENT_ACTIVITY_STALE_MS } from './activity-stale.js';
 function emptyState(): CursorState {
   return {
     connected: false,
+    extractorStatus: 'idle',
+    lastExtractionAt: null,
+    consecutiveExtractionFailures: 0,
+    lastExtractionError: null,
     agentStatus: 'idle',
     agentActivityText: null,
     agentActivityLive: false,
@@ -58,19 +62,19 @@ export class StateManager extends EventEmitter {
    */
   onExtraction(newState: CursorState | null): void {
     if (newState === null) {
-      this.consecutiveNulls++;
-      if (this.consecutiveNulls === this.nullWarningThreshold) {
-        console.warn(
-          `[state-manager] ${this.nullWarningThreshold} consecutive null extractions. ` +
-          'Selectors may need updating — run: npm run discover'
-        );
-      }
+      this.onExtractionFailure('Extraction returned null');
       return;
     }
 
     this.consecutiveNulls = 0;
     this._generation++;
-    // Preserve bridge-managed fields that the DOM extractor doesn't populate
+    // Preserve bridge-managed fields that the DOM extractor should not own.
+    const now = Date.now();
+    newState.connected = this.currentState.connected;
+    newState.extractorStatus = this.currentState.connected ? 'ok' : 'idle';
+    newState.lastExtractionAt = now;
+    newState.consecutiveExtractionFailures = 0;
+    newState.lastExtractionError = null;
     newState.windows = this.currentState.windows;
     newState.activeWindowId = this.currentState.activeWindowId;
 
@@ -80,6 +84,30 @@ export class StateManager extends EventEmitter {
     if (!patch) return;
 
     this.currentState = stateForApply;
+    this.schedulePatch(patch);
+  }
+
+  onExtractionFailure(message: string | null): void {
+    this.consecutiveNulls++;
+    if (this.consecutiveNulls === this.nullWarningThreshold) {
+      console.warn(
+        `[state-manager] ${this.nullWarningThreshold} consecutive failed extractions. ` +
+        'Selectors may need updating or the Cursor window may be background-throttled.'
+      );
+    }
+
+    const connected = this.currentState.connected;
+    const nextState: CursorState = {
+      ...this.currentState,
+      extractorStatus:
+        connected && this.currentState.lastExtractionAt != null ? 'stale' : connected ? 'waiting' : 'idle',
+      consecutiveExtractionFailures: this.currentState.consecutiveExtractionFailures + 1,
+      lastExtractionError: message,
+    };
+
+    const patch = this.diff(this.currentState, nextState);
+    if (!patch) return;
+    this.currentState = nextState;
     this.schedulePatch(patch);
   }
 
@@ -154,9 +182,18 @@ export class StateManager extends EventEmitter {
   }
 
   onConnectionChanged(connected: boolean): void {
-    if (this.currentState.connected === connected) return;
-    this.currentState = { ...this.currentState, connected };
-    this.emit('state:patch', { connected });
+    const nextState: CursorState = {
+      ...this.currentState,
+      connected,
+      extractorStatus: connected ? 'waiting' : 'idle',
+      lastExtractionAt: null,
+      consecutiveExtractionFailures: 0,
+      lastExtractionError: null,
+    };
+    const patch = this.diff(this.currentState, nextState);
+    if (!patch) return;
+    this.currentState = nextState;
+    this.emit('state:patch', patch);
     this.emit('connection:changed', connected);
   }
 
@@ -178,6 +215,26 @@ export class StateManager extends EventEmitter {
 
     if (prev.connected !== next.connected) {
       patch.connected = next.connected;
+      hasChange = true;
+    }
+
+    if (prev.extractorStatus !== next.extractorStatus) {
+      patch.extractorStatus = next.extractorStatus;
+      hasChange = true;
+    }
+
+    if (prev.lastExtractionAt !== next.lastExtractionAt) {
+      patch.lastExtractionAt = next.lastExtractionAt;
+      hasChange = true;
+    }
+
+    if (prev.consecutiveExtractionFailures !== next.consecutiveExtractionFailures) {
+      patch.consecutiveExtractionFailures = next.consecutiveExtractionFailures;
+      hasChange = true;
+    }
+
+    if (prev.lastExtractionError !== next.lastExtractionError) {
+      patch.lastExtractionError = next.lastExtractionError;
       hasChange = true;
     }
 

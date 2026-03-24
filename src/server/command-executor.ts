@@ -1,5 +1,5 @@
 import type { CdpClient } from './cdp-client.js';
-import type { SelectorConfig, CommandResult } from './types.js';
+import type { SelectorConfig, CommandResult, PlanModelOption } from './types.js';
 
 const MAX_RETRIES = 2;
 const RETRY_DELAY_MS = 500;
@@ -443,6 +443,60 @@ export class CommandExecutor {
     });
   }
 
+  async getPlanModelOptions(commandId: string, selectorPath: string): Promise<CommandResult> {
+    const result = await this.withRetryValue(commandId, async (client) => {
+      return await this.openPlanModelMenuAndReadOptions(client, selectorPath);
+    });
+    if (!result.ok) return result;
+    return { commandId, ok: true, data: result.data };
+  }
+
+  async setPlanModel(commandId: string, selectorPath: string, planModelId: string): Promise<CommandResult> {
+    return this.withRetry(commandId, async (client) => {
+      await this.openPlanModelMenu(client, selectorPath);
+      const selected = await client.evaluate(`
+        (() => {
+          const targetId = ${JSON.stringify(planModelId)};
+          const menu = document.querySelector('[data-testid="model-picker-menu"]');
+          if (!menu) return false;
+
+          const items = Array.from(menu.querySelectorAll('[id], [role="menuitem"], button, [data-testid]'));
+          const targetNorm = targetId.replace(/^label::/, '').trim().toLowerCase();
+
+          for (const item of items) {
+            const id = item.id || '';
+            const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();
+            if (!text) continue;
+
+            if (id === targetId || ('label::' + text) === targetId) {
+              const clickable = item.querySelector('.composer-unified-context-menu-item') || item;
+              clickable.click();
+              return true;
+            }
+
+            if (targetId.startsWith('label::') && text.toLowerCase() === targetNorm) {
+              const clickable = item.querySelector('.composer-unified-context-menu-item') || item;
+              clickable.click();
+              return true;
+            }
+          }
+          return false;
+        })()
+      `) as boolean;
+      if (!selected) throw new Error(`Plan model "${planModelId}" not found`);
+
+      await sleep(200);
+      const menuStillOpen = await client.evaluate(`
+        document.querySelector('[data-testid="model-picker-menu"]') !== null
+      `) as boolean;
+      if (menuStillOpen) {
+        await client.pressKey('Escape', 'Escape', 27);
+        await sleep(100);
+      }
+      console.log(`[command-executor] Plan model set to: ${planModelId}`);
+    });
+  }
+
   private async withRetry(
     commandId: string,
     action: (client: CdpClient) => Promise<void>
@@ -468,6 +522,95 @@ export class CommandExecutor {
     }
 
     return { commandId, ok: false, error: lastError };
+  }
+
+  private async withRetryValue<T>(
+    commandId: string,
+    action: (client: CdpClient) => Promise<T>
+  ): Promise<CommandResult & { data?: T }> {
+    if (!this.client || !this.client.isConnected()) {
+      return { commandId, ok: false, error: 'Not connected to Cursor' };
+    }
+
+    let lastError: string | undefined;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const data = await action(this.client);
+        return { commandId, ok: true, data };
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[command-executor] Attempt ${attempt + 1}/${MAX_RETRIES + 1} failed: ${lastError}`
+        );
+        if (attempt < MAX_RETRIES) {
+          await sleep(RETRY_DELAY_MS);
+        }
+      }
+    }
+
+    return { commandId, ok: false, error: lastError };
+  }
+
+  private async openPlanModelMenu(client: CdpClient, selectorPath: string): Promise<void> {
+    const opened = await client.evaluate(`
+      (() => {
+        const selector = ${JSON.stringify(selectorPath)};
+        const el = document.querySelector(selector);
+        if (!el) return false;
+        el.scrollIntoView({ block: 'center', behavior: 'instant' });
+        el.click();
+        return true;
+      })()
+    `) as boolean;
+    if (!opened) throw new Error('Plan model dropdown trigger not found');
+
+    await sleep(300);
+    const menuVisible = await client.evaluate(`
+      document.querySelector('[data-testid="model-picker-menu"]') !== null
+    `) as boolean;
+    if (!menuVisible) throw new Error('Plan model picker did not open');
+  }
+
+  private async openPlanModelMenuAndReadOptions(
+    client: CdpClient,
+    selectorPath: string
+  ): Promise<{ options: PlanModelOption[] }> {
+    await this.openPlanModelMenu(client, selectorPath);
+
+    const options = await client.evaluate(`
+      (() => {
+        const menu = document.querySelector('[data-testid="model-picker-menu"]');
+        if (!menu) return [];
+
+        const seen = new Set();
+        const out = [];
+        const items = Array.from(menu.querySelectorAll('[id], [role="menuitem"], button, [data-testid]'));
+        for (const item of items) {
+          const id = item.id || '';
+          const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();
+          if (!text) continue;
+
+          const clickable = item.querySelector('.composer-unified-context-menu-item') || item;
+          const key = id || text.toLowerCase();
+          if (!clickable || seen.has(key)) continue;
+          seen.add(key);
+
+          const cls = clickable.className || item.className || '';
+          const aria = clickable.getAttribute?.('aria-checked') || item.getAttribute?.('aria-checked') || '';
+          const selected = /selected|active|checked/.test(cls) || aria === 'true';
+          out.push({
+            id: id || ('label::' + text),
+            label: text,
+            selected,
+          });
+        }
+        return out;
+      })()
+    `) as PlanModelOption[];
+
+    await client.pressKey('Escape', 'Escape', 27);
+    await sleep(100);
+    return { options };
   }
 
   private async findFirstMatchingSelector(

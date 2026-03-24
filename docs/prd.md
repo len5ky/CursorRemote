@@ -411,7 +411,7 @@ Each `ChatElement` type renders distinctly:
 - **Assistant messages**: Left-aligned bubble with sanitized HTML from Cursor's markdown renderer (prose only: bold, lists, inline code, links). Composer/Shiki widget roots are stripped from `html` so the page does not depend on VS Code theme CSS. **Code and diffs** render from structured `codeBlocks` (`CodeBlockItem`: `blockKind` `code` or `diff`, optional `filename`/`language`, `code` text, and for diffs `diffLines` with `add`/`rem`/`ctx`/`meta`/`hunk`). Blocks are appended after the prose bubble. Each block shows a toolbar (filename or language when known + **full-screen** control). The body sits in **`.code-block-viewport`**: at most ~**7 lines** tall with **scroll** for overflow; full-screen opens a modal (safe areas on mobile, backdrop or Escape closes, large close control).
 - **Tool calls**: Compact single-line with status icon, action name, target details, and optionally filename with +/- change stats (green/red). **Edit / file-review tools** may include **`diffBlock`**: the same `CodeBlockItem` shape as assistant code blocks, rendered under the summary in **`.tool-diff-host`** with the same viewport, scroll, and full-screen behavior.
 - **Thought blocks**: Single line in muted text: "Thought for Xs"
-- **Plan widgets**: Rich card with title, description, scrollable todo list with colored status dots, progress bar, and action buttons (Build, View Plan). See §6.9.
+- **Plan widgets**: Rich card with title, description, scrollable todo list with colored status dots, progress bar, and action buttons (Build, View Plan), plus a full-plan modal and plan-scoped model picker in the web UI. See §6.9.
 - **Run commands**: Command card with description header, monospace command text, and action buttons (Run, Skip, Allow). See §6.10.
 - **Loading indicator**: Three animated dots
 
@@ -466,11 +466,13 @@ A rich interactive card that mirrors Cursor's plan UI. Rendered when a `PlanBloc
   - Todo text
   - Collapsed "N more" indicator if the widget had hidden items
 - **Progress bar**: Track with filled portion + "N/M" text label
-- **Actions row**: "View Plan" text button (left) + model name (center) + "Build" primary button (right)
+- **Actions row**: "View Plan" text button (left) + model name / picker (center) + "Build" primary button (right)
 
 **Behavior**:
 - "Build" emits `command:click_action` with the Build button's `selectorPath`
-- "View Plan" emits `command:click_action` with the View Plan button's `selectorPath`
+- "View Plan" opens a web modal; when a saved plan file is available, the modal loads the full plan body and todo list from disk so the phone view matches Telegram's full-plan view
+- Tapping the model pill opens a web-side picker populated from Cursor's current plan model menu, then applies the selected option back in Cursor
+- "Build" emits `command:click_action` with the Build button's `selectorPath`
 - The card updates in-place as todo statuses change during plan execution
 
 ### 6.10 Run Command Widget

@@ -139,6 +139,17 @@ export class CdpClient extends EventEmitter {
     return this.evaluate(expression);
   }
 
+  async callFunctionWithTimeout(
+    fn: (...args: never[]) => unknown,
+    args: unknown[],
+    timeoutMs: number
+  ): Promise<unknown> {
+    const argStr = args.map(a => JSON.stringify(a)).join(', ');
+    const shim = 'var __name = function(fn, _n){ return fn; };';
+    const expression = `${shim}(${fn.toString()})(${argStr})`;
+    return this.evaluate(expression, timeoutMs);
+  }
+
   /**
    * Click an element identified by a CSS selector.
    * Uses evaluate to scroll into view then dispatches a click event.

@@ -4,6 +4,26 @@
   'use strict';
 
   const AUTH_TOKEN_KEY = 'cursor-remote-token';
+  const defaultState = {
+    connected: false,
+    extractorStatus: 'idle',
+    lastExtractionAt: null,
+    consecutiveExtractionFailures: 0,
+    lastExtractionError: null,
+    agentStatus: 'idle',
+    agentActivityText: null,
+    agentActivityLive: false,
+    agentActivitySource: 'none',
+    messages: [],
+    pendingApprovals: [],
+    inputAvailable: false,
+    chatTabs: [],
+    mode: { current: 'agent', available: [] },
+    model: { current: 'Auto', currentId: '' },
+    windows: [],
+    activeWindowId: '',
+    composerQueue: { items: [] },
+  };
 
   function getAuthToken() {
     return localStorage.getItem(AUTH_TOKEN_KEY) || '';
@@ -12,6 +32,33 @@
   function getAuthHeaders() {
     const token = getAuthToken();
     return token ? { 'Authorization': 'Bearer ' + token } : {};
+  }
+
+  function newCommandId() {
+    const cryptoApi = globalThis.crypto;
+    if (cryptoApi && typeof cryptoApi.randomUUID === 'function') {
+      return cryptoApi.randomUUID();
+    }
+
+    const bytes = new Uint8Array(16);
+    if (cryptoApi && typeof cryptoApi.getRandomValues === 'function') {
+      cryptoApi.getRandomValues(bytes);
+    } else {
+      for (let i = 0; i < bytes.length; i++) {
+        bytes[i] = Math.floor(Math.random() * 256);
+      }
+    }
+
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    return [
+      hex.slice(0, 8),
+      hex.slice(8, 12),
+      hex.slice(12, 16),
+      hex.slice(16, 20),
+      hex.slice(20),
+    ].join('-');
   }
 
   async function checkAuth() {
@@ -46,25 +93,28 @@
 
   function bootstrap() {
 
-  let state = {
-    connected: false,
-    agentStatus: 'idle',
-    agentActivityText: null,
-    agentActivityLive: false,
-    agentActivitySource: 'none',
-    messages: [],
-    pendingApprovals: [],
-    inputAvailable: false,
-    chatTabs: [],
-    mode: { current: 'agent', available: [] },
-    model: { current: 'Auto', currentId: '' },
-    windows: [],
-    activeWindowId: '',
-    composerQueue: { items: [] },
-  };
+  let state = { ...defaultState };
 
   let userScrolledUp = false;
+  let autoScrollJob = 0;
   let notificationPermission = 'default';
+  let activePlanModal = null;
+  let activePlanModelContext = null;
+  const pendingCommandResults = new Map();
+
+  function isNearMessagesBottom() {
+    const threshold = 80;
+    return $messages.scrollTop + $messages.clientHeight >= $messages.scrollHeight - threshold;
+  }
+
+  function scheduleMessagesAutoScroll() {
+    const jobId = ++autoScrollJob;
+    requestAnimationFrame(() => {
+      if (jobId !== autoScrollJob) return;
+      if (userScrolledUp) return;
+      $messages.scrollTop = $messages.scrollHeight;
+    });
+  }
 
   const $messages = document.getElementById('messages');
   const $emptyState = document.getElementById('empty-state');
@@ -98,6 +148,14 @@
   const $sheetModeList = document.getElementById('sheet-mode-list');
   const $sheetModel = document.getElementById('sheet-model');
   const $sheetModelList = document.getElementById('sheet-model-list');
+  const $sheetPlanModel = document.getElementById('sheet-plan-model');
+  const $sheetPlanModelHeader = document.getElementById('sheet-plan-model-header');
+  const $sheetPlanModelList = document.getElementById('sheet-plan-model-list');
+  const $planModalOverlay = document.getElementById('plan-modal-overlay');
+  const $planModalLabel = document.getElementById('plan-modal-label');
+  const $planModalTitle = document.getElementById('plan-modal-title');
+  const $planModalBody = document.getElementById('plan-modal-body');
+  const $planModalClose = document.getElementById('plan-modal-close');
 
   const socket = io({
     reconnection: true,
@@ -113,8 +171,25 @@
     },
   });
 
-  socket.on('connect', () => updateConnectionUI('reconnecting'));
-  socket.on('disconnect', () => updateConnectionUI('disconnected'));
+  function sendCommandAwaitResult(eventName, payload) {
+    return new Promise((resolve) => {
+      const commandId = payload.commandId;
+      const timer = setTimeout(() => {
+        pendingCommandResults.delete(commandId);
+        resolve({ commandId, ok: false, error: 'Command timed out' });
+      }, 12000);
+
+      pendingCommandResults.set(commandId, (result) => {
+        clearTimeout(timer);
+        resolve(result);
+      });
+
+      socket.emit(eventName, payload);
+    });
+  }
+
+  socket.on('connect', () => renderAll());
+  socket.on('disconnect', () => renderAll());
 
   let connectFailCount = 0;
   socket.on('connect_error', (err) => {
@@ -126,7 +201,7 @@
   });
 
   socket.on('state:full', (newState) => {
-    state = newState;
+    state = { ...defaultState, ...newState };
     renderAll();
   });
 
@@ -137,16 +212,22 @@
 
   socket.on('connection:status', (data) => {
     state.connected = data.connected;
-    renderConnectionStatus();
+    renderAll();
   });
 
   socket.on('command:result', (result) => {
+    const pending = pendingCommandResults.get(result.commandId);
+    if (pending) {
+      pendingCommandResults.delete(result.commandId);
+      pending(result);
+      return;
+    }
     if (!result.ok) showToast(result.error || 'Command failed', 'error');
   });
 
   $messages.addEventListener('scroll', () => {
-    const threshold = 80;
-    userScrolledUp = $messages.scrollTop + $messages.clientHeight < $messages.scrollHeight - threshold;
+    autoScrollJob++;
+    userScrolledUp = !isNearMessagesBottom();
   });
 
   $input.addEventListener('input', () => {
@@ -170,7 +251,7 @@
     const action = approval.actions.find(a => a.type === 'approve' || a.type === 'approve_all');
     if (!action) return;
     socket.emit('command:approve', {
-      commandId: crypto.randomUUID(),
+      commandId: newCommandId(),
       approvalId: approval.id,
       selectorPath: action.selectorPath,
     });
@@ -183,7 +264,7 @@
     const action = approval.actions.find(a => a.type === 'reject');
     if (!action) return;
     socket.emit('command:reject', {
-      commandId: crypto.randomUUID(),
+      commandId: newCommandId(),
       approvalId: approval.id,
       selectorPath: action.selectorPath,
     });
@@ -191,18 +272,22 @@
   });
 
   $btnNewChat.addEventListener('click', () => {
-    socket.emit('command:new_chat', { commandId: crypto.randomUUID() });
+    socket.emit('command:new_chat', { commandId: newCommandId() });
     showToast('Creating new chat...', 'success');
   });
 
   $pillMode.addEventListener('click', () => openSheet('mode'));
   $pillModel.addEventListener('click', () => openSheet('model'));
   $sheetOverlay.addEventListener('click', closeSheet);
+  $planModalClose.addEventListener('click', closePlanModal);
+  $planModalOverlay.addEventListener('click', (e) => {
+    if (e.target === $planModalOverlay) closePlanModal();
+  });
 
   function sendMessage() {
     const text = $input.value.trim();
     if (!text) return;
-    socket.emit('command:send_message', { commandId: crypto.randomUUID(), text });
+    socket.emit('command:send_message', { commandId: newCommandId(), text });
     $input.value = '';
     $input.style.height = 'auto';
     $btnSend.disabled = true;
@@ -219,18 +304,72 @@
     renderInputState();
     renderTabs();
     renderModeModel();
+    syncPlanModalFromState();
   }
 
   function renderConnectionStatus() {
-    if (state.connected) updateConnectionUI('connected');
-    else if (socket.connected) updateConnectionUI('reconnecting');
-    else updateConnectionUI('disconnected');
+    const ui = getConnectionUiState();
+    updateConnectionUI(ui.status, ui.label);
   }
 
-  function updateConnectionUI(status) {
+  function updateConnectionUI(status, label) {
     $connDot.className = 'dot ' + status;
     const labels = { connected: 'Connected', disconnected: 'Disconnected', reconnecting: 'Connecting...' };
-    $connText.textContent = labels[status] || status;
+    $connText.textContent = label || labels[status] || status;
+  }
+
+  function getConnectionUiState() {
+    const lastError = (state.lastExtractionError || '').trim();
+    const timeoutLike = /timeout/i.test(lastError);
+
+    if (!socket.connected) {
+      return {
+        status: 'disconnected',
+        label: 'Relay disconnected',
+        emptyPrimary: 'Waiting for relay connection...',
+        emptyHint: 'Check that this page can reach the CursorRemote server.',
+      };
+    }
+
+    if (!state.connected) {
+      return {
+        status: 'reconnecting',
+        label: 'Waiting for Cursor',
+        emptyPrimary: 'Connecting to Cursor IDE...',
+        emptyHint: 'Make sure Cursor is running with<br><code>--remote-debugging-port=9222</code>',
+      };
+    }
+
+    if (state.extractorStatus === 'stale') {
+      return {
+        status: 'reconnecting',
+        label: timeoutLike ? 'Cursor backgrounded' : 'Cursor stalled',
+        emptyPrimary: timeoutLike
+          ? 'Cursor is connected but background-throttled.'
+          : 'Cursor is connected but extraction is failing.',
+        emptyHint: timeoutLike
+          ? 'Bring Cursor to the foreground on macOS, then wait for the next snapshot.'
+          : ('Last extractor error:<br><code>' + escapeHtml(lastError || 'unknown error') + '</code>'),
+      };
+    }
+
+    if (state.extractorStatus === 'waiting') {
+      return {
+        status: 'reconnecting',
+        label: 'Waiting for snapshot',
+        emptyPrimary: 'Connected to Cursor, waiting for the first snapshot...',
+        emptyHint: lastError
+          ? ('Last extractor error:<br><code>' + escapeHtml(lastError) + '</code>')
+          : 'The relay is connected to Cursor but has not captured a fresh DOM snapshot yet.',
+      };
+    }
+
+    return {
+      status: 'connected',
+      label: 'Connected',
+      emptyPrimary: 'No messages in this chat yet.',
+      emptyHint: 'Send a message below or switch chat tab / window in Cursor.',
+    };
   }
 
   function renderAgentStatus() {
@@ -302,18 +441,11 @@
 
   function renderMessages() {
     if (state.messages.length === 0) {
+      const ui = getConnectionUiState();
       $emptyState.style.display = '';
       $messages.querySelectorAll('.chat-el').forEach(el => el.remove());
-      if (state.connected) {
-        $emptyPrimary.textContent = 'No messages in this chat yet.';
-        $emptyHint.innerHTML = 'Send a message below or switch chat tab / window in Cursor.';
-      } else if (socket.connected) {
-        $emptyPrimary.textContent = 'Connecting to Cursor IDE...';
-        $emptyHint.innerHTML = 'Make sure Cursor is running with<br><code>--remote-debugging-port=9222</code>';
-      } else {
-        $emptyPrimary.textContent = 'Waiting for relay connection...';
-        $emptyHint.innerHTML = 'Check that this page can reach the CursorRemote server.';
-      }
+      $emptyPrimary.textContent = ui.emptyPrimary;
+      $emptyHint.innerHTML = ui.emptyHint;
       return;
     }
 
@@ -340,28 +472,33 @@
         } else {
           $messages.appendChild(el);
         }
+      } else if (el.dataset.msgType !== msg.type) {
+        const replacement = createElement(msg);
+        el.replaceWith(replacement);
+        el = replacement;
       } else {
         updateElement(el, msg);
       }
     });
 
-    if (!userScrolledUp) {
-      requestAnimationFrame(() => { $messages.scrollTop = $messages.scrollHeight; });
-    }
+    if (!userScrolledUp) scheduleMessagesAutoScroll();
   }
 
   function createElement(msg) {
+    let el;
     switch (msg.type) {
-      case 'human': return createHumanEl(msg);
-      case 'assistant': return createAssistantEl(msg);
-      case 'tool': return createToolEl(msg);
-      case 'thought': return createThoughtEl(msg);
-      case 'plan': return createPlanEl(msg);
-      case 'todo_list': return createTodoListEl(msg);
-      case 'run_command': return createRunCommandEl(msg);
-      case 'loading': return createLoadingEl(msg);
-      default: return createFallbackEl(msg);
+      case 'human': el = createHumanEl(msg); break;
+      case 'assistant': el = createAssistantEl(msg); break;
+      case 'tool': el = createToolEl(msg); break;
+      case 'thought': el = createThoughtEl(msg); break;
+      case 'plan': el = createPlanEl(msg); break;
+      case 'todo_list': el = createTodoListEl(msg); break;
+      case 'run_command': el = createRunCommandEl(msg); break;
+      case 'loading': el = createLoadingEl(msg); break;
+      default: el = createFallbackEl(msg); break;
     }
+    el.dataset.msgType = msg.type;
+    return el;
   }
 
   function updateElement(el, msg) {
@@ -682,6 +819,14 @@
     }
 
     el.appendChild(line);
+
+    if (msg.actions && msg.actions.length > 0) {
+      const actionsRow = document.createElement('div');
+      actionsRow.className = 'tool-actions-row';
+      appendRunStyleActionButtons(actionsRow, msg.actions);
+      el.appendChild(actionsRow);
+    }
+
     syncToolDiffHost(el, msg);
     return el;
   }
@@ -720,10 +865,23 @@
   }
 
   function updateToolEl(el, msg) {
-    const icon = el.querySelector('.tool-icon');
-    if (icon) icon.textContent = msg.status === 'completed' ? '\u2713' : '\u23F3';
-    const line = el.querySelector('.tool-line');
-    if (line) line.className = 'tool-line ' + msg.status;
+    const fresh = createToolEl(msg);
+    const newLine = fresh.querySelector('.tool-line');
+    const oldLine = el.querySelector('.tool-line');
+    if (newLine && oldLine) el.replaceChild(newLine, oldLine);
+
+    const newActions = fresh.querySelector('.tool-actions-row');
+    const oldActions = el.querySelector('.tool-actions-row');
+    if (newActions && oldActions) {
+      el.replaceChild(newActions, oldActions);
+    } else if (newActions && !oldActions) {
+      const diffHost = el.querySelector('.tool-diff-host');
+      if (diffHost) el.insertBefore(newActions, diffHost);
+      else el.appendChild(newActions);
+    } else if (!newActions && oldActions) {
+      oldActions.remove();
+    }
+
     syncToolDiffHost(el, msg);
   }
 
@@ -787,9 +945,136 @@
 
   function emitClickAction(selectorPath) {
     socket.emit('command:click_action', {
-      commandId: crypto.randomUUID(),
+      commandId: newCommandId(),
       selectorPath,
     });
+  }
+
+  function buildPlanFullContent(planData) {
+    const content = document.createElement('div');
+    content.className = 'plan-card plan-card-modal';
+
+    if (Array.isArray(planData.todos) && planData.todos.length > 0) {
+      const completed = planData.todos.filter((todo) => todo.status === 'completed').length;
+      const summary = document.createElement('div');
+      summary.className = 'plan-progress';
+      summary.textContent = `To-dos ${completed}/${planData.todos.length}`;
+      content.appendChild(summary);
+
+      const todoList = document.createElement('div');
+      todoList.className = 'plan-todo-list';
+      planData.todos.forEach((todo) => {
+        const item = document.createElement('div');
+        item.className = 'plan-todo-item';
+        const dot = document.createElement('span');
+        dot.className = 'plan-todo-dot plan-todo-' + todo.status;
+        item.appendChild(dot);
+        const text = document.createElement('span');
+        text.className = 'plan-todo-text';
+        text.textContent = todo.text;
+        item.appendChild(text);
+        todoList.appendChild(item);
+      });
+      content.appendChild(todoList);
+    }
+
+    if (planData.bodyHtml) {
+      const body = document.createElement('div');
+      body.className = 'plan-description markdown-body';
+      body.innerHTML = sanitizeHtml(planData.bodyHtml);
+      normalizeMarkdownCodeBlocks(body);
+      content.appendChild(body);
+    }
+
+    return content;
+  }
+
+  function buildPlanModalContent(msg, planData) {
+    if (planData) return buildPlanFullContent(planData);
+    const modalMsg = {
+      ...msg,
+      actions: Array.isArray(msg.actions)
+        ? msg.actions.filter((action) => action.type !== 'view_plan')
+        : msg.actions,
+    };
+    const content = buildPlanCard(modalMsg);
+    content.classList.add('plan-card-modal');
+    return content;
+  }
+
+  function renderPlanModal(msg) {
+    if (!msg) return;
+    $planModalLabel.textContent = msg.label || '';
+    $planModalLabel.style.display = msg.label ? '' : 'none';
+    $planModalTitle.textContent = msg.title || 'Plan';
+    $planModalBody.innerHTML = '';
+    $planModalBody.appendChild(buildPlanModalContent(msg, activePlanModal && activePlanModal.fullData));
+  }
+
+  async function loadFullPlanIntoModal(msg) {
+    if (!msg.label || !activePlanModal || activePlanModal.id !== msg.id) return;
+    activePlanModal.loading = true;
+    const result = await sendCommandAwaitResult('command:get_plan_full', {
+      commandId: newCommandId(),
+      type: 'get_plan_full',
+      planLabel: msg.label,
+    });
+    if (!activePlanModal || activePlanModal.id !== msg.id) return;
+    activePlanModal.loading = false;
+    if (!result.ok || !result.data) return;
+    activePlanModal.fullData = result.data;
+    renderPlanModal(msg);
+  }
+
+  function openPlanModal(msg) {
+    activePlanModal = { id: msg.id, label: msg.label || '', fullData: null, loading: false };
+    renderPlanModal(msg);
+    $planModalOverlay.classList.remove('hidden');
+    loadFullPlanIntoModal(msg);
+  }
+
+  function closePlanModal() {
+    activePlanModal = null;
+    $planModalOverlay.classList.add('hidden');
+  }
+
+  function syncPlanModalFromState() {
+    if (!activePlanModal) return;
+    const current = (state.messages || []).find((msg) => msg.type === 'plan' && msg.id === activePlanModal.id);
+    if (current) {
+      renderPlanModal(current);
+      if (current.label && !activePlanModal.fullData && !activePlanModal.loading) {
+        loadFullPlanIntoModal(current);
+      }
+    }
+  }
+
+  async function openPlanModelPicker(msg) {
+    if (!msg.modelDropdownSelectorPath) {
+      if (msg.model) showToast(`Plan model: ${msg.model}`, 'success');
+      return;
+    }
+
+    const commandId = newCommandId();
+    const result = await sendCommandAwaitResult('command:get_plan_model_options', {
+      commandId,
+      type: 'get_plan_model_options',
+      selectorPath: msg.modelDropdownSelectorPath,
+    });
+
+    const options = Array.isArray(result.data?.options) ? result.data.options : [];
+    if (!result.ok || options.length === 0) {
+      emitClickAction(msg.modelDropdownSelectorPath);
+      if (!result.ok) showToast(result.error || 'Could not load plan models', 'error');
+      return;
+    }
+
+    activePlanModelContext = {
+      selectorPath: msg.modelDropdownSelectorPath,
+      title: msg.title || 'Plan',
+      options,
+    };
+    openSheet('plan-model');
   }
 
   function buildPlanCard(msg) {
@@ -886,7 +1171,7 @@
           btn.type = 'button';
           btn.className = 'plan-btn plan-btn-view';
           btn.textContent = viewAct.label || 'View Plan';
-          btn.addEventListener('click', () => emitClickAction(viewAct.selectorPath));
+          btn.addEventListener('click', () => openPlanModal(msg));
           left.appendChild(btn);
         }
       }
@@ -906,7 +1191,7 @@
         chev.textContent = '\u25BE';
         pill.appendChild(lab);
         pill.appendChild(chev);
-        pill.addEventListener('click', () => emitClickAction(msg.modelDropdownSelectorPath));
+        pill.addEventListener('click', () => { void openPlanModelPicker(msg); });
         center.appendChild(pill);
       } else if (msg.model) {
         const badge = document.createElement('span');
@@ -989,7 +1274,25 @@
     if (newCard && oldCard) el.replaceChild(newCard, oldCard);
   }
 
-  // --- Run command ---
+  // --- Run command / tool inline actions (Skip, Run, Allow) ---
+
+  function appendRunStyleActionButtons(container, actions) {
+    actions.forEach(function (action) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = action.type === 'run' ? 'run-btn run-btn-run'
+        : action.type === 'allow' ? 'run-btn run-btn-allow'
+        : 'run-btn run-btn-skip';
+      btn.textContent = action.label;
+      btn.addEventListener('click', function () {
+        socket.emit('command:click_action', {
+          commandId: newCommandId(),
+          selectorPath: action.selectorPath,
+        });
+      });
+      container.appendChild(btn);
+    });
+  }
 
   function createRunCommandEl(msg) {
     const el = document.createElement('div');
@@ -1028,20 +1331,7 @@
     if (msg.actions && msg.actions.length > 0) {
       const actionsRow = document.createElement('div');
       actionsRow.className = 'run-actions-row';
-      msg.actions.forEach(function (action) {
-        const btn = document.createElement('button');
-        btn.className = action.type === 'run' ? 'run-btn run-btn-run'
-          : action.type === 'allow' ? 'run-btn run-btn-allow'
-          : 'run-btn run-btn-skip';
-        btn.textContent = action.label;
-        btn.addEventListener('click', function () {
-          socket.emit('command:click_action', {
-            commandId: crypto.randomUUID(),
-            selectorPath: action.selectorPath,
-          });
-        });
-        actionsRow.appendChild(btn);
-      });
+      appendRunStyleActionButtons(actionsRow, msg.actions);
       card.appendChild(actionsRow);
     }
 
@@ -1050,8 +1340,14 @@
   }
 
   function updateRunCommandEl(el, msg) {
-    const cmdText = el.querySelector('.run-command-text');
-    if (cmdText) cmdText.textContent = msg.command;
+    const oldCommand = (el.querySelector('.run-command-text')?.textContent || '').trim();
+    const nextMsg = (!msg.command || !msg.command.trim()) && oldCommand
+      ? { ...msg, command: oldCommand }
+      : msg;
+    const fresh = createRunCommandEl(nextMsg);
+    const newCard = fresh.querySelector('.run-card');
+    const oldCard = el.querySelector('.run-card');
+    if (newCard && oldCard) el.replaceChild(newCard, oldCard);
   }
 
   // --- Loading indicator ---
@@ -1227,7 +1523,7 @@
         btn.dataset.id = win.id;
         btn.addEventListener('click', () => {
           socket.emit('command:switch_window', {
-            commandId: crypto.randomUUID(),
+            commandId: newCommandId(),
             windowId: win.id,
           });
           showToast('Switching window...', 'success');
@@ -1268,7 +1564,7 @@
         btn.dataset.title = tab.title;
         btn.addEventListener('click', () => {
           socket.emit('command:switch_tab', {
-            commandId: crypto.randomUUID(),
+            commandId: newCommandId(),
             tabTitle: tab.title,
             selectorPath: tab.selectorPath,
           });
@@ -1312,6 +1608,8 @@
     $pillModelText.textContent = model.current || 'Auto';
   }
 
+  renderAll();
+
   // --- Bottom sheet logic ---
 
   let activeSheet = null;
@@ -1327,6 +1625,9 @@
     } else if (type === 'model') {
       $sheetModel.classList.remove('hidden');
       renderModelSheet();
+    } else if (type === 'plan-model') {
+      $sheetPlanModel.classList.remove('hidden');
+      renderPlanModelSheet();
     }
   }
 
@@ -1334,6 +1635,7 @@
     $sheetOverlay.classList.add('hidden');
     $sheetMode.classList.add('hidden');
     $sheetModel.classList.add('hidden');
+    $sheetPlanModel.classList.add('hidden');
     activeSheet = null;
   }
 
@@ -1355,7 +1657,7 @@
         `<span>${escapeHtml(m.label)}</span>` +
         (m.id === current ? '<span class="sheet-item-check">\u2713</span>' : '');
       btn.addEventListener('click', () => {
-        socket.emit('command:set_mode', { commandId: crypto.randomUUID(), modeId: m.id });
+        socket.emit('command:set_mode', { commandId: newCommandId(), modeId: m.id });
         closeSheet();
         showToast(`Mode: ${m.label}`, 'success');
       });
@@ -1414,7 +1716,7 @@
           sw.innerHTML = '<span class="toggle-knob"></span>';
           sw.addEventListener('click', () => {
             maxModeOn = !maxModeOn;
-            socket.emit('command:set_model', { commandId: crypto.randomUUID(), modelId: m.id });
+            socket.emit('command:set_model', { commandId: newCommandId(), modelId: m.id });
             renderModelSheet();
           });
           row.appendChild(sw);
@@ -1437,12 +1739,42 @@
 
         btn.innerHTML = inner;
         btn.addEventListener('click', () => {
-          socket.emit('command:set_model', { commandId: crypto.randomUUID(), modelId: m.id });
+          socket.emit('command:set_model', { commandId: newCommandId(), modelId: m.id });
           closeSheet();
           showToast(`Model: ${m.label}`, 'success');
         });
         $sheetModelList.appendChild(btn);
       });
+    });
+  }
+
+  function renderPlanModelSheet() {
+    $sheetPlanModelList.innerHTML = '';
+    const ctx = activePlanModelContext;
+    $sheetPlanModelHeader.textContent = ctx && ctx.title ? `Plan Model · ${ctx.title}` : 'Plan Model';
+    if (!ctx || !Array.isArray(ctx.options) || ctx.options.length === 0) return;
+
+    ctx.options.forEach((opt) => {
+      const btn = document.createElement('button');
+      btn.className = 'sheet-item' + (opt.selected ? ' selected' : '');
+      btn.innerHTML =
+        `<span class="sheet-item-label">${escapeHtml(opt.label)}</span>` +
+        `<span class="sheet-item-right">${opt.selected ? '<span class="sheet-item-check">\u2713</span>' : ''}</span>`;
+      btn.addEventListener('click', async () => {
+        const result = await sendCommandAwaitResult('command:set_plan_model', {
+          commandId: newCommandId(),
+          type: 'set_plan_model',
+          selectorPath: ctx.selectorPath,
+          planModelId: opt.id,
+        });
+        if (!result.ok) {
+          showToast(result.error || 'Could not set plan model', 'error');
+          return;
+        }
+        closeSheet();
+        showToast(`Plan model: ${opt.label}`, 'success');
+      });
+      $sheetPlanModelList.appendChild(btn);
     });
   }
 

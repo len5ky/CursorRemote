@@ -11,8 +11,8 @@
   <div id="app">
     <header id="header">
       <div class="header-left">
-        <span id="connection-dot" class="dot disconnected"></span>
-        <span id="connection-text">Disconnected</span>
+        <span id="connection-dot" class="dot reconnecting"></span>
+        <span id="connection-text">Connecting...</span>
       </div>
       <div class="header-right">
         <span id="agent-status-icon"></span>
@@ -39,8 +39,8 @@
 
     <main id="messages" role="log" aria-live="polite">
       <div id="empty-state" class="empty-state">
-        <p id="empty-state-primary">Waiting for connection to Cursor IDE...</p>
-        <p id="empty-state-hint" class="hint">Make sure Cursor is running with<br><code>--remote-debugging-port=9222</code></p>
+        <p id="empty-state-primary">Connecting to relay...</p>
+        <p id="empty-state-hint" class="hint">Checking the CursorRemote server and Cursor IDE state.</p>
       </div>
     </main>
 
@@ -87,6 +87,23 @@
     <div id="sheet-model" class="bottom-sheet hidden">
       <div class="sheet-header">Model</div>
       <div id="sheet-model-list" class="sheet-list"></div>
+    </div>
+    <div id="sheet-plan-model" class="bottom-sheet hidden">
+      <div id="sheet-plan-model-header" class="sheet-header">Plan Model</div>
+      <div id="sheet-plan-model-list" class="sheet-list"></div>
+    </div>
+  </div>
+
+  <div id="plan-modal-overlay" class="plan-modal-overlay hidden">
+    <div id="plan-modal" class="plan-modal" role="dialog" aria-modal="true" aria-labelledby="plan-modal-title">
+      <div class="plan-modal-header">
+        <div class="plan-modal-heading">
+          <div id="plan-modal-label" class="plan-modal-label"></div>
+          <div id="plan-modal-title" class="plan-modal-title"></div>
+        </div>
+        <button id="plan-modal-close" class="plan-modal-close" aria-label="Close plan">×</button>
+      </div>
+      <div id="plan-modal-body" class="plan-modal-body"></div>
     </div>
   </div>
 

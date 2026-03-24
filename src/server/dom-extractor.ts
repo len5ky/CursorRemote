@@ -12,6 +12,7 @@ import type {
 import { applyDerivedActivityToState } from './activity-derive.js';
 
 const EVALUATE_TIMEOUT_MS = 5000;
+const MAX_POLL_BACKOFF_MS = 5000;
 
 /** Canonical tab title cleaning - matches extractionFunction's cleanTabTitle for consistent lookups. */
 export function cleanTabTitle(raw: string): string {
@@ -584,13 +585,17 @@ export function extractionFunction(
       if (runContainer) {
         const descEl = runContainer.querySelector('.composer-terminal-top-header-description');
         const candidatesEl = runContainer.querySelector('.composer-terminal-top-header-candidates');
-        const commandEl = runContainer.querySelector('.composer-terminal-command-expanded-text');
+        const commandEl =
+          runContainer.querySelector('.composer-terminal-command-expanded-text') ||
+          runContainer.querySelector('.composer-terminal-command-editor') ||
+          runContainer.querySelector('.composer-terminal-command-wrapper') ||
+          runContainer.querySelector('.composer-tool-call-header-content');
         const description = (descEl?.textContent || '').trim();
         const candidates = (candidatesEl?.textContent || '').trim();
 
         let command = '';
         if (commandEl) {
-          const rawCmd = commandEl.textContent || '';
+          const rawCmd = (commandEl.textContent || '').replace(/^\$\s*/, '');
           const cmdLines = rawCmd.split('\n');
           const nonEmpty = cmdLines.filter(function (l: string) {
             return l.trim().length > 0;
@@ -1419,6 +1424,10 @@ export function extractionFunction(
 
     return {
       connected: true,
+      extractorStatus: 'ok',
+      lastExtractionAt: null,
+      consecutiveExtractionFailures: 0,
+      lastExtractionError: null,
       agentStatus,
       agentActivityText: null,
       agentActivityLive: false,
@@ -1441,15 +1450,20 @@ export function extractionFunction(
 
 export class DOMExtractor {
   private selectors: SelectorConfig;
-  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private client: CdpClient | null = null;
-  private onExtract: (state: CursorState | null) => void;
+  private onExtract: (state: CursorState | null, errorMessage?: string | null) => void;
   private getWindowTitle: () => string;
   private loggedFirstExtraction = false;
+  private basePollIntervalMs = 300;
+  private currentPollIntervalMs = 300;
+  private pollInFlight = false;
+  private failureStreak = 0;
+  private running = false;
 
   constructor(
     selectors: SelectorConfig,
-    onExtract: (state: CursorState | null) => void,
+    onExtract: (state: CursorState | null, errorMessage?: string | null) => void,
     getWindowTitle: () => string = () => ''
   ) {
     this.selectors = selectors;
@@ -1460,32 +1474,73 @@ export class DOMExtractor {
   start(client: CdpClient, intervalMs: number): void {
     this.client = client;
     this.stop();
+    this.running = true;
+    this.basePollIntervalMs = intervalMs;
+    this.currentPollIntervalMs = intervalMs;
+    this.failureStreak = 0;
     console.log(`[dom-extractor] Starting polling every ${intervalMs}ms`);
-    this.pollTimer = setInterval(() => this.poll(), intervalMs);
-    this.poll();
+    this.scheduleNextPoll(0);
   }
 
   stop(): void {
+    this.running = false;
     if (this.pollTimer) {
-      clearInterval(this.pollTimer);
+      clearTimeout(this.pollTimer);
       this.pollTimer = null;
     }
+    this.currentPollIntervalMs = this.basePollIntervalMs;
+    this.failureStreak = 0;
   }
 
   setClient(client: CdpClient | null): void {
     this.client = client;
   }
 
+  private scheduleNextPoll(delayMs = this.currentPollIntervalMs): void {
+    if (!this.running) return;
+    if (this.pollTimer) {
+      clearTimeout(this.pollTimer);
+    }
+    this.pollTimer = setTimeout(() => {
+      this.pollTimer = null;
+      void this.poll();
+    }, delayMs);
+  }
+
+  private handleFailure(message: string): void {
+    const timedOut = message.includes('timeout');
+    this.failureStreak++;
+    if (timedOut) {
+      const nextInterval = Math.min(
+        Math.max(this.basePollIntervalMs, this.basePollIntervalMs * (2 ** (this.failureStreak - 1))),
+        MAX_POLL_BACKOFF_MS
+      );
+      if (nextInterval !== this.currentPollIntervalMs) {
+        this.currentPollIntervalMs = nextInterval;
+        console.warn(`[dom-extractor] Backing off poll interval to ${this.currentPollIntervalMs}ms after ${message}`);
+      }
+    }
+    this.onExtract(null, message);
+  }
+
   private async poll(): Promise<void> {
+    if (this.pollInFlight) {
+      this.scheduleNextPoll();
+      return;
+    }
+    this.pollInFlight = true;
+
     if (!this.client || !this.client.isConnected()) {
-      this.onExtract(null);
+      this.handleFailure('CDP client not connected');
+      this.pollInFlight = false;
+      this.scheduleNextPoll();
       return;
     }
 
     try {
-      const state = await Promise.race([
-        this.client.callFunction(
-          extractionFunction as (...args: never[]) => unknown,
+      const state = await this.client.callFunctionWithTimeout(
+        extractionFunction as (...args: never[]) => unknown,
+        [
           this.selectors.chatContainer.strategies,
           this.selectors.approveButton.strategies,
           this.selectors.approveButton.textMatch ?? [],
@@ -1496,14 +1551,14 @@ export class DOMExtractor {
           this.selectors.chatTabList?.strategies ?? [],
           this.selectors.modeDropdown?.strategies ?? [],
           this.selectors.modelDropdown?.strategies ?? [],
-          this.getWindowTitle()
-        ),
-        new Promise<null>((_, reject) =>
-          setTimeout(() => reject(new Error('evaluate timeout')), EVALUATE_TIMEOUT_MS)
-        ),
-      ]) as CursorState | null;
+          this.getWindowTitle(),
+        ],
+        EVALUATE_TIMEOUT_MS
+      ) as CursorState | null;
 
       const derivedState = state ? applyDerivedActivityToState(state) : null;
+      this.failureStreak = 0;
+      this.currentPollIntervalMs = this.basePollIntervalMs;
 
       if (derivedState && !this.loggedFirstExtraction) {
         this.loggedFirstExtraction = true;
@@ -1528,13 +1583,16 @@ export class DOMExtractor {
         }
       }
 
-      this.onExtract(derivedState);
+      this.onExtract(derivedState, null);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (!message.includes('WebSocket closed') && !message.includes('Intentional disconnect')) {
         console.warn(`[dom-extractor] Extraction failed: ${message}`);
       }
-      this.onExtract(null);
+      this.handleFailure(message);
+    } finally {
+      this.pollInFlight = false;
+      this.scheduleNextPoll();
     }
   }
 }

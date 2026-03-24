@@ -1,6 +1,3 @@
-import { readFileSync } from 'fs';
-import { resolve } from 'path';
-import { homedir } from 'os';
 import { InlineKeyboard } from 'grammy';
 import { parse as parseHtml, HTMLElement as ParsedEl, TextNode } from 'node-html-parser';
 import type {
@@ -18,6 +15,7 @@ import type {
   Approval,
   ComposerQueueState,
 } from '../../types.js';
+import { readPlanFile } from '../../plan-files.js';
 
 const TG_MSG_LIMIT = 4096;
 
@@ -288,40 +286,6 @@ function formatRunCommand(
   }
 
   return { html: lines.join('\n'), keyboard };
-}
-
-interface PlanFile {
-  todos: PlanTodo[];
-  body: string;
-}
-
-function readPlanFile(label: string): PlanFile | null {
-  const planPath = resolve(homedir(), '.cursor', 'plans', label);
-  try {
-    const raw = readFileSync(planPath, 'utf-8');
-    return parsePlanMd(raw);
-  } catch {
-    return null;
-  }
-}
-
-function parsePlanMd(raw: string): PlanFile {
-  const todos: PlanTodo[] = [];
-  let body = raw;
-
-  const fmMatch = raw.match(/^---\n([\s\S]*?)\n---\n/);
-  if (fmMatch) {
-    body = raw.slice(fmMatch[0].length);
-    const fm = fmMatch[1];
-    const todoRe = /- id:\s*\S+\n\s+content:\s*["']?(.*?)["']?\s*\n\s+status:\s*(\S+)/g;
-    let m: RegExpExecArray | null;
-    while ((m = todoRe.exec(fm)) !== null) {
-      const status = m[2] as PlanTodo['status'];
-      todos.push({ text: m[1], status });
-    }
-  }
-
-  return { todos, body: body.trim() };
 }
 
 function markdownToTelegramHtml(md: string): string {

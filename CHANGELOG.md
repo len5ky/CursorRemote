@@ -6,6 +6,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.40] - 2026-03-24
+
+### Added
+- Web plan modal now loads the full saved plan file so `View Plan` on the web matches Telegram's richer full-plan view.
+- Web plan model picker now shows the real plan-scoped model options fetched from Cursor before applying the selection.
+
+### Changed
+- Web connection status now distinguishes relay connectivity from Cursor/CDP extraction health, including clearer waiting states during background throttling.
+- DOM extraction polling now uses single-flight retries with timeout backoff so backgrounded Cursor windows degrade more gracefully instead of hammering failed evaluations.
+- Plan widget interactions are now handled directly in the web UI for modal viewing and model selection, while Build still triggers the underlying Cursor action.
+
+### Fixed
+- Older browsers that do not support `crypto.randomUUID()` no longer crash the web client during command creation.
+- Run/Skip/Allow approval widgets now render and update correctly in the web app, including command text for terminal approval cards.
+- Web live updates now reconcile message type changes correctly instead of leaving stale `Generating` placeholders until manual refresh.
+- Auto-scroll no longer snaps back to the latest message after the user intentionally scrolls up.
+- Plan modal content no longer stops at the compact widget summary when the underlying saved plan file is available.
+
 ## [0.1.39] - 2026-03-24
 
 ### Added

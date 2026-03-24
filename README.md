@@ -1,6 +1,6 @@
 # CursorRemote
 
-Remote control for your local Cursor AI agent — monitor sessions, approve steps, and send tasks from your phone, tablet, or another computer's browser, or via Telegram, while Cursor runs on your machine.
+Remote control for your local Cursor AI agent — monitor sessions, approve steps, inspect full plans, and send tasks from your phone, tablet, or another computer's browser, or via Telegram, while Cursor runs on your machine.
 
 <div align="center">
 
@@ -15,7 +15,7 @@ Remote control for your local Cursor AI agent — monitor sessions, approve step
 
 ## Features
 
-- **Mobile Web Client** -- real-time chat view with Cursor's dark theme, approve/reject buttons, plan widgets, run command cards, mode/model switching
+- **Mobile Web Client** -- real-time chat view with Cursor's dark theme, approve/reject buttons, full plan modal, plan model picker, run command cards, mode/model switching
 - **Telegram Integration** -- auto-sync conversations into forum topics, approve via inline buttons, send prompts from any device
 - **Multi-Window Monitoring** -- all Cursor windows polled in parallel via separate CDP connections (no UI switching)
 - **Auto-Topic Creation** -- new chat tabs automatically get a Telegram topic created
@@ -62,7 +62,7 @@ Download the latest `.vsix` from [releases](https://github.com/len5ky/CursorRemo
 
 ```bash
 # From the command line
-cursor --install-extension cursor-remote-0.1.39.vsix
+cursor --install-extension cursor-remote-0.1.40.vsix
 ```
 
 Or in Cursor: open the Command Palette (`Ctrl+Shift+P`), run **Extensions: Install from VSIX...**, and select the file.

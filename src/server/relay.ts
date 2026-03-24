@@ -9,6 +9,7 @@ import type { ServerConfig, CursorState, CommandPayload, CommandResult } from '.
 import type { StateManager } from './state-manager.js';
 import type { CommandExecutor } from './command-executor.js';
 import type { CDPBridge } from './cdp-bridge.js';
+import { markdownToWebHtml, readPlanFile } from './plan-files.js';
 import {
   WEBAPP_SESSION_COOKIE,
   createWebappSessionStore,
@@ -282,6 +283,10 @@ export class Relay {
         authRequired: this.authEnabled,
         sessionValid: sessionOk,
         connected: state.connected,
+        extractorStatus: state.extractorStatus,
+        lastExtractionAt: state.lastExtractionAt,
+        consecutiveExtractionFailures: state.consecutiveExtractionFailures,
+        lastExtractionError: state.lastExtractionError,
         agentStatus: state.agentStatus,
         clients: this.io.engine.clientsCount,
         uptime: process.uptime(),
@@ -485,6 +490,71 @@ export class Relay {
         const result = await this.commandExecutor.setModel(
           payload.commandId,
           payload.modelId
+        );
+        socket.emit('command:result', result);
+      });
+
+      socket.on('command:get_plan_full', async (payload: CommandPayload) => {
+        if (!payload.commandId || !payload.planLabel) {
+          socket.emit('command:result', {
+            commandId: payload.commandId ?? 'unknown',
+            ok: false,
+            error: 'Missing commandId or planLabel',
+          } satisfies CommandResult);
+          return;
+        }
+        console.log(`[relay] Command: get_plan_full for ${payload.planLabel} from ${socket.id}`);
+        const planFile = readPlanFile(payload.planLabel);
+        if (!planFile) {
+          socket.emit('command:result', {
+            commandId: payload.commandId,
+            ok: false,
+            error: 'Plan file not found',
+          } satisfies CommandResult);
+          return;
+        }
+        socket.emit('command:result', {
+          commandId: payload.commandId,
+          ok: true,
+          data: {
+            todos: planFile.todos,
+            body: planFile.body,
+            bodyHtml: markdownToWebHtml(planFile.body),
+          },
+        } satisfies CommandResult);
+      });
+
+      socket.on('command:get_plan_model_options', async (payload: CommandPayload) => {
+        if (!payload.commandId || !payload.selectorPath) {
+          socket.emit('command:result', {
+            commandId: payload.commandId ?? 'unknown',
+            ok: false,
+            error: 'Missing commandId or selectorPath',
+          } satisfies CommandResult);
+          return;
+        }
+        console.log(`[relay] Command: get_plan_model_options from ${socket.id}`);
+        const result = await this.commandExecutor.getPlanModelOptions(
+          payload.commandId,
+          payload.selectorPath
+        );
+        socket.emit('command:result', result);
+      });
+
+      socket.on('command:set_plan_model', async (payload: CommandPayload) => {
+        if (!payload.commandId || !payload.selectorPath || !payload.planModelId) {
+          socket.emit('command:result', {
+            commandId: payload.commandId ?? 'unknown',
+            ok: false,
+            error: 'Missing commandId, selectorPath, or planModelId',
+          } satisfies CommandResult);
+          return;
+        }
+        console.log(`[relay] Command: set_plan_model to ${payload.planModelId} from ${socket.id}`);
+        const result = await this.commandExecutor.setPlanModel(
+          payload.commandId,
+          payload.selectorPath,
+          payload.planModelId
         );
         socket.emit('command:result', result);
       });

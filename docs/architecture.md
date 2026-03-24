@@ -406,6 +406,12 @@ The rich plan widget (with todo list, Build button, View Plan button) is nested 
 
 The legacy plan format (`.plan-execution-message-content`) has a different DOM structure and appears inside `role=human` wrappers. Both are mapped to the `PlanBlock` type.
 
+For remote control, the web client no longer relies only on the compact extracted widget payload:
+
+- `View Plan` opens a local web modal.
+- The relay can read `~/.cursor/plans/<label>` and return the full plan body/todos, matching Telegram's richer full-plan rendering when the saved file exists.
+- The plan model pill requests the live Cursor dropdown options through the relay, then sends the chosen option back to Cursor without forcing the user to interact with the desktop UI directly.
+
 ### 6.7 Run Command Widget Uses `.composer-terminal-tool-call-block-container`
 
 Terminal command approval cards contain the full shell command, a description header, and Run/Skip/Allow buttons. The container class is `.composer-terminal-tool-call-block-container` (or `.composer-tool-call-container.composer-terminal-compact-mode`). The command text is in `.composer-terminal-command-expanded-text`. Buttons are identified by `.composer-run-button` and `.composer-skip-button`. "Allow" buttons appear for sandbox permission requests.

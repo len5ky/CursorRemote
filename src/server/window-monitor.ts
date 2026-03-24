@@ -351,9 +351,9 @@ export class WindowMonitor extends EventEmitter {
     try {
       const { extractionFunction } = await import('./dom-extractor.js');
 
-      const result = await Promise.race([
-        client.callFunction(
-          extractionFunction as (...args: never[]) => unknown,
+      const result = await client.callFunctionWithTimeout(
+        extractionFunction as (...args: never[]) => unknown,
+        [
           this.selectors.chatContainer?.strategies ?? [],
           this.selectors.approveButton?.strategies ?? [],
           this.selectors.approveButton?.textMatch ?? [],
@@ -364,12 +364,10 @@ export class WindowMonitor extends EventEmitter {
           this.selectors.chatTabList?.strategies ?? [],
           this.selectors.modeDropdown?.strategies ?? [],
           this.selectors.modelDropdown?.strategies ?? [],
-          windowTitle
-        ),
-        new Promise<null>((_, reject) =>
-          setTimeout(() => reject(new Error('extract timeout')), 5000)
-        ),
-      ]);
+          windowTitle,
+        ],
+        5000
+      );
 
       const state = result as CursorState | null;
       return state ? applyDerivedActivityToState(state) : null;

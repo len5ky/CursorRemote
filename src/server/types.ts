@@ -45,6 +45,14 @@ export interface ComposerQueueState {
 
 export interface CursorState {
   connected: boolean;
+  /** Health of DOM extraction independent from the CDP websocket connection. */
+  extractorStatus: ExtractorStatus;
+  /** Timestamp of the last successful extraction in ms since epoch. */
+  lastExtractionAt: number | null;
+  /** Number of consecutive failed extraction attempts since the last success. */
+  consecutiveExtractionFailures: number;
+  /** Most recent extraction error, or null after a successful extraction/reset. */
+  lastExtractionError: string | null;
   agentStatus: AgentStatus;
   /** Live activity label; null means explicitly cleared on the wire. */
   agentActivityText: string | null;
@@ -82,6 +90,8 @@ export interface ModelInfo {
   current: string;
   currentId: string;
 }
+
+export type ExtractorStatus = 'idle' | 'waiting' | 'ok' | 'stale';
 
 export type AgentStatus =
   | 'idle'
@@ -200,6 +210,18 @@ export interface PlanBlock {
   actions?: PlanAction[];
 }
 
+export interface PlanModelOption {
+  id: string;
+  label: string;
+  selected?: boolean;
+}
+
+export interface PlanFullData {
+  todos: PlanTodo[];
+  body: string;
+  bodyHtml: string;
+}
+
 export interface TodoListBlock {
   type: 'todo_list';
   id: string;
@@ -262,7 +284,7 @@ export interface SelectorConfig {
 
 export interface CommandPayload {
   commandId: string;
-  type: 'send_message' | 'approve' | 'reject' | 'approve_all' | 'switch_tab' | 'new_chat' | 'set_mode' | 'set_model' | 'click_action';
+  type: 'send_message' | 'approve' | 'reject' | 'approve_all' | 'switch_tab' | 'new_chat' | 'set_mode' | 'set_model' | 'click_action' | 'get_plan_full' | 'get_plan_model_options' | 'set_plan_model';
   text?: string;
   approvalId?: string;
   actionType?: string;
@@ -270,6 +292,8 @@ export interface CommandPayload {
   composerId?: string;
   modeId?: string;
   modelId?: string;
+  planLabel?: string;
+  planModelId?: string;
   tabTitle?: string;
   windowId?: string;
 }
@@ -278,6 +302,7 @@ export interface CommandResult {
   commandId: string;
   ok: boolean;
   error?: string;
+  data?: unknown;
 }
 
 export interface ServerConfig {

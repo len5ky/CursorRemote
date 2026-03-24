@@ -80,7 +80,10 @@ async function main(): Promise<void> {
 
   const extractor = new DOMExtractor(
     selectors,
-    (state) => stateManager.onExtraction(state),
+    (state, errorMessage) => {
+      if (state) stateManager.onExtraction(state);
+      else stateManager.onExtractionFailure(errorMessage ?? 'Extraction failed');
+    },
     () => cdpBridge.windows.find(w => w.id === cdpBridge.activeTargetId)?.title ?? ''
   );
 
