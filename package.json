@@ -1,7 +1,7 @@
 {
   "name": "cursor-remote",
   "displayName": "CursorRemote",
-  "version": "0.1.40",
+  "version": "0.1.41",
   "description": "Remote control your local Cursor AI agent — monitor, approve, and send tasks from your phone or Telegram.",
   "publisher": "cursor-remote",
   "repository": {
@@ -214,10 +214,10 @@
   },
   "scripts": {
     "dev": "mkdir -p temp data && tsx scripts/dev-wrapper.ts",
-    "build": "tsc && rm -rf dist/client && cp -r src/client dist/client",
+    "build": "tsc && rm -rf dist/client && cp -r src/client dist/client && cp node_modules/socket.io/client-dist/socket.io.min.js dist/client/vendor-socket.io.min.js && cp node_modules/socket.io/client-dist/socket.io.min.js.map dist/client/vendor-socket.io.min.js.map",
     "build:ext": "node extension/esbuild.js --production",
     "watch:ext": "node extension/esbuild.js --watch",
-    "package": "tsx scripts/bump-build.ts && mkdir -p releases && npx @vscode/vsce package --no-dependencies --out releases/",
+    "package": "tsx scripts/bump-build.ts && mkdir -p releases && npx @vscode/vsce package --no-dependencies --out releases/ && tsx scripts/verify-vsix.ts",
     "vscode:prepublish": "npm run build && npm run build:ext",
     "release": "tsx scripts/release.ts",
     "publish:public": "tsx scripts/publish.ts",

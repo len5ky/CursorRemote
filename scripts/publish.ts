@@ -109,6 +109,14 @@ function packageVsix(version: string): string {
   return out;
 }
 
+function verifyVsix(vsix: string): void {
+  console.log('\n— Verifying .vsix contents —');
+  execSync(`npx tsx scripts/verify-vsix.ts ${JSON.stringify(vsix)}`, {
+    cwd: DEV_ROOT,
+    stdio: 'inherit',
+  });
+}
+
 function publishToOpenVsx(vsix: string): void {
   if (!existsSync(OVSX_TOKEN_PATH)) {
     console.error('✗ openvsx_token file not found. Create it with your Open VSX access token.');
@@ -200,9 +208,8 @@ function main(): void {
   }
 
   if (doOvsx) {
-    const vsix = existsSync(vsixPath(version))
-      ? vsixPath(version)
-      : packageVsix(version);
+    const vsix = packageVsix(version);
+    verifyVsix(vsix);
 
     publishToOpenVsx(vsix);
 

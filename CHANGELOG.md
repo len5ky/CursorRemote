@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.41] - 2026-03-24
+
+### Fixed
+- Extension packaging now ships a vendored Socket.IO browser client so the web app loads correctly from a clean VSIX install without `node_modules`. Previously the server relied on Socket.IO's internal `client-dist/` files which were not included in the bundled extension package, causing `io is not defined` and a blank page on first use.
+- Added favicon to the web client so browsers no longer 404 on `/favicon.ico`.
+
+### Changed
+- The publish script now always rebuilds the `.vsix` instead of reusing a potentially stale cached artifact, and runs a VSIX content verifier before publishing.
+- Added a VSIX verification step (`scripts/verify-vsix.ts`) that checks for required runtime files and forbidden secrets before every package and publish.
+
 ## [0.1.40] - 2026-03-24
 
 ### Added

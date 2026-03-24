@@ -1,4 +1,4 @@
-import { createWriteStream, appendFileSync } from 'fs';
+import { createWriteStream, appendFileSync, readFileSync } from 'fs';
 import { checkLicense } from './license.js';
 import { loadConfig, loadSelectors } from './config.js';
 import { CDPBridge } from './cdp-bridge.js';
@@ -58,7 +58,14 @@ process.on('uncaughtException', (err) => {
 });
 
 async function main(): Promise<void> {
-  console.log('=== CursorRemote ===');
+  let version = 'unknown';
+  for (const rel of ['../../package.json', '../package.json', '../../../package.json']) {
+    try {
+      const pkg = JSON.parse(readFileSync(new URL(rel, import.meta.url), 'utf-8'));
+      if (pkg.name === 'cursor-remote') { version = pkg.version; break; }
+    } catch { /* try next */ }
+  }
+  console.log(`=== CursorRemote v${version} ===`);
   console.log();
 
   checkLicense();

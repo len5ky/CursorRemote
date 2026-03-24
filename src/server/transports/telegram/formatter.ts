@@ -40,8 +40,12 @@ export function formatElement(
   }
 }
 
+function shimmerSpoiler(active: boolean): string {
+  return active ? ' <tg-spoiler>*spoiler*</tg-spoiler>' : '';
+}
+
 export function formatActivity(text: string): string {
-  return `<i>● ${escapeHtml(text)}…</i>`;
+  return `<i>● ${escapeHtml(text)}…</i>${shimmerSpoiler(true)}`;
 }
 
 /** Forum message body for composer toolbar queue; empty string if no queue. */
@@ -189,7 +193,7 @@ export function activityRedundantWithInProgressStepSummary(
 }
 
 function formatThought(msg: ThoughtBlock): FormattedMessage {
-  const spoiler = thoughtAppearsInProgress(msg) ? ' <tg-spoiler>*spoiler*</tg-spoiler>' : '';
+  const spoiler = shimmerSpoiler(thoughtAppearsInProgress(msg));
   if (msg.thoughtKind === 'step_summary' && msg.action) {
     const detail = msg.detail ? ` — <code>${escapeHtml(msg.detail)}</code>` : '';
     return { html: `<b>📎 ${escapeHtml(msg.action)}</b>${detail}${spoiler}` };

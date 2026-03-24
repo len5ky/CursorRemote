@@ -12,10 +12,12 @@ export class StatusTreeView implements vscode.TreeDataProvider<TreeItem> {
   private serverManager: ServerManager;
   private licenseManager: LicenseManager;
   private licensed = false;
+  private version: string;
 
-  constructor(serverManager: ServerManager, licenseManager: LicenseManager) {
+  constructor(serverManager: ServerManager, licenseManager: LicenseManager, version: string) {
     this.serverManager = serverManager;
     this.licenseManager = licenseManager;
+    this.version = version;
     serverManager.on('health', () => this.refresh());
     serverManager.on('stateChanged', () => this.refresh());
     serverManager.on('stopped', () => this.refresh());
@@ -63,6 +65,10 @@ export class StatusTreeView implements vscode.TreeDataProvider<TreeItem> {
 
       return items;
     }
+
+    const versionItem = new vscode.TreeItem(`CursorRemote v${this.version}`);
+    versionItem.iconPath = new vscode.ThemeIcon('info');
+    items.push(versionItem);
 
     const state = this.serverManager.serverState;
     const health = this.serverManager.health;

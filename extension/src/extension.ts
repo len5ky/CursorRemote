@@ -51,7 +51,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   serverManager.startDirWatcher();
 
-  const treeView = new StatusTreeView(serverManager, licenseManager);
+  const extensionVersion = context.extension.packageJSON?.version ?? 'unknown';
+  const treeView = new StatusTreeView(serverManager, licenseManager, extensionVersion);
 
   context.subscriptions.push(
     outputChannel,

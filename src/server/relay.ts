@@ -141,6 +141,7 @@ export class Relay {
     this.app = express();
     this.httpServer = createServer(this.app);
     this.io = new SocketServer(this.httpServer, {
+      serveClient: false,
       cors: {
         origin: true,
         methods: ['GET', 'POST'],
