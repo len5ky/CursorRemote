@@ -57,12 +57,17 @@ The web client requires a browser and only works when the tab is open. Telegram 
 **I want** to type text in a Telegram topic and have it sent as a prompt to the mapped Cursor agent,
 **so that** I can direct the agent from Telegram.
 
-### TG-7: Mode and Model Switching
+### TG-7: Questionnaire via Inline Buttons
+**As a** developer,
+**I want** to see the agent's multiple-choice questions as a Telegram message with inline keyboard buttons for each option, plus Skip and Continue,
+**so that** I can answer questions without leaving Telegram.
+
+### TG-8: Mode and Model Switching
 **As a** developer,
 **I want** to run `/mode` and `/model` commands that show the current state and offer inline keyboard buttons to switch,
 **so that** I can adjust the agent's behavior from Telegram.
 
-### TG-8: Auto-Sync
+### TG-9: Auto-Sync
 **As a** developer,
 **I want** to run `/sync` once to enable auto-sync, after which new chat tabs automatically get topics created,
 **so that** I never need to manually manage topics.
@@ -203,6 +208,20 @@ While the agent is busy, the transport may show a **short status line** in the t
 - **Dedup against thoughts**: If recent `ChatElement`s already include an in-flight **`step_summary` thought** whose title matches the activity label (`📎` formatted line), the bot **suppresses** the ephemeral activity line and **deletes** any existing activity message for that topic. This avoids two parallel lines (e.g. both “Exploring…”) with redundant spoilers. Implemented by `activityRedundantWithInProgressStepSummary()` using exported `thoughtAppearsInProgress()`.
 
 Stale activity rows are also removed on a timer if timestamps stop updating (`AGENT_ACTIVITY_STALE_MS` in `activity-stale.ts`, used by Telegram and `StateManager` for the web UI).
+
+### 3.11 Questionnaire (from state.questionnaire)
+
+```
+❓ Questions (1 of 3)
+
+1. What is your favorite season?
+```
+
+Inline keyboard: `[A) Spring] [B) Summer] [C) Autumn]` (one button per option) plus `[⏭ Skip] [▶ Continue]` on a second row.
+
+The message is sent when `questionnaire` first becomes non-null, edited when the active question changes, and deleted when `questionnaire` becomes null. Only the active question's options are shown as buttons.
+
+Callback data prefixes: `qan:<hash>` for answer options, `qsk:<hash>` for Skip, `qco:<hash>` for Continue.
 
 ---
 
@@ -359,6 +378,7 @@ Telegram limits callback data to 64 bytes. Selector paths can be hundreds of cha
 - Generate a short hash (8 chars) of the selector path
 - Store the full path in a `Map<string, string>` (hash → selectorPath)
 - Callback data format: `{action}:{elementId_short}:{hash}` (fits in 64 bytes)
+- Questionnaire actions use a shorter format: `{action}:{hash}` (e.g. `qan:<hash>`, `qsk:<hash>`, `qco:<hash>`)
 - Map is cleared when the associated approval/action is no longer present
 
 ---

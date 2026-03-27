@@ -62,7 +62,7 @@ Download the latest `.vsix` from [releases](https://github.com/len5ky/CursorRemo
 
 ```bash
 # From the command line
-cursor --install-extension cursor-remote-0.1.41.vsix
+cursor --install-extension cursor-remote-0.1.42.vsix
 ```
 
 Or in Cursor: open the Command Palette (`Ctrl+Shift+P`), run **Extensions: Install from VSIX...**, and select the file.

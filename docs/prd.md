@@ -53,8 +53,8 @@ Ship a working system that:
 
 ### US-5: Background Notification
 **As a** developer with the web client in a background tab,
-**I want to** receive a browser notification when an approval is needed,
-**so that** I don't miss time-sensitive prompts.
+**I want to** receive a browser notification when any action needs my attention — global approvals, run command Skip/Run prompts, tool-level approvals (e.g. Fetch allowlisting, edit Accept/Skip), and other actionable tool widgets,
+**so that** I don't miss time-sensitive prompts regardless of which tool type the agent invokes.
 
 ### US-6: Connection Resilience
 **As a** developer,
@@ -96,7 +96,12 @@ Ship a working system that:
 **I want to** send messages, approve/reject tool calls via inline buttons, switch modes/models, and trigger plan builds — all from Telegram,
 **so that** I can fully control the agent from any device with Telegram installed.
 
-### US-14: Telegram Auto-Sync
+### US-14: Agent Questionnaire
+**As a** developer away from my desk,
+**I want to** see and answer the agent's multiple-choice questions from my phone or Telegram,
+**so that** the agent is not blocked waiting for my input while I'm away.
+
+### US-15: Telegram Auto-Sync
 **As a** developer using Telegram,
 **I want to** run `/sync` once to enable auto-sync, after which new chat tabs automatically get forum topics created,
 **so that** I don't need to manually create topics when starting new agent conversations.
@@ -198,6 +203,8 @@ Currently two transports are implemented:
 | `model`            | `ModelInfo`        | Current model name and ID                    |
 | `windows`          | `CursorWindow[]`   | All discovered Cursor windows                |
 | `activeWindowId`   | `string`           | ID of the currently connected window         |
+| `composerQueue`    | `ComposerQueueState` | Prompts queued in composer toolbar         |
+| `questionnaire`    | `Questionnaire \| null` | Agent questionnaire widget (multiple-choice questions) |
 
 ### 4.2 AgentStatus
 
@@ -358,6 +365,37 @@ A terminal command that the agent wants to execute, shown as an interactive card
 | `label`        | `string` | Button text ("Accept", "Reject", etc.)              |
 | `type`         | `string` | `'approve'`, `'reject'`, or `'approve_all'`         |
 | `selectorPath` | `string` | CSS selector path used to click this button via CDP |
+
+### 4.10 Questionnaire
+
+Represents the agent's multiple-choice questionnaire toolbar (`.composer-questionnaire-toolbar`). Null when no questionnaire is active.
+
+| Field                 | Type                      | Description                              |
+| --------------------- | ------------------------- | ---------------------------------------- |
+| `questions`           | `QuestionnaireQuestion[]` | All questions in the questionnaire       |
+| `activeIndex`         | `number`                  | 0-based index of the active question     |
+| `totalLabel`          | `string`                  | Stepper label, e.g. "1 of 3"            |
+| `skipSelectorPath`    | `string`                  | CSS selector for the Skip button         |
+| `continueSelectorPath`| `string`                  | CSS selector for the Continue button     |
+| `continueDisabled`    | `boolean`                 | Whether Continue is disabled             |
+
+### 4.11 QuestionnaireQuestion
+
+| Field       | Type                      | Description                                    |
+| ----------- | ------------------------- | ---------------------------------------------- |
+| `number`    | `string`                  | Display number ("1.", "2.", etc.)               |
+| `text`      | `string`                  | Question text                                  |
+| `options`   | `QuestionnaireOption[]`   | Available answer options                       |
+| `isActive`  | `boolean`                 | Whether this is the currently active question   |
+
+### 4.12 QuestionnaireOption
+
+| Field          | Type      | Description                                       |
+| -------------- | --------- | ------------------------------------------------- |
+| `letter`       | `string`  | Option letter ("A", "B", "C", "D")                |
+| `label`        | `string`  | Option text ("Spring", "Summer", etc.)             |
+| `isFreeform`   | `boolean` | True for the freeform "Other..." option            |
+| `selectorPath` | `string`  | CSS selector path to click this option via CDP     |
 
 ---
 
@@ -660,7 +698,7 @@ All configuration is via environment variables with sensible defaults:
 | Mobile model menu           | Done        | MAX toggle, categories, brain badges          |
 | Mobile web client           | Done        | Per-type chat rendering, Cursor-matched theme |
 | Auto-reconnection           | Done        | Both CDP and socket.io sides                  |
-| Browser notifications       | Done        | On pending approvals                          |
+| Browser notifications       | Done        | On pending approvals, run command prompts, and tool-level actions (Fetch, Edit, etc.) |
 | Plan widget extraction      | Done        | `.composer-create-plan-container` → structured PlanBlock with todos, actions |
 | Plan widget web rendering   | Done        | Rich card with todo list, Build/View Plan buttons |
 | Run command extraction      | Done        | `.composer-terminal-tool-call-block-container` → RunCommand with command text, actions |

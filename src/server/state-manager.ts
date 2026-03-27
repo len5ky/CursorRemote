@@ -22,6 +22,7 @@ function emptyState(): CursorState {
     windows: [],
     activeWindowId: '',
     composerQueue: { items: [] },
+    questionnaire: null,
   };
 }
 
@@ -206,6 +207,19 @@ export class StateManager extends EventEmitter {
     this.emit('state:patch', { windows, activeWindowId });
   }
 
+  /** Push per-window mode/model into global state (e.g. from a cached snapshot on window switch). */
+  updateModeModel(mode: CursorState['mode'], model: CursorState['model']): void {
+    const modeChanged = this.currentState.mode?.current !== mode?.current;
+    const modelChanged = this.currentState.model?.current !== model?.current
+      || this.currentState.model?.currentId !== model?.currentId;
+    if (!modeChanged && !modelChanged) return;
+    const patch: Partial<CursorState> = {};
+    if (modeChanged) patch.mode = mode;
+    if (modelChanged) patch.model = model;
+    this.currentState = { ...this.currentState, ...patch };
+    this.emit('state:patch', patch);
+  }
+
   private diff(
     prev: CursorState,
     next: CursorState
@@ -300,6 +314,11 @@ export class StateManager extends EventEmitter {
 
     if (JSON.stringify(prev.composerQueue) !== JSON.stringify(next.composerQueue)) {
       patch.composerQueue = next.composerQueue;
+      hasChange = true;
+    }
+
+    if (JSON.stringify(prev.questionnaire) !== JSON.stringify(next.questionnaire)) {
+      patch.questionnaire = next.questionnaire;
       hasChange = true;
     }
 

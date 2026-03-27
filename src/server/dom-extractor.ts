@@ -460,6 +460,37 @@ export function extractionFunction(
       return extractCodeBlockItem(block);
     }
 
+    function extractToolActions(
+      container: Element
+    ): { label: string; type: 'run' | 'skip' | 'allow'; selectorPath: string }[] {
+      const actions: { label: string; type: 'run' | 'skip' | 'allow'; selectorPath: string }[] = [];
+      const seenPaths = new Set<string>();
+
+      const skipBtn = container.querySelector('.composer-skip-button');
+      if (skipBtn) {
+        const path = buildSelectorPath(skipBtn);
+        seenPaths.add(path);
+        actions.push({ label: 'Skip', type: 'skip' as const, selectorPath: path });
+      }
+
+      const runBtns = container.querySelectorAll('.composer-run-button, .anysphere-secondary-button');
+      for (const btn of Array.from(runBtns)) {
+        const path = buildSelectorPath(btn);
+        if (seenPaths.has(path)) continue;
+        seenPaths.add(path);
+        const btnText = (btn.textContent || '').replace(/[⏎⌘⇧]/g, '').trim();
+        const isAllow =
+          btn.classList.contains('anysphere-secondary-button') || btnText.toLowerCase().includes('allow');
+        if (isAllow) {
+          actions.push({ label: btnText, type: 'allow' as const, selectorPath: path });
+        } else {
+          actions.push({ label: btnText || 'Run', type: 'run' as const, selectorPath: path });
+        }
+      }
+
+      return actions;
+    }
+
     function extractAiTool(
       toolRoot: Element,
       flatIndex: number,
@@ -617,27 +648,7 @@ export function extractionFunction(
             .trim();
         }
 
-        const runActions: { label: string; type: 'run' | 'skip' | 'allow'; selectorPath: string }[] = [];
-        const skipBtn = runContainer.querySelector('.composer-skip-button');
-        if (skipBtn) {
-          runActions.push({ label: 'Skip', type: 'skip' as const, selectorPath: buildSelectorPath(skipBtn) });
-        }
-        const seenPaths = new Set<string>();
-        if (skipBtn) seenPaths.add(buildSelectorPath(skipBtn));
-        const runBtns = runContainer.querySelectorAll('.composer-run-button');
-        for (const btn of Array.from(runBtns)) {
-          const path = buildSelectorPath(btn);
-          if (seenPaths.has(path)) continue;
-          seenPaths.add(path);
-          const btnText = (btn.textContent || '').replace(/[⏎⌘⇧]/g, '').trim();
-          const isAllowlist =
-            btn.classList.contains('anysphere-secondary-button') || btnText.toLowerCase().includes('allow');
-          if (isAllowlist) {
-            runActions.push({ label: btnText, type: 'allow' as const, selectorPath: path });
-          } else {
-            runActions.push({ label: 'Run', type: 'run' as const, selectorPath: path });
-          }
-        }
+        const runActions = extractToolActions(runContainer);
 
         return {
           element: {
@@ -679,29 +690,9 @@ export function extractionFunction(
           : undefined;
 
         const statusRow = editReviewEl.querySelector('.composer-tool-call-status-row');
-        const editActions: { label: string; type: 'run' | 'skip' | 'allow'; selectorPath: string }[] = [];
-        if (statusRow) {
-          const skipBtn2 = statusRow.querySelector('.composer-skip-button');
-          if (skipBtn2) {
-            editActions.push({ label: 'Skip', type: 'skip' as const, selectorPath: buildSelectorPath(skipBtn2) });
-          }
-          const seenPaths2 = new Set<string>();
-          if (skipBtn2) seenPaths2.add(buildSelectorPath(skipBtn2));
-          const runBtns2 = statusRow.querySelectorAll('.composer-run-button, .anysphere-secondary-button');
-          for (const btn of Array.from(runBtns2)) {
-            const path = buildSelectorPath(btn);
-            if (seenPaths2.has(path)) continue;
-            seenPaths2.add(path);
-            const btnText = (btn.textContent || '').replace(/[⏎⌘⇧]/g, '').trim();
-            const isAllow =
-              btn.classList.contains('anysphere-secondary-button') || btnText.toLowerCase().includes('allow');
-            if (isAllow) {
-              editActions.push({ label: btnText, type: 'allow' as const, selectorPath: path });
-            } else {
-              editActions.push({ label: btnText || 'Accept', type: 'run' as const, selectorPath: path });
-            }
-          }
-        }
+        const editActions = statusRow
+          ? extractToolActions(statusRow)
+          : extractToolActions(editReviewEl);
 
         const diffBlock = extractDiffBlockFromScope(editReviewEl);
         return {
@@ -761,20 +752,41 @@ export function extractionFunction(
 
       const compactEl = toolRoot.querySelector('.composer-tool-former-message');
       if (compactEl) {
-        const spans = compactEl.querySelectorAll('span');
         let actionPart = '';
         let descPart = '';
-        for (const s of Array.from(spans)) {
-          const txt = (s.textContent || '').trim();
-          if (!txt) continue;
-          if (s.classList.toString().includes('codicon') || s.classList.toString().includes('cursor-icon')) continue;
-          if (s.classList.contains('truncate-one-line') || s.classList.toString().includes('truncate')) {
-            descPart = txt;
-          } else if (!actionPart) {
-            actionPart = txt;
+
+        const headerContent = compactEl.querySelector('.composer-tool-call-header-content');
+        if (headerContent) {
+          const headerSpans = headerContent.querySelectorAll('span');
+          for (const s of Array.from(headerSpans)) {
+            const txt = (s.textContent || '').trim();
+            if (!txt) continue;
+            if (s.classList.toString().includes('codicon') || s.classList.toString().includes('cursor-icon')) continue;
+            if (!actionPart) {
+              actionPart = txt;
+            } else if (!descPart) {
+              descPart = txt;
+            }
+          }
+        } else {
+          const spans = compactEl.querySelectorAll('span');
+          for (const s of Array.from(spans)) {
+            if (s.closest('.composer-tool-call-control-row') || s.closest('.composer-tool-call-status-row')) continue;
+            const txt = (s.textContent || '').trim();
+            if (!txt) continue;
+            if (s.classList.toString().includes('codicon') || s.classList.toString().includes('cursor-icon')) continue;
+            if (s.classList.contains('truncate-one-line') || s.classList.toString().includes('truncate')) {
+              descPart = txt;
+            } else if (!actionPart) {
+              actionPart = txt;
+            }
           }
         }
-        const summaryText = (compactEl.textContent || '').trim();
+
+        const compactActions = extractToolActions(compactEl);
+        const summaryText = headerContent
+          ? ''
+          : (compactEl.textContent || '').trim();
         const compactDiff = tryParseDiffStatsFromWrapper(toolRoot);
         const diffBlockCompact = extractDiffBlockFromScope(toolRoot);
         return {
@@ -786,9 +798,10 @@ export function extractionFunction(
             status: toolStatus,
             action: actionPart || '',
             details: descPart || '',
-            summaryText: !actionPart && !descPart ? summaryText : undefined,
+            summaryText: !actionPart && !descPart && summaryText ? summaryText : undefined,
             additions: compactDiff.additions,
             deletions: compactDiff.deletions,
+            actions: compactActions.length > 0 ? compactActions : undefined,
             ...(diffBlockCompact ? { diffBlock: diffBlockCompact } : {}),
           },
           parsedAs: 'tool:compact',
@@ -828,6 +841,7 @@ export function extractionFunction(
       }
 
       const diffBlockLine = extractDiffBlockFromScope(toolRoot);
+      const fallbackActions = extractToolActions(toolRoot);
       return {
         element: {
           type: 'tool' as const,
@@ -840,6 +854,7 @@ export function extractionFunction(
           filename: filename2 || (action === 'Edit' || action === 'Write' ? details : undefined),
           additions: additions2,
           deletions: deletions2,
+          actions: fallbackActions.length > 0 ? fallbackActions : undefined,
           ...(diffBlockLine ? { diffBlock: diffBlockLine } : {}),
         },
         parsedAs: !action && !details && !filename2 ? 'tool:fallback' : 'tool',
@@ -1336,7 +1351,22 @@ export function extractionFunction(
     };
 
     // --- Model extraction ---
-    const modelEl = findFirst(modelSelectors);
+    // Skip plan-scoped model dropdowns (id starts with "plan-exec-model") — those
+    // show the model for a specific plan, not the composer-level model.
+    let modelEl: Element | null = null;
+    for (const sel of modelSelectors) {
+      try {
+        const candidates = document.querySelectorAll(sel);
+        for (const c of Array.from(candidates)) {
+          const cId = c.getAttribute('id') || '';
+          if (!cId.startsWith('plan-exec-model')) {
+            modelEl = c;
+            break;
+          }
+        }
+        if (modelEl) break;
+      } catch { /* skip */ }
+    }
     let modelName = '';
     let modelId = '';
     if (modelEl) {
@@ -1422,6 +1452,67 @@ export function extractionFunction(
       }
     }
 
+    // --- Questionnaire widget ---
+    type QOption = { letter: string; label: string; isFreeform: boolean; selectorPath: string };
+    type QQuestion = { number: string; text: string; options: QOption[]; isActive: boolean };
+    let questionnaire: {
+      questions: QQuestion[];
+      activeIndex: number;
+      totalLabel: string;
+      skipSelectorPath: string;
+      continueSelectorPath: string;
+      continueDisabled: boolean;
+    } | null = null;
+    const qToolbar = document.querySelector('.composer-questionnaire-toolbar');
+    if (qToolbar) {
+      const stepperLabel = (qToolbar.querySelector('.composer-questionnaire-toolbar-stepper-label')?.textContent || '').trim();
+      const questionEls = Array.from(qToolbar.querySelectorAll('.composer-questionnaire-toolbar-question'));
+      const questions: QQuestion[] = [];
+      let activeIdx = 0;
+      for (let qi = 0; qi < questionEls.length; qi++) {
+        const qEl = questionEls[qi];
+        const isActive = qEl.classList.contains('composer-questionnaire-toolbar-question-active');
+        if (isActive) activeIdx = qi;
+        const num = (qEl.querySelector('.composer-questionnaire-toolbar-question-number')?.textContent || '').trim();
+        const mdRoot = qEl.querySelector('.markdown-root');
+        const text = (mdRoot?.textContent || '').trim();
+        const optionEls = Array.from(qEl.querySelectorAll('.composer-questionnaire-toolbar-option'));
+        const options: QOption[] = [];
+        for (const optEl of optionEls) {
+          const letterBtn = optEl.querySelector('.composer-questionnaire-toolbar-option-letter');
+          const letter = (letterBtn?.textContent || '').trim();
+          const isFreeform = optEl.classList.contains('composer-questionnaire-toolbar-option-freeform');
+          const label = isFreeform ? 'Other' : (optEl.querySelector('.composer-questionnaire-toolbar-option-label')?.textContent || '').trim();
+          const clickTarget = letterBtn || optEl;
+          options.push({ letter, label, isFreeform, selectorPath: buildSelectorPath(clickTarget as Element) });
+        }
+        questions.push({ number: num, text, options, isActive });
+      }
+
+      let skipPath = '';
+      let continuePath = '';
+      let continueDisabled = false;
+      const actionsContainer = qToolbar.querySelector('.composer-questionnaire-toolbar-actions');
+      if (actionsContainer) {
+        const skipBtn = actionsContainer.querySelector('.composer-skip-button');
+        if (skipBtn) skipPath = buildSelectorPath(skipBtn as Element);
+        const contBtn = actionsContainer.querySelector('.composer-run-button');
+        if (contBtn) {
+          continuePath = buildSelectorPath(contBtn as Element);
+          continueDisabled = contBtn.getAttribute('data-disabled') === 'true';
+        }
+      }
+
+      questionnaire = {
+        questions,
+        activeIndex: activeIdx,
+        totalLabel: stepperLabel,
+        skipSelectorPath: skipPath,
+        continueSelectorPath: continuePath,
+        continueDisabled,
+      };
+    }
+
     return {
       connected: true,
       extractorStatus: 'ok',
@@ -1441,6 +1532,7 @@ export function extractionFunction(
       windows: [],
       activeWindowId: '',
       composerQueue: { items: queueItems, ...(queueLabel ? { queueLabel } : {}) },
+      questionnaire,
       _rawSignals,
     };
   } catch {

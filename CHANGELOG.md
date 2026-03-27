@@ -6,6 +6,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.42] - 2026-03-27
+
+### Added
+- Questionnaire widget: agent multiple-choice questions (`.composer-questionnaire-toolbar`) are now extracted from the DOM, rendered in the web app with clickable option buttons and skip/continue actions, and formatted with inline keyboard buttons in Telegram.
+- Regression test suite with 82 tests covering activity derivation, Telegram formatting (including questionnaire and assistant empty-html handling), and web client rendering (including questionnaire widget). Runs via `npm test` and is required before every publish.
+- Generic tool action extraction: all tool types (including Fetch, and any future Cursor tools) now surface Skip/Run/Allowlist buttons in both the web app and Telegram, without needing per-tool-type code.
+- Browser notifications now fire for all actionable events — run command prompts, tool-level approvals (Fetch, Edit, etc.), not just global approvals. Each notification is deduplicated by message ID.
+- Canonical fixture library (`fixtures/recordings/`) with scenarios for shimmer lifecycle, approvals, plans, code blocks, connection states, and fetch tool.
+- Manual smoke checklist (`docs/smoke-checklist.md`) for pre-release verification.
+
+### Changed
+- Web client is no longer fixed to a narrow 600px mobile layout. The app now fills the full viewport width, with message content centered and capped at ~800px on desktop for readability. Mobile layout is unchanged.
+- CDP recorder now stores both raw extractor output and post-derived relay state, with schema versioning and metadata header.
+- Publish script (`scripts/publish.ts`) now gates on regression tests before syncing to the public repo. Use `--skip-tests` only for emergencies.
+- Deduplicated button extraction logic in `dom-extractor.ts` into a single `extractToolActions()` helper used by all tool paths.
+
+### Fixed
+- Telegram assistant messages no longer flash unformatted text (missing spaces/formatting) before showing the properly formatted version. Messages now wait for HTML rendering before being sent.
+- Model and mode now sync correctly across windows. Per-window model/mode is captured in window snapshots and pushed to global state immediately on window switch, eliminating stale values from the previous window.
+- Model extraction no longer picks up the plan-scoped model dropdown (e.g. "Opus 4.6" from a plan widget) instead of the actual composer model. Windows with active plan widgets now correctly report the composer-level model.
+- Fetch tool (and other compact tool types) now show their content and approval buttons in both Telegram and the web app instead of appearing as plain text with no actions.
+- Compact tool header extraction no longer picks up button text ("Skip", "Allowlist ...") as the action/description.
+
 ## [0.1.41] - 2026-03-24
 
 ### Fixed

@@ -23,6 +23,7 @@
     windows: [],
     activeWindowId: '',
     composerQueue: { items: [] },
+    questionnaire: null,
   };
 
   function getAuthToken() {
@@ -98,6 +99,7 @@
   let userScrolledUp = false;
   let autoScrollJob = 0;
   let notificationPermission = 'default';
+  const notifiedMessageIds = new Set();
   let activePlanModal = null;
   let activePlanModelContext = null;
   const pendingCommandResults = new Map();
@@ -129,6 +131,12 @@
   const $approvalDesc = document.getElementById('approval-desc');
   const $btnApprove = document.getElementById('btn-approve');
   const $btnReject = document.getElementById('btn-reject');
+  var questionnaireSelections = {};
+  const $questionnaireBar = document.getElementById('questionnaire-bar');
+  const $questionnaireStepper = document.getElementById('questionnaire-stepper');
+  const $questionnaireQuestions = document.getElementById('questionnaire-questions');
+  const $btnQSkip = document.getElementById('btn-q-skip');
+  const $btnQContinue = document.getElementById('btn-q-continue');
   const $input = document.getElementById('message-input');
   const $btnSend = document.getElementById('btn-send');
   const $toastContainer = document.getElementById('toast-container');
@@ -271,6 +279,24 @@
     showToast('Reject sent', 'success');
   });
 
+  $btnQSkip.addEventListener('click', () => {
+    if (!state.questionnaire) return;
+    socket.emit('command:click_action', {
+      commandId: newCommandId(),
+      selectorPath: state.questionnaire.skipSelectorPath,
+    });
+    showToast('Skip sent', 'success');
+  });
+
+  $btnQContinue.addEventListener('click', () => {
+    if (!state.questionnaire || state.questionnaire.continueDisabled) return;
+    socket.emit('command:click_action', {
+      commandId: newCommandId(),
+      selectorPath: state.questionnaire.continueSelectorPath,
+    });
+    showToast('Continue sent', 'success');
+  });
+
   $btnNewChat.addEventListener('click', () => {
     socket.emit('command:new_chat', { commandId: newCommandId() });
     showToast('Creating new chat...', 'success');
@@ -301,6 +327,7 @@
     renderWindows();
     renderMessages();
     renderApprovals();
+    renderQuestionnaire();
     renderInputState();
     renderTabs();
     renderModeModel();
@@ -482,6 +509,7 @@
     });
 
     if (!userScrolledUp) scheduleMessagesAutoScroll();
+    checkMessagesForNotifications();
   }
 
   function createElement(msg) {
@@ -1473,10 +1501,75 @@
       if (approveAction) $btnApprove.textContent = approveAction.label || 'Accept';
       if (rejectAction) $btnReject.textContent = rejectAction.label || 'Reject';
 
-      fireNotification(approval.description || 'Agent needs approval');
+      fireNotification(approval.description || 'Agent needs approval', 'cursor-approval');
     } else {
       $approvalBar.classList.add('hidden');
     }
+  }
+
+  function renderQuestionnaire() {
+    var q = state.questionnaire;
+    if (!q || !q.questions || q.questions.length === 0) {
+      $questionnaireBar.classList.add('hidden');
+      questionnaireSelections = {};
+      return;
+    }
+    $questionnaireBar.classList.remove('hidden');
+    $questionnaireStepper.textContent = q.totalLabel || '';
+    $btnQContinue.disabled = q.continueDisabled;
+
+    $questionnaireQuestions.innerHTML = '';
+    for (var i = 0; i < q.questions.length; i++) {
+      var question = q.questions[i];
+      var qDiv = document.createElement('div');
+      qDiv.className = 'questionnaire-question' + (question.isActive ? ' questionnaire-question-active' : '');
+
+      var labelDiv = document.createElement('div');
+      labelDiv.className = 'questionnaire-question-label';
+      var numSpan = document.createElement('span');
+      numSpan.className = 'questionnaire-question-number';
+      numSpan.textContent = question.number;
+      var textSpan = document.createElement('span');
+      textSpan.textContent = question.text;
+      labelDiv.appendChild(numSpan);
+      labelDiv.appendChild(textSpan);
+      qDiv.appendChild(labelDiv);
+
+      var optionsDiv = document.createElement('div');
+      optionsDiv.className = 'questionnaire-options';
+      for (var j = 0; j < question.options.length; j++) {
+        var opt = question.options[j];
+        var optBtn = document.createElement('button');
+        var isSelected = questionnaireSelections[question.number] === opt.letter;
+        optBtn.className = 'questionnaire-option' + (isSelected ? ' questionnaire-option-selected' : '');
+        var letterSpan = document.createElement('span');
+        letterSpan.className = 'questionnaire-option-letter';
+        letterSpan.textContent = opt.letter + ')';
+        var labelSpan = document.createElement('span');
+        labelSpan.textContent = ' ' + opt.label;
+        optBtn.appendChild(letterSpan);
+        optBtn.appendChild(labelSpan);
+        optBtn.dataset.selectorPath = opt.selectorPath;
+        optBtn.dataset.questionNumber = question.number;
+        optBtn.dataset.letter = opt.letter;
+        optBtn.addEventListener('click', function() {
+          questionnaireSelections[this.dataset.questionNumber] = this.dataset.letter;
+          var siblings = this.parentNode.querySelectorAll('.questionnaire-option');
+          for (var s = 0; s < siblings.length; s++) siblings[s].classList.remove('questionnaire-option-selected');
+          this.classList.add('questionnaire-option-selected');
+          socket.emit('command:click_action', {
+            commandId: newCommandId(),
+            selectorPath: this.dataset.selectorPath,
+          });
+          showToast('Answer sent', 'success');
+        });
+        optionsDiv.appendChild(optBtn);
+      }
+      qDiv.appendChild(optionsDiv);
+      $questionnaireQuestions.appendChild(qDiv);
+    }
+
+    fireNotification('Agent has questions for you', 'cursor-questionnaire');
   }
 
   function renderInputState() {
@@ -1484,16 +1577,38 @@
     $btnSend.disabled = !$input.value.trim() || $input.disabled;
   }
 
-  function fireNotification(text) {
+  function fireNotification(text, tag) {
     if (document.hasFocus()) return;
+    if (typeof Notification === 'undefined') return;
+    var ntag = tag || 'cursor-agent';
     if (notificationPermission === 'default') {
-      Notification.requestPermission().then(perm => {
+      Notification.requestPermission().then(function (perm) {
         notificationPermission = perm;
-        if (perm === 'granted') new Notification('Cursor Agent', { body: text, tag: 'cursor-approval' });
+        if (perm === 'granted') new Notification('CursorRemote', { body: text, tag: ntag });
       });
     } else if (notificationPermission === 'granted') {
-      new Notification('Cursor Agent', { body: text, tag: 'cursor-approval' });
+      new Notification('CursorRemote', { body: text, tag: ntag });
     }
+  }
+
+  function checkMessagesForNotifications() {
+    if (document.hasFocus()) return;
+    state.messages.forEach(function (msg) {
+      if (notifiedMessageIds.has(msg.id)) return;
+      var text = null;
+
+      if (msg.type === 'run_command' && msg.actions && msg.actions.length > 0) {
+        text = (msg.description || 'Run command') + ': ' + (msg.command || '').substring(0, 80);
+      } else if (msg.type === 'tool' && msg.actions && msg.actions.length > 0) {
+        var detail = msg.details || msg.filename || '';
+        text = (msg.action || 'Tool') + (detail ? ' ' + detail : '') + ' needs approval';
+      }
+
+      if (text) {
+        notifiedMessageIds.add(msg.id);
+        fireNotification(text, 'cursor-action-' + msg.id);
+      }
+    });
   }
 
   // --- Window rendering ---

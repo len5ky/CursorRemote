@@ -16,6 +16,7 @@ import {
   formatElement,
   formatActivity,
   formatApprovals,
+  formatQuestionnaire,
   formatComposerQueue,
   splitMessage,
   activityRedundantWithInProgressStepSummary,
@@ -483,6 +484,12 @@ export class TelegramTransport implements Transport {
       });
     }
 
+    if ('questionnaire' in patch) {
+      this.processQuestionnaire(patch.questionnaire ?? null).catch(err => {
+        console.error('[telegram] Questionnaire error:', err);
+      });
+    }
+
     if ('agentStatus' in patch || 'agentActivityLive' in patch || 'agentActivityText' in patch) {
       this.syncTypingIndicator();
     }
@@ -913,6 +920,69 @@ export class TelegramTransport implements Transport {
       const msg = err instanceof Error ? err.message : String(err);
       if (!msg.includes('not found')) {
         console.warn('[telegram] Approval error:', msg);
+      }
+    }
+  }
+
+  private async processQuestionnaire(questionnaire: import('../../types.js').Questionnaire | null): Promise<void> {
+    if (!this.chatId) return;
+
+    const state = this.stateManager.getCurrentState();
+    const threadId = this.topicManager.getActiveThread(
+      state.windows, state.activeWindowId, state.chatTabs
+    );
+    if (!threadId) return;
+
+    const trackId = 'questionnaire';
+
+    if (!questionnaire || questionnaire.questions.length === 0) {
+      // Questionnaire cleared — delete the tracked message
+      const tracked = this.messageTracker.getTracked(threadId, trackId);
+      if (tracked && tracked.telegramMsgIds[0]) {
+        try {
+          await this.sendQueue.enqueue(
+            () => this.bot.api.deleteMessage(this.chatId!, tracked.telegramMsgIds[0]),
+            'edit'
+          );
+        } catch { /* ok — may already be gone */ }
+        this.messageTracker.track(threadId, trackId, [], 'cleared', 'questionnaire');
+      }
+      return;
+    }
+
+    const hashCallback = (sp: string) => this.messageTracker.hashSelector(sp);
+    const formatted = formatQuestionnaire(questionnaire, hashCallback);
+    if (!formatted.html) return;
+
+    const tracked = this.messageTracker.getTracked(threadId, trackId);
+
+    try {
+      if (tracked && tracked.telegramMsgIds[0]) {
+        await this.sendQueue.enqueue(
+          () => this.bot.api.editMessageText(this.chatId!, tracked.telegramMsgIds[0], formatted.html, {
+            parse_mode: 'HTML',
+            reply_markup: formatted.keyboard,
+          }),
+          'edit'
+        );
+      } else {
+        const sent = await this.sendQueue.enqueue(
+          () => this.bot.api.sendMessage(this.chatId!, formatted.html, {
+            message_thread_id: threadId,
+            parse_mode: 'HTML',
+            reply_markup: formatted.keyboard,
+          }),
+          'send'
+        );
+        this.messageTracker.track(
+          threadId, trackId, [sent.message_id],
+          MessageTracker.contentHash(formatted.html), 'questionnaire'
+        );
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!msg.includes('not found') && !msg.includes('not modified')) {
+        console.warn('[telegram] Questionnaire error:', msg);
       }
     }
   }

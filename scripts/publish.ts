@@ -153,16 +153,29 @@ function createGitHubRelease(version: string, body: string, vsix: string): void 
   console.log(`✓ Created GitHub Release v${version} with .vsix asset`);
 }
 
+function runRegressionTests(): void {
+  console.log('\n— Running regression tests —');
+  execSync('npm test', { cwd: DEV_ROOT, stdio: 'inherit' });
+  console.log('✓ All regression tests passed\n');
+}
+
 function main(): void {
   const args = process.argv.slice(2);
   const doCommit = args.includes('--commit');
   const doPush = args.includes('--push');
   const doOvsx = args.includes('--ovsx');
+  const skipTests = args.includes('--skip-tests');
 
   const version = getVersion();
   const changelogBody = getChangelogSection(version);
 
   console.log(`Publishing v${version} → ${PUBLIC_ROOT}`);
+
+  if (!skipTests) {
+    runRegressionTests();
+  } else {
+    console.warn('⚠ Skipping regression tests (--skip-tests)');
+  }
 
   if (!devTreeClean()) {
     console.warn('⚠ Dev repo has uncommitted changes. Proceeding anyway (syncing working tree).\n');

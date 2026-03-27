@@ -10,6 +10,17 @@ import {
 import type { CursorState } from '../src/server/types.js';
 import { deriveActivityFromSignals } from '../src/server/activity-derive.js';
 
+interface RecordLineV1 {
+  ts: number;
+  state: CursorState | null;
+}
+
+interface RecordLineV2 {
+  ts: number;
+  state: CursorState | null;
+  raw?: CursorState | null;
+}
+
 interface RecordLine {
   ts: number;
   state: CursorState | null;
@@ -45,9 +56,15 @@ async function main() {
     process.exit(1);
   }
 
-  const raw = readFileSync(filePath, 'utf-8').trim().split('\n');
-  const lines: RecordLine[] = raw.map(l => JSON.parse(l) as RecordLine);
-  console.log(`[replay] Loaded ${lines.length} snapshots from ${filePath}`);
+  const rawLines = readFileSync(filePath, 'utf-8').trim().split('\n');
+  const parsed = rawLines.map(l => JSON.parse(l));
+  const hasHeader = parsed[0]?.header != null;
+  const dataLines = hasHeader ? parsed.slice(1) : parsed;
+  const lines: RecordLine[] = dataLines.map((l: RecordLineV1 | RecordLineV2) => ({
+    ts: l.ts,
+    state: l.state,
+  }));
+  console.log(`[replay] Loaded ${lines.length} snapshots from ${filePath}${hasHeader ? ` (schema v${parsed[0].header.schemaVersion})` : ' (v1)'}`);
   console.log(`[replay] Speed: ${speed}x, thread: ${threadId}, chat: ${chatIdArg ?? 'env'}${dryRun ? ', DRY RUN' : ''}\n`);
 
   let nextMsgId = 90000;
@@ -168,7 +185,7 @@ async function main() {
     const derived = state._rawSignals
       ? deriveActivityFromSignals(state._rawSignals, state.messages)
       : null;
-    const activity = derived ? derived.text : state.agentActivityText;
+    const activity = derived ? derived.activityText : state.agentActivityText;
     if (activity && !activityMsgId) {
       const html = formatActivity(activity);
       activityMsgId = await apiSend(html);

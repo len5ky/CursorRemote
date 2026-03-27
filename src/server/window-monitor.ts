@@ -12,6 +12,8 @@ import type {
   ComposerQueueState,
   CursorWindow,
   CursorState,
+  ModeInfo,
+  ModelInfo,
   ServerConfig,
   SelectorConfig,
 } from './types.js';
@@ -28,6 +30,8 @@ export interface WindowSnapshot {
   agentActivityLive: boolean;
   agentActivitySource: CursorState['agentActivitySource'];
   composerQueue: ComposerQueueState;
+  mode: ModeInfo;
+  model: ModelInfo;
   lastUpdated: number;
 }
 
@@ -166,8 +170,15 @@ export class WindowMonitor extends EventEmitter {
   }
 
   private onConnected = (): void => {
+    const targetId = this.cdpBridge.activeTargetId;
     if (!this.homeWindowId) {
-      this.homeWindowId = this.cdpBridge.activeTargetId;
+      this.homeWindowId = targetId;
+    }
+    // If we have a cached snapshot for this window, push its mode/model immediately
+    // so the web/Telegram clients don't show stale values while waiting for extraction.
+    const cached = targetId ? this.snapshots.get(targetId) : undefined;
+    if (cached) {
+      this.stateManager.updateModeModel(cached.mode, cached.model);
     }
     this.captureHomeWindow();
     // Run first cycle immediately so other windows are available for /sync
@@ -204,6 +215,8 @@ export class WindowMonitor extends EventEmitter {
       agentActivityLive: state.agentActivityLive,
       agentActivitySource: state.agentActivitySource,
       composerQueue: state.composerQueue,
+      mode: state.mode,
+      model: state.model,
       lastUpdated: Date.now(),
     };
 
@@ -219,6 +232,9 @@ export class WindowMonitor extends EventEmitter {
       || prev.agentActivitySource !== snapshot.agentActivitySource
       || prev.pendingApprovals.length !== snapshot.pendingApprovals.length
       || queueSig !== prevQueueSig
+      || prev.mode?.current !== snapshot.mode?.current
+      || prev.model?.current !== snapshot.model?.current
+      || prev.model?.currentId !== snapshot.model?.currentId
       || messageFingerprint(prev.messages) !== messageFingerprint(snapshot.messages)
       || elementsSignature(prev.messages) !== elementsSignature(snapshot.messages);
 
@@ -313,6 +329,8 @@ export class WindowMonitor extends EventEmitter {
           agentActivityLive: state.agentActivityLive,
           agentActivitySource: state.agentActivitySource,
           composerQueue: state.composerQueue,
+          mode: state.mode,
+          model: state.model,
           lastUpdated: Date.now(),
         };
 
@@ -328,6 +346,9 @@ export class WindowMonitor extends EventEmitter {
           || prev.agentActivitySource !== snapshot.agentActivitySource
           || prev.pendingApprovals.length !== snapshot.pendingApprovals.length
           || qSig !== pqSig
+          || prev.mode?.current !== snapshot.mode?.current
+          || prev.model?.current !== snapshot.model?.current
+          || prev.model?.currentId !== snapshot.model?.currentId
           || messageFingerprint(prev.messages) !== messageFingerprint(snapshot.messages)
           || elementsSignature(prev.messages) !== elementsSignature(snapshot.messages);
 

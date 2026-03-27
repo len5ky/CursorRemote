@@ -418,6 +418,21 @@ Terminal command approval cards contain the full shell command, a description he
 
 Note: "Skip" was not previously in `rejectButton.textMatch` in `selectors.json` and must be added.
 
+### 6.8 Generic Tool Action Extraction
+
+All tool types — including Fetch, Edit review, terminal commands, and any future Cursor tool widgets — share a common button convention: `.composer-skip-button` for Skip and `.composer-run-button` / `.anysphere-secondary-button` for Run/Allow/Accept. The `extractToolActions(container)` helper in `dom-extractor.ts` generically scans any tool container for these buttons and classifies them as `skip`, `run`, or `allow`. This avoids per-tool-type button extraction code and ensures new tool types automatically surface their approval actions in both Telegram and the web app.
+
+The compact tool path (`.composer-tool-former-message`) targets `.composer-tool-call-header-content` for action/detail text to avoid picking up button labels as content.
+
+### 6.9 Browser Notifications
+
+The web client fires native `Notification` API alerts when the browser tab is not focused and an actionable event appears. Covered events:
+- Global approvals (from `pendingApprovals`)
+- Run command prompts (messages with `type: 'run_command'` and actions)
+- Tool-level approvals (messages with `type: 'tool'` and actions, e.g. Fetch allowlisting, Edit accept)
+
+Each notification uses a unique tag per message ID to prevent duplicates. Permission is requested lazily on the first trigger.
+
 ---
 
 ## 7. VS Code Extension Shell

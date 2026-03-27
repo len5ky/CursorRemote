@@ -14,6 +14,7 @@ import type {
   LoadingIndicator,
   Approval,
   ComposerQueueState,
+  Questionnaire,
 } from '../../types.js';
 import { readPlanFile } from '../../plan-files.js';
 
@@ -77,8 +78,8 @@ function formatHuman(msg: HumanMessage): FormattedMessage {
 }
 
 function formatAssistant(msg: AssistantMessage): FormattedMessage {
-  const html = msg.html ? cursorHtmlToTelegram(msg.html, msg.codeBlocks) : escapeHtml(msg.text);
-  return { html };
+  if (!msg.html) return { html: '' };
+  return { html: cursorHtmlToTelegram(msg.html, msg.codeBlocks) };
 }
 
 function toolDiffStatsSuffix(msg: Pick<ToolCallElement, 'additions' | 'deletions'>): string {
@@ -441,6 +442,35 @@ export function formatApprovals(
   }
 
   return { html, keyboard };
+}
+
+export function formatQuestionnaire(
+  questionnaire: Questionnaire,
+  hashCallback: (selectorPath: string) => string
+): FormattedMessage {
+  if (!questionnaire.questions.length) return { html: '' };
+
+  const lines: string[] = [];
+  lines.push(`❓ <b>Questions</b> (${escapeHtml(questionnaire.totalLabel)})`);
+
+  const activeQ = questionnaire.questions[questionnaire.activeIndex] || questionnaire.questions[0];
+  lines.push('');
+  lines.push(`<b>${escapeHtml(activeQ.number)}</b> ${escapeHtml(activeQ.text)}`);
+
+  const keyboard = new InlineKeyboard();
+  for (const opt of activeQ.options) {
+    const hash = hashCallback(opt.selectorPath);
+    keyboard.text(`${opt.letter}) ${opt.label}`, `qan:${hash}`);
+  }
+  keyboard.row();
+  if (questionnaire.skipSelectorPath) {
+    keyboard.text('⏭ Skip', `qsk:${hashCallback(questionnaire.skipSelectorPath)}`);
+  }
+  if (questionnaire.continueSelectorPath && !questionnaire.continueDisabled) {
+    keyboard.text('▶ Continue', `qco:${hashCallback(questionnaire.continueSelectorPath)}`);
+  }
+
+  return { html: lines.join('\n'), keyboard };
 }
 
 export function splitMessage(html: string, limit: number = TG_MSG_LIMIT): string[] {

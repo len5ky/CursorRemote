@@ -43,6 +43,29 @@ export interface ComposerQueueState {
   queueLabel?: string;
 }
 
+export interface QuestionnaireOption {
+  letter: string;
+  label: string;
+  isFreeform: boolean;
+  selectorPath: string;
+}
+
+export interface QuestionnaireQuestion {
+  number: string;
+  text: string;
+  options: QuestionnaireOption[];
+  isActive: boolean;
+}
+
+export interface Questionnaire {
+  questions: QuestionnaireQuestion[];
+  activeIndex: number;
+  totalLabel: string;
+  skipSelectorPath: string;
+  continueSelectorPath: string;
+  continueDisabled: boolean;
+}
+
 export interface CursorState {
   connected: boolean;
   /** Health of DOM extraction independent from the CDP websocket connection. */
@@ -70,6 +93,8 @@ export interface CursorState {
   activeWindowId: string;
   /** Prompts queued in composer toolbar (outside transcript). */
   composerQueue: ComposerQueueState;
+  /** Agent questionnaire widget (multiple-choice questions). */
+  questionnaire: Questionnaire | null;
   _rawSignals?: RawSignals;
 }
 

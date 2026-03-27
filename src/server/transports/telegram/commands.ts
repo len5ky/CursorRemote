@@ -886,6 +886,25 @@ export async function handleCallbackQuery(ctx: Context, deps: CommandDeps): Prom
       return;
     }
 
+    // Questionnaire actions — resolve hash directly, no stable selector
+    if (action === 'qan' || action === 'qsk' || action === 'qco') {
+      if (!(await ensureTopicWindow(ctx, deps))) {
+        await ctx.answerCallbackQuery({ text: 'Failed to switch window' });
+        return;
+      }
+      // For questionnaire, the hash is in parts[1] (format: qan:<hash>)
+      const qHash = parts[1] ?? '';
+      const qSelector = deps.messageTracker.resolveHash(qHash);
+      if (!qSelector) {
+        await ctx.answerCallbackQuery({ text: 'Action expired.' });
+        return;
+      }
+      const result = await deps.commandExecutor.clickAction(commandId, qSelector);
+      const qNames: Record<string, string> = { qan: 'Answered', qsk: 'Skipped', qco: 'Continued' };
+      await ctx.answerCallbackQuery({ text: result.ok ? qNames[action] ?? action : `Error: ${result.error}` });
+      return;
+    }
+
     if (!(await ensureTopicWindow(ctx, deps))) {
       await ctx.answerCallbackQuery({ text: 'Failed to switch window' });
       return;

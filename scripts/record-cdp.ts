@@ -1,12 +1,15 @@
 import 'dotenv/config';
-import { appendFileSync, mkdirSync } from 'fs';
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { createHash } from 'crypto';
 import { CdpClient } from '../src/server/cdp-client.js';
 import { extractionFunction } from '../src/server/dom-extractor.js';
 import { loadConfig, loadSelectors } from '../src/server/config.js';
 import { extractWorkspaceName } from '../src/server/cdp-bridge.js';
+import { applyDerivedActivityToState } from '../src/server/activity-derive.js';
 import type { CursorState, SelectorConfig } from '../src/server/types.js';
 
 const POLL_MS = 300;
+const RECORDING_SCHEMA_VERSION = 2;
 
 interface CDPTarget {
   id: string;
@@ -14,6 +17,13 @@ interface CDPTarget {
   title: string;
   url: string;
   webSocketDebuggerUrl?: string;
+}
+
+interface RecordingHeader {
+  schemaVersion: number;
+  appVersion: string;
+  selectorsHash: string;
+  startedAt: string;
 }
 
 async function discoverTargets(cdpUrl: string): Promise<CDPTarget[]> {
@@ -34,6 +44,26 @@ function buildSelectorArgs(sel: SelectorConfig) {
     sel.modeDropdown?.strategies ?? [],
     sel.modelDropdown?.strategies ?? [],
   ] as const;
+}
+
+function getAppVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync('package.json', 'utf-8'));
+    return pkg.version ?? 'unknown';
+  } catch { return 'unknown'; }
+}
+
+function hashSelectors(sel: SelectorConfig): string {
+  return createHash('md5').update(JSON.stringify(sel)).digest('hex').substring(0, 12);
+}
+
+function normalizeVolatileIds(state: CursorState): CursorState {
+  let seqApproval = 0;
+  const approvals = state.pendingApprovals.map(a => ({
+    ...a,
+    id: a.id.replace(/approval-\d+/, () => `approval-${seqApproval++}`),
+  }));
+  return { ...state, pendingApprovals: approvals };
 }
 
 async function main() {
@@ -82,7 +112,16 @@ async function main() {
   mkdirSync('data', { recursive: true });
   const ts = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
   const outPath = `data/recording-${ts}.jsonl`;
-  console.log(`[record] Writing to ${outPath}`);
+
+  const header: RecordingHeader = {
+    schemaVersion: RECORDING_SCHEMA_VERSION,
+    appVersion: getAppVersion(),
+    selectorsHash: hashSelectors(selectors),
+    startedAt: new Date().toISOString(),
+  };
+  writeFileSync(outPath, JSON.stringify({ header }) + '\n');
+
+  console.log(`[record] Writing to ${outPath} (schema v${RECORDING_SCHEMA_VERSION})`);
   console.log(`[record] Polling every ${POLL_MS}ms — press Ctrl+C to stop\n`);
 
   const selectorArgs = buildSelectorArgs(selectors);
@@ -97,7 +136,7 @@ async function main() {
   while (running) {
     pollCount++;
     try {
-      const state = await Promise.race([
+      const rawState = await Promise.race([
         client.callFunction(
           extractionFunction as (...a: never[]) => unknown,
           ...selectorArgs,
@@ -106,18 +145,25 @@ async function main() {
         new Promise<null>((_, rej) => setTimeout(() => rej(new Error('timeout')), 5000)),
       ]) as CursorState | null;
 
-      const sig = JSON.stringify(state);
+      const derivedState = rawState ? normalizeVolatileIds(applyDerivedActivityToState(rawState)) : null;
+
+      const sig = JSON.stringify(derivedState);
       if (sig !== lastSig) {
         lastSig = sig;
-        const line = JSON.stringify({ ts: Date.now(), state }) + '\n';
+        const line = JSON.stringify({
+          ts: Date.now(),
+          state: derivedState,
+          raw: rawState,
+        }) + '\n';
         appendFileSync(outPath, line);
         linesWritten++;
 
-        const status = state?.agentStatus ?? 'null';
-        const msgs = state?.messages.length ?? 0;
-        const activity = state?.agentActivityText ?? '';
+        const status = derivedState?.agentStatus ?? 'null';
+        const msgs = derivedState?.messages.length ?? 0;
+        const activity = derivedState?.agentActivityText ?? '';
+        const live = derivedState?.agentActivityLive ? ' LIVE' : '';
         process.stdout.write(
-          `\r[record] polls=${pollCount} written=${linesWritten} status=${status} msgs=${msgs}${activity ? ` activity="${activity}"` : ''}`
+          `\r[record] polls=${pollCount} written=${linesWritten} status=${status} msgs=${msgs}${activity ? ` activity="${activity}"${live}` : ''}`
         );
       }
     } catch (err) {

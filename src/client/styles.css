@@ -60,7 +60,7 @@ html, body {
   display: flex;
   flex-direction: column;
   height: 100%;
-  max-width: 600px;
+  width: 100%;
   margin: 0 auto;
 }
 
@@ -988,7 +988,7 @@ header {
 
 .plan-modal {
   width: 100%;
-  max-width: 600px;
+  max-width: 720px;
   max-height: min(82vh, 720px);
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
@@ -1280,6 +1280,122 @@ header {
 }
 
 .approval-actions { display: flex; gap: 10px; }
+
+/* --- Questionnaire Bar --- */
+
+.questionnaire-bar {
+  padding: 10px 14px;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border-color);
+  flex-shrink: 0;
+  z-index: 10;
+}
+
+.questionnaire-bar.hidden { display: none; }
+
+.questionnaire-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.questionnaire-icon { font-size: 14px; }
+
+.questionnaire-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.questionnaire-stepper {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-left: auto;
+}
+
+.questionnaire-question {
+  margin-bottom: 10px;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary, rgba(255,255,255,0.04));
+}
+
+.questionnaire-question-active {
+  border-left: 2px solid var(--accent-blue);
+}
+
+.questionnaire-question-label {
+  display: flex;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+.questionnaire-question-number {
+  font-weight: 600;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.questionnaire-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.questionnaire-option {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.questionnaire-option:active { transform: scale(0.97); }
+.questionnaire-option:hover { border-color: var(--accent-blue); }
+.questionnaire-option-selected {
+  border-color: var(--accent-blue);
+  background: rgba(55, 148, 255, 0.15);
+}
+
+.questionnaire-option-letter {
+  font-weight: 600;
+  color: var(--accent-blue);
+}
+
+.questionnaire-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.btn-q-skip {
+  flex: 1;
+  height: 40px;
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+}
+
+.btn-q-continue {
+  flex: 1;
+  height: 40px;
+  background: var(--accent-blue);
+  color: #fff;
+}
+
+.btn-q-continue:disabled { opacity: 0.35; }
+.btn-q-skip:hover:not(:disabled) { border-color: var(--text-secondary); }
+.btn-q-continue:hover:not(:disabled) { opacity: 0.85; }
 
 /* --- Buttons --- */
 
@@ -1626,7 +1742,7 @@ header {
   bottom: 0;
   left: 0;
   right: 0;
-  max-width: 600px;
+  max-width: 720px;
   margin: 0 auto;
   background: var(--bg-surface);
   border-top-left-radius: 14px;
@@ -1770,6 +1886,16 @@ header {
 /* --- Desktop --- */
 
 @media (min-width: 768px) {
+  #messages {
+    padding-left: max(16px, calc((100% - 800px) / 2));
+    padding-right: max(16px, calc((100% - 800px) / 2));
+  }
   .human-bubble { max-width: 75%; }
   .btn-approve, .btn-reject { height: 44px; }
+  .approval-bar,
+  .questionnaire-bar,
+  #input-bar {
+    padding-left: max(14px, calc((100% - 800px) / 2));
+    padding-right: max(14px, calc((100% - 800px) / 2));
+  }
 }
