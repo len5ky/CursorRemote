@@ -67,6 +67,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       treeView.refresh();
     }),
     vscode.commands.registerCommand('cursorRemote.buyLicense', () => licenseManager.openBuyLink()),
+    vscode.commands.registerCommand('cursorRemote.clearLicenseKey', async () => {
+      await licenseManager.clearKey();
+      treeView.refresh();
+    }),
     vscode.commands.registerCommand('cursorRemote.openSetup', () => SetupPanel.createOrShow(context)),
   );
 

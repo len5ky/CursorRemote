@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, existsSync } from 'fs';
-import type { Bot, Api, RawApi } from 'grammy';
 import type { CursorWindow, ChatTab } from '../../types.js';
 import { cleanTabTitle } from '../../dom-extractor.js';
+import type { TelegramApiClient } from './tg-types.js';
 
 export interface TopicMapping {
   threadId: number;
@@ -125,7 +125,7 @@ export class TopicManager {
   }
 
   async createTopics(
-    bot: Bot | { api: Api<RawApi> },
+    api: TelegramApiClient,
     chatId: number,
     windows: CursorWindow[],
     chatTabs: ChatTab[],
@@ -154,7 +154,7 @@ export class TopicManager {
 
         const topicName = `${win.title} — ${cleaned}`.substring(0, 128);
         try {
-          const result = await bot.api.createForumTopic(chatId, topicName);
+          const result = await api.createForumTopic(chatId, topicName);
           const mapping: TopicMapping = {
             threadId: result.message_thread_id,
             windowId: win.id,

@@ -1,4 +1,3 @@
-import { InlineKeyboard } from 'grammy';
 import { parse as parseHtml, HTMLElement as ParsedEl, TextNode } from 'node-html-parser';
 import type {
   ChatElement,
@@ -17,12 +16,13 @@ import type {
   Questionnaire,
 } from '../../types.js';
 import { readPlanFile } from '../../plan-files.js';
+import { tgKeyboard, type TgKeyboard } from './tg-types.js';
 
 const TG_MSG_LIMIT = 4096;
 
 export interface FormattedMessage {
   html: string;
-  keyboard?: InlineKeyboard;
+  keyboard?: TgKeyboard;
 }
 
 export function formatElement(
@@ -107,9 +107,9 @@ function formatTool(
       html += `\n⚠️ ${escapeHtml(msg.blocked)}`;
     }
 
-    const keyboard = new InlineKeyboard();
+    const kb = tgKeyboard();
     const diffHash = hashCallback(msg.toolCallId);
-    keyboard.text('📄 View Diff', `dif:${msg.toolCallId.substring(0, 8)}:${diffHash}`);
+    kb.text('📄 View Diff', `dif:${msg.toolCallId.substring(0, 8)}:${diffHash}`);
 
     if (msg.actions && msg.actions.length > 0) {
       for (const act of msg.actions) {
@@ -118,11 +118,11 @@ function formatTool(
         const label = act.type === 'run' ? '✅ Accept'
           : act.type === 'skip' ? '⏭ Skip'
           : `🔓 ${act.label}`;
-        keyboard.text(label, `${prefix}:${msg.id.substring(0, 8)}:${hash}`);
+        kb.text(label, `${prefix}:${msg.id.substring(0, 8)}:${hash}`);
       }
     }
 
-    return { html, keyboard };
+    return { html, keyboard: kb.build() };
   }
 
   if (msg.summaryText) {
@@ -133,8 +133,7 @@ function formatTool(
     if (hasCode) {
       const html = `${icon} <b>${escapeHtml(msg.action || 'Tool')}</b>\n<pre>${escapeHtml(text.substring(0, 500))}</pre>`;
       const hash = hashCallback(msg.toolCallId);
-      const keyboard = new InlineKeyboard();
-      keyboard.text('📄 View Full', `dif:${msg.toolCallId.substring(0, 8)}:${hash}`);
+      const keyboard = tgKeyboard().text('📄 View Full', `dif:${msg.toolCallId.substring(0, 8)}:${hash}`).build();
       return { html, keyboard };
     }
     return { html: `${icon} <b>${escapeHtml(msg.action || '')}</b> ${escapeHtml(firstLine)}${toolDiffStatsSuffix(msg)}` };
@@ -241,15 +240,16 @@ function formatPlan(
 
   if (msg.model) lines.push(`\nModel: ${escapeHtml(msg.model)}`);
 
-  let keyboard: InlineKeyboard | undefined;
+  let keyboard: TgKeyboard | undefined;
   if (msg.actions && msg.actions.length > 0) {
-    keyboard = new InlineKeyboard();
+    const kb = tgKeyboard();
     for (const action of msg.actions) {
       const hash = hashCallback(action.selectorPath);
       const label = action.type === 'build' ? '▶ Build' : '📄 View Plan';
       const data = `${action.type === 'build' ? 'bld' : 'vpl'}:${msg.id.substring(0, 8)}:${hash}`;
-      keyboard.text(label, data);
+      kb.text(label, data);
     }
+    keyboard = kb.build();
   }
 
   return { html: lines.join('\n'), keyboard };
@@ -277,17 +277,18 @@ function formatRunCommand(
   lines.push(header);
   lines.push(`<pre><code class="language-bash">$ ${escapeHtml(msg.command)}</code></pre>`);
 
-  let keyboard: InlineKeyboard | undefined;
+  let keyboard: TgKeyboard | undefined;
   if (msg.actions.length > 0) {
-    keyboard = new InlineKeyboard();
+    const kb = tgKeyboard();
     for (const action of msg.actions) {
       const hash = hashCallback(action.selectorPath);
       const prefix = action.type === 'run' ? 'run' : action.type === 'skip' ? 'skp' : 'alw';
       const label = action.type === 'run' ? '▶ Run'
         : action.type === 'skip' ? '⏭ Skip'
         : `🔓 ${action.label}`;
-      keyboard.text(label, `${prefix}:${msg.id.substring(0, 8)}:${hash}`);
+      kb.text(label, `${prefix}:${msg.id.substring(0, 8)}:${hash}`);
     }
+    keyboard = kb.build();
   }
 
   return { html: lines.join('\n'), keyboard };
@@ -429,7 +430,7 @@ export function formatApprovals(
   const approval = approvals[0];
   const html = `⚠️ <b>Approval needed:</b> ${escapeHtml(approval.description)}`;
 
-  const keyboard = new InlineKeyboard();
+  const kb = tgKeyboard();
   for (const action of approval.actions) {
     const hash = hashCallback(action.selectorPath);
     const prefix = action.type === 'approve' ? 'apr'
@@ -438,10 +439,10 @@ export function formatApprovals(
     const label = action.type === 'approve' ? `✅ ${action.label}`
       : action.type === 'reject' ? `❌ ${action.label}`
       : `✅ ${action.label}`;
-    keyboard.text(label, `${prefix}:${approval.id.substring(0, 8)}:${hash}`);
+    kb.text(label, `${prefix}:${approval.id.substring(0, 8)}:${hash}`);
   }
 
-  return { html, keyboard };
+  return { html, keyboard: kb.build() };
 }
 
 export function formatQuestionnaire(
@@ -457,20 +458,20 @@ export function formatQuestionnaire(
   lines.push('');
   lines.push(`<b>${escapeHtml(activeQ.number)}</b> ${escapeHtml(activeQ.text)}`);
 
-  const keyboard = new InlineKeyboard();
+  const kb = tgKeyboard();
   for (const opt of activeQ.options) {
     const hash = hashCallback(opt.selectorPath);
-    keyboard.text(`${opt.letter}) ${opt.label}`, `qan:${hash}`);
+    kb.text(`${opt.letter}) ${opt.label}`, `qan:${hash}`);
   }
-  keyboard.row();
+  kb.row();
   if (questionnaire.skipSelectorPath) {
-    keyboard.text('⏭ Skip', `qsk:${hashCallback(questionnaire.skipSelectorPath)}`);
+    kb.text('⏭ Skip', `qsk:${hashCallback(questionnaire.skipSelectorPath)}`);
   }
   if (questionnaire.continueSelectorPath && !questionnaire.continueDisabled) {
-    keyboard.text('▶ Continue', `qco:${hashCallback(questionnaire.continueSelectorPath)}`);
+    kb.text('▶ Continue', `qco:${hashCallback(questionnaire.continueSelectorPath)}`);
   }
 
-  return { html: lines.join('\n'), keyboard };
+  return { html: lines.join('\n'), keyboard: kb.build() };
 }
 
 export function splitMessage(html: string, limit: number = TG_MSG_LIMIT): string[] {

@@ -11,6 +11,7 @@ const EXCLUDE = [
   'temp/',
   'temp2',
   '.cursor/',
+  '.claude/',
   'marketing/',
   '.git/',
   'node_modules/',

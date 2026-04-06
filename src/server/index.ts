@@ -9,6 +9,7 @@ import { WindowMonitor } from './window-monitor.js';
 import { Relay } from './relay.js';
 import type { Transport } from './transports/types.js';
 import { TelegramTransport } from './transports/telegram/index.js';
+import { RawTelegramTransport } from './transports/telegram-raw/index.js';
 
 const logStream = createWriteStream('./temp/server.log', { flags: 'a' });
 const origLog = console.log;
@@ -125,7 +126,11 @@ async function main(): Promise<void> {
   await cdpBridge.connect();
 
   if (config.telegram.enabled && config.telegram.botToken) {
-    const telegram = new TelegramTransport(
+    const TgTransport = config.telegram.impl === 'raw' ? RawTelegramTransport : TelegramTransport;
+    if (config.telegram.impl === 'raw') {
+      console.log('[telegram] Using raw Bot API transport (no Grammy)');
+    }
+    const telegram = new TgTransport(
       config.telegram,
       windowMonitor,
       stateManager,

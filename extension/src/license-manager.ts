@@ -66,6 +66,11 @@ export class LicenseManager {
     }
   }
 
+  async clearKey(): Promise<void> {
+    await this.context.secrets.delete(SECRET_KEY);
+    vscode.window.showInformationMessage('License key cleared.');
+  }
+
   async openBuyLink(): Promise<void> {
     await vscode.env.openExternal(vscode.Uri.parse(STORE_URL));
   }

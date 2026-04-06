@@ -495,6 +495,22 @@ export class Relay {
         socket.emit('command:result', result);
       });
 
+      socket.on('command:get_model_options', async (payload: CommandPayload) => {
+        if (!payload.commandId) {
+          socket.emit('command:result', {
+            commandId: payload.commandId ?? 'unknown',
+            ok: false,
+            error: 'Missing commandId',
+          } satisfies CommandResult);
+          return;
+        }
+        console.log(`[relay] Command: get_model_options from ${socket.id}`);
+        const result = await this.commandExecutor.getModelOptions(
+          payload.commandId
+        );
+        socket.emit('command:result', result);
+      });
+
       socket.on('command:get_plan_full', async (payload: CommandPayload) => {
         if (!payload.commandId || !payload.planLabel) {
           socket.emit('command:result', {

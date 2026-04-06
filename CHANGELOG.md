@@ -6,6 +6,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.43] - 2026-04-06
+
+### Added
+- "Clear License Key" command (`CursorRemote: Clear License Key` in Command Palette) to delete the stored license from OS secret storage, useful for testing the activation flow.
+- Telegram command logging: incoming bot commands (e.g. `/status`, `/sync`) now appear in the server log with the sender's username.
+- **Raw Telegram transport** (`TELEGRAM_IMPL=raw`): an alternative Telegram bot implementation that talks directly to the Bot API via `fetch` with explicit 30s HTTP timeouts, bypassing Grammy entirely. Use this if Grammy hangs during startup (commonly on macOS with flaky Telegram connectivity). Grammy remains the default; set `TELEGRAM_IMPL=raw` in `.env` or the VS Code extension settings to switch. Both implementations share the same command handlers, formatter, topic manager, and message tracking logic.
+- `docs/telegram-troubleshooting.md` — guide for Telegram startup hangs, connectivity, 409 conflicts, and switching to the raw transport.
+
+### Changed
+- Model selector in the web client and Telegram `/model` command now reads available models directly from Cursor's model picker menu instead of using a hardcoded list. The sheet shows a loading state while fetching, caches results for instant re-opens, and gracefully handles fetch failures.
+- CDP target discovery log now shows only page targets with a compact summary for the rest (e.g. `Found 5 page(s) (+21 iframe, 4 webview, 9 worker)`) instead of dumping every iframe/webview/worker.
+- Telegram bot startup is more resilient and verbose: Grammy's fetch calls now have a 30s HTTP timeout (previously no timeout — could hang forever on stale TCP connections), `autoRetry` max delay reduced from 60s to 10s, `bot.init()` and long-poll startup phases are logged separately, and a 30s watchdog warns if the polling loop doesn't connect.
+- `deleteWebhook` now passes `drop_pending_updates=true` and `bot.start()` uses `drop_pending_updates` to avoid choking on stale updates from a previous session.
+- `setMyCommands` moved to after `bot.init()` to avoid burning Telegram rate-limit budget before the bot is initialized.
+
 ## [0.1.42] - 2026-03-27
 
 ### Added

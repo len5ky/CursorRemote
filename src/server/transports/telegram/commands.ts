@@ -1,5 +1,3 @@
-import { InlineKeyboard } from 'grammy';
-import type { Bot, Context } from 'grammy';
 import type { StateManager } from '../../state-manager.js';
 import type { CommandExecutor } from '../../command-executor.js';
 import type { CDPBridge } from '../../cdp-bridge.js';
@@ -9,9 +7,10 @@ import type { WindowMonitor } from '../../window-monitor.js';
 import { escapeHtml, formatElement, formatPlanFull, mergeFormattedBlocks, splitMessage } from './formatter.js';
 import type { PlanBlock } from '../../types.js';
 import { cleanTabTitle } from '../../dom-extractor.js';
+import { tgKeyboard, type BotContext, type TelegramApiClient } from './tg-types.js';
 
 export interface CommandDeps {
-  bot: Bot;
+  api: TelegramApiClient;
   stateManager: StateManager;
   commandExecutor: CommandExecutor;
   cdpBridge: CDPBridge;
@@ -52,9 +51,8 @@ const DEFAULT_HISTORY_COUNT = 5;
 
 // --- /register ---
 
-export async function handleRegister(ctx: Context, deps: RegisterDeps): Promise<void> {
-  const text = ctx.match;
-  const token = typeof text === 'string' ? text.trim() : '';
+export async function handleRegister(ctx: BotContext, deps: RegisterDeps): Promise<void> {
+  const token = (ctx.match ?? '').trim();
 
   if (!token) {
     await ctx.reply('Usage: /register <token>\n\nGet the token from the server console log.');
@@ -79,7 +77,7 @@ export async function handleRegister(ctx: Context, deps: RegisterDeps): Promise<
 
 // --- /sync ---
 
-export async function handleSync(ctx: Context, deps: CommandDeps): Promise<void> {
+export async function handleSync(ctx: BotContext, deps: CommandDeps): Promise<void> {
   const chatId = ctx.chat?.id;
   if (!chatId) return;
 
@@ -93,7 +91,7 @@ export async function handleSync(ctx: Context, deps: CommandDeps): Promise<void>
     return;
   }
 
-  const isForum = (ctx.chat as unknown as Record<string, unknown>)?.is_forum === true;
+  const isForum = ctx.chat?.is_forum === true;
   if (!isForum) {
     await ctx.reply(
       '⚠️ Forum topics are not enabled.\n\n' +
@@ -105,8 +103,8 @@ export async function handleSync(ctx: Context, deps: CommandDeps): Promise<void>
   }
 
   try {
-    const me = await deps.bot.api.getMe();
-    const member = await deps.bot.api.getChatMember(chatId, me.id);
+    const me = await deps.api.getMe();
+    const member = await deps.api.getChatMember(chatId, me.id);
     if (member.status !== 'administrator' && member.status !== 'creator') {
       await ctx.reply(
         '⚠️ Bot is not an admin.\n\n' +
@@ -119,11 +117,10 @@ export async function handleSync(ctx: Context, deps: CommandDeps): Promise<void>
       return;
     }
     if (member.status === 'administrator') {
-      const rights = member as unknown as Record<string, boolean>;
       const missing: string[] = [];
-      if (!rights.can_manage_topics) missing.push('Manage Topics');
-      if (!rights.can_delete_messages) missing.push('Delete Messages');
-      if (!rights.can_pin_messages) missing.push('Pin Messages');
+      if (!member.can_manage_topics) missing.push('Manage Topics');
+      if (!member.can_delete_messages) missing.push('Delete Messages');
+      if (!member.can_pin_messages) missing.push('Pin Messages');
       if (missing.length > 0) {
         await ctx.reply(
           `⚠️ Bot is missing permissions: ${missing.join(', ')}\n\n` +
@@ -188,14 +185,14 @@ export async function handleSync(ctx: Context, deps: CommandDeps): Promise<void>
 
   await ctx.reply(`✅ Sync enabled. Creating ${toCreate.length} topic(s) in background. Bot stays responsive.`);
 
-  doSyncInBackground(deps.bot, chatId, toCreate, deps.topicManager).catch(err => {
+  doSyncInBackground(deps.api, chatId, toCreate, deps.topicManager).catch(err => {
     console.error('[telegram] Sync background error:', err);
   });
 }
 
 // --- /sync_all ---
 
-export async function handleSyncAll(ctx: Context, deps: CommandDeps): Promise<void> {
+export async function handleSyncAll(ctx: BotContext, deps: CommandDeps): Promise<void> {
   const chatId = deps.chatId ?? ctx.chat?.id;
   if (!chatId) return;
 
@@ -233,7 +230,7 @@ export async function handleSyncAll(ctx: Context, deps: CommandDeps): Promise<vo
 
   await ctx.reply(`Creating topics for ${toCreate.length} tab(s) in background...`);
 
-  doSyncInBackground(deps.bot, chatId, toCreate, deps.topicManager).catch(err => {
+  doSyncInBackground(deps.api, chatId, toCreate, deps.topicManager).catch(err => {
     console.error('[telegram] Sync_all background error:', err);
   });
 }
@@ -241,7 +238,7 @@ export async function handleSyncAll(ctx: Context, deps: CommandDeps): Promise<vo
 type SnapshotEntry = { snapshot: { windowId: string; windowTitle: string; messages: import('../../types.js').ChatElement[]; chatTabs?: import('../../types.js').ChatTab[] }; tabTitle: string };
 
 async function doSyncInBackground(
-  bot: Bot,
+  api: TelegramApiClient,
   chatId: number,
   toCreate: SnapshotEntry[],
   topicManager: TopicManager
@@ -254,7 +251,7 @@ async function doSyncInBackground(
     const topicName = `${snapshot.windowTitle} — ${cleanedTab}`.substring(0, 128);
     try {
       await sleep(500);
-      const result = await bot.api.createForumTopic(chatId, topicName);
+      const result = await api.createForumTopic(chatId, topicName);
       const threadId = result.message_thread_id;
       topicManager.registerMapping({
         threadId,
@@ -265,7 +262,6 @@ async function doSyncInBackground(
       });
       created++;
 
-      // Only send messages if this is the active tab (messages belong to it)
       const activeTab = snapshot.chatTabs?.find((t: { isActive: boolean }) => t.isActive);
       if (activeTab && cleanTabTitle(activeTab.title) === cleanedTab && snapshot.messages.length > 0) {
         const last5 = snapshot.messages.slice(-5);
@@ -274,13 +270,13 @@ async function doSyncInBackground(
           const fmt = formatElement(el, noopHash);
           if (!fmt.html) continue;
           try {
-            await bot.api.sendMessage(chatId, fmt.html, {
+            await api.sendMessage(chatId, fmt.html, {
               message_thread_id: threadId,
               parse_mode: 'HTML',
             });
           } catch {
             try {
-              await bot.api.sendMessage(chatId, fmt.html.replace(/<[^>]*>/g, ''), {
+              await api.sendMessage(chatId, fmt.html.replace(/<[^>]*>/g, ''), {
                 message_thread_id: threadId,
               });
             } catch { /* skip */ }
@@ -295,13 +291,13 @@ async function doSyncInBackground(
 
   const total = topicManager.getAllMappings().length;
   try {
-    await bot.api.sendMessage(chatId, `✅ Sync complete. ${created} topic(s) created, ${total} total.`);
+    await api.sendMessage(chatId, `✅ Sync complete. ${created} topic(s) created, ${total} total.`);
   } catch { /* ok */ }
 }
 
 // --- /unsync ---
 
-export async function handleUnsync(ctx: Context, deps: CommandDeps): Promise<void> {
+export async function handleUnsync(ctx: BotContext, deps: CommandDeps): Promise<void> {
   const chatId = deps.chatId ?? ctx.chat?.id;
   if (!chatId) return;
 
@@ -319,7 +315,7 @@ export async function handleUnsync(ctx: Context, deps: CommandDeps): Promise<voi
   let deleted = 0;
   for (const mapping of mappings) {
     try {
-      await deps.bot.api.deleteForumTopic(chatId, mapping.threadId);
+      await deps.api.deleteForumTopic(chatId, mapping.threadId);
       deleted++;
       await sleep(TOPIC_CREATE_DELAY_MS);
     } catch { /* already deleted */ }
@@ -333,7 +329,7 @@ export async function handleUnsync(ctx: Context, deps: CommandDeps): Promise<voi
 
 // --- /cleanup ---
 
-export async function handleCleanup(ctx: Context, deps: CommandDeps): Promise<void> {
+export async function handleCleanup(ctx: BotContext, deps: CommandDeps): Promise<void> {
   const chatId = deps.chatId ?? ctx.chat?.id;
   if (!chatId) return;
 
@@ -348,44 +344,44 @@ export async function handleCleanup(ctx: Context, deps: CommandDeps): Promise<vo
 
   await ctx.reply(`🧹 Cleaning untracked topics (keeping ${trackedIds.size} tracked)...`);
 
-  doCleanupInBackground(deps.bot, chatId, trackedIds, scanUpTo).catch(err => {
+  doCleanupInBackground(deps.api, chatId, trackedIds, scanUpTo).catch(err => {
     console.error('[telegram] Cleanup error:', err);
   });
 }
 
-async function doCleanupInBackground(bot: Bot, chatId: number, trackedIds: Set<number>, scanUpTo: number): Promise<void> {
+async function doCleanupInBackground(api: TelegramApiClient, chatId: number, trackedIds: Set<number>, scanUpTo: number): Promise<void> {
   let deleted = 0;
 
   for (let threadId = 2; threadId <= scanUpTo; threadId++) {
     if (trackedIds.has(threadId)) continue;
     try {
-      await bot.api.deleteForumTopic(chatId, threadId);
+      await api.deleteForumTopic(chatId, threadId);
       deleted++;
       await sleep(500);
     } catch { /* doesn't exist */ }
   }
 
   try {
-    await bot.api.sendMessage(chatId, `🧹 Cleanup done: ${deleted} untracked topic(s) deleted.`);
+    await api.sendMessage(chatId, `🧹 Cleanup done: ${deleted} untracked topic(s) deleted.`);
   } catch { /* ok */ }
   console.log(`[telegram] Cleanup: ${deleted} deleted, ${trackedIds.size} kept`);
 }
 
 // --- /purge ---
 
-export async function handlePurge(ctx: Context, deps: CommandDeps): Promise<void> {
+export async function handlePurge(ctx: BotContext, deps: CommandDeps): Promise<void> {
   const chatId = deps.chatId ?? ctx.chat?.id;
   if (!chatId) return;
 
   deps.setSyncEnabled(false);
   await ctx.reply('🗑 Purging all topics in background...');
 
-  doPurgeInBackground(deps.bot, chatId, deps).catch(err => {
+  doPurgeInBackground(deps.api, chatId, deps).catch(err => {
     console.error('[telegram] Purge error:', err);
   });
 }
 
-async function doPurgeInBackground(bot: Bot, chatId: number, deps: CommandDeps): Promise<void> {
+async function doPurgeInBackground(api: TelegramApiClient, chatId: number, deps: CommandDeps): Promise<void> {
   let deleted = 0;
   let consecutiveMisses = 0;
 
@@ -410,7 +406,7 @@ async function doPurgeInBackground(bot: Bot, chatId: number, deps: CommandDeps):
       console.log(`[telegram] Purge progress: ${threadId}/${scanUpTo}, deleted ${deleted}`);
     }
     try {
-      await bot.api.deleteForumTopic(chatId, threadId);
+      await api.deleteForumTopic(chatId, threadId);
       deleted++;
       consecutiveMisses = 0;
       await sleep(500);
@@ -427,14 +423,14 @@ async function doPurgeInBackground(bot: Bot, chatId: number, deps: CommandDeps):
   }
 
   try {
-    await bot.api.sendMessage(chatId, msg);
+    await api.sendMessage(chatId, msg);
   } catch { /* ok */ }
   console.log(`[telegram] Purge done: ${deleted} deleted, scanned to ${scanUpTo}`);
 }
 
 // --- /status ---
 
-export async function handleStatus(ctx: Context, deps: CommandDeps): Promise<void> {
+export async function handleStatus(ctx: BotContext, deps: CommandDeps): Promise<void> {
   const state = deps.stateManager.getCurrentState();
   const activeWin = state.windows.find(w => w.id === state.activeWindowId);
   const activeTab = state.chatTabs.find(t => t.isActive);
@@ -461,10 +457,10 @@ export async function handleStatus(ctx: Context, deps: CommandDeps): Promise<voi
 
 // --- /history ---
 
-export async function handleHistory(ctx: Context, deps: CommandDeps): Promise<void> {
+export async function handleHistory(ctx: BotContext, deps: CommandDeps): Promise<void> {
   const state = deps.stateManager.getCurrentState();
 
-  const countArg = typeof ctx.match === 'string' ? parseInt(ctx.match.trim(), 10) : NaN;
+  const countArg = ctx.match ? parseInt(ctx.match.trim(), 10) : NaN;
   const count = isNaN(countArg) || countArg <= 0 ? DEFAULT_HISTORY_COUNT : countArg;
 
   const threadId = ctx.message?.message_thread_id;
@@ -604,12 +600,11 @@ export async function handleHistory(ctx: Context, deps: CommandDeps): Promise<vo
 
 // --- helpers ---
 
-function getThreadIdFromContext(ctx: Context): number | undefined {
-  return ctx.message?.message_thread_id
-    ?? (ctx.callbackQuery?.message as { message_thread_id?: number } | undefined)?.message_thread_id;
+function getThreadIdFromContext(ctx: BotContext): number | undefined {
+  return ctx.message?.message_thread_id ?? ctx.callbackQuery?.message?.message_thread_id;
 }
 
-async function ensureTopicWindow(ctx: Context, deps: CommandDeps): Promise<boolean> {
+async function ensureTopicWindow(ctx: BotContext, deps: CommandDeps): Promise<boolean> {
   const threadId = getThreadIdFromContext(ctx);
   if (!threadId) return true;
 
@@ -666,19 +661,8 @@ async function ensureTopicWindow(ctx: Context, deps: CommandDeps): Promise<boole
 
 // --- /mode, /model, /plan, /agent ---
 
-/** Model options for inline keyboard (matches web client MODEL_SECTIONS, excluding toggle). */
-const MODEL_OPTIONS: { id: string; label: string }[] = [
-  { id: 'default', label: 'Auto' },
-  { id: 'premium', label: 'Premium' },
-  { id: 'composer-1_5', label: 'Composer 1.5' },
-  { id: 'gpt-5_3-codex', label: 'GPT-5.3 Codex' },
-  { id: 'gpt-5_4-medium', label: 'GPT-5.4' },
-  { id: 'claude-4_6-sonnet-medium-thinking', label: 'Sonnet 4.6' },
-  { id: 'claude-4_6-opus-high-thinking', label: 'Opus 4.6' },
-  { id: 'gemini-3_1-pro', label: 'Gemini 3.1 Pro' },
-];
 
-export async function handleMode(ctx: Context, deps: CommandDeps): Promise<void> {
+export async function handleMode(ctx: BotContext, deps: CommandDeps): Promise<void> {
   if (!await ensureTopicWindow(ctx, deps)) return;
 
   const state = deps.stateManager.getCurrentState();
@@ -686,18 +670,18 @@ export async function handleMode(ctx: Context, deps: CommandDeps): Promise<void>
   const activeTab = state.chatTabs.find(t => t.isActive);
   console.log(`[telegram] /mode for "${activeWin?.title ?? '?'}" / "${activeTab?.title ?? '?'}" → ${state.mode.current}`);
 
-  const keyboard = new InlineKeyboard();
+  const kb = tgKeyboard();
   for (const mode of state.mode.available) {
     const current = mode.id === state.mode.current ? ' ✓' : '';
-    keyboard.text(`${mode.label}${current}`, `mode:${mode.id}`);
+    kb.text(`${mode.label}${current}`, `mode:${mode.id}`);
   }
   await ctx.reply(
     `<b>Current mode:</b> ${escapeHtml(state.mode.current)}`,
-    { parse_mode: 'HTML', reply_markup: keyboard }
+    { parse_mode: 'HTML', reply_markup: kb.build() }
   );
 }
 
-export async function handleModel(ctx: Context, deps: CommandDeps): Promise<void> {
+export async function handleModel(ctx: BotContext, deps: CommandDeps): Promise<void> {
   if (!await ensureTopicWindow(ctx, deps)) return;
 
   const state = deps.stateManager.getCurrentState();
@@ -705,29 +689,42 @@ export async function handleModel(ctx: Context, deps: CommandDeps): Promise<void
   const activeTab = state.chatTabs.find(t => t.isActive);
   console.log(`[telegram] /model for "${activeWin?.title ?? '?'}" / "${activeTab?.title ?? '?'}" → ${state.model.current}`);
 
-  const keyboard = new InlineKeyboard();
+  const result = await deps.commandExecutor.getModelOptions(genId());
+  const raw = result.data as { options?: { id: string; label: string; selected?: boolean }[] } | undefined;
+  const options = result.ok && Array.isArray(raw?.options) ? raw.options : [];
+
+  if (options.length === 0) {
+    await ctx.reply(
+      `<b>Current model:</b> ${escapeHtml(state.model.current)}\n<i>Could not load model list from Cursor.</i>`,
+      { parse_mode: 'HTML' }
+    );
+    return;
+  }
+
+  const kb = tgKeyboard();
   const currentLower = state.model.current.toLowerCase();
   const buttonsPerRow = 2;
-  for (let i = 0; i < MODEL_OPTIONS.length; i++) {
-    const m = MODEL_OPTIONS[i];
-    const isCurrent = currentLower === m.label.toLowerCase() || state.model.currentId === m.id;
+  for (let i = 0; i < options.length; i++) {
+    const m = options[i];
+    const isCurrent = currentLower === m.label.toLowerCase() ||
+      state.model.currentId === m.id || m.selected;
     const suffix = isCurrent ? ' ✓' : '';
-    keyboard.text(`${m.label}${suffix}`, `model:${m.id}`);
-    if ((i + 1) % buttonsPerRow === 0 || i === MODEL_OPTIONS.length - 1) {
-      keyboard.row();
+    kb.text(`${m.label}${suffix}`, `model:${m.id}`);
+    if ((i + 1) % buttonsPerRow === 0 || i === options.length - 1) {
+      kb.row();
     }
   }
   await ctx.reply(
     `<b>Current model:</b> ${escapeHtml(state.model.current)}`,
-    { parse_mode: 'HTML', reply_markup: keyboard }
+    { parse_mode: 'HTML', reply_markup: kb.build() }
   );
 }
 
-export async function handlePlanCommand(ctx: Context, deps: CommandDeps): Promise<void> {
+export async function handlePlanCommand(ctx: BotContext, deps: CommandDeps): Promise<void> {
   if (!await ensureTopicWindow(ctx, deps)) return;
 
   const text = ctx.match;
-  if (!text || (typeof text === 'string' && !text.trim())) {
+  if (!text?.trim()) {
     await ctx.reply('Usage: /plan <your prompt>');
     return;
   }
@@ -746,11 +743,11 @@ export async function handlePlanCommand(ctx: Context, deps: CommandDeps): Promis
   if (!result.ok) await ctx.reply(`⚠️ Failed to send: ${result.error}`);
 }
 
-export async function handleAgentCommand(ctx: Context, deps: CommandDeps): Promise<void> {
+export async function handleAgentCommand(ctx: BotContext, deps: CommandDeps): Promise<void> {
   if (!await ensureTopicWindow(ctx, deps)) return;
 
   const text = ctx.match;
-  if (!text || (typeof text === 'string' && !text.trim())) {
+  if (!text?.trim()) {
     await ctx.reply('Usage: /agent <your prompt>');
     return;
   }
@@ -778,7 +775,7 @@ const ACTION_SELECTORS: Record<string, string> = {
   alw: '.composer-tool-call-status-row .anysphere-secondary-button.composer-run-button',
 };
 
-export async function handleCallbackQuery(ctx: Context, deps: CommandDeps): Promise<void> {
+export async function handleCallbackQuery(ctx: BotContext, deps: CommandDeps): Promise<void> {
   const data = ctx.callbackQuery?.data;
   if (!data) {
     await ctx.answerCallbackQuery({ text: 'Unknown action' });
@@ -810,7 +807,7 @@ export async function handleCallbackQuery(ctx: Context, deps: CommandDeps): Prom
         await ctx.answerCallbackQuery({ text: 'Failed to switch window' });
         return;
       }
-      const label = MODEL_OPTIONS.find(m => m.id === id)?.label ?? id;
+      const label = id.startsWith('label::') ? id.slice(7) : id;
       const result = await deps.commandExecutor.setModel(commandId, id);
       await ctx.answerCallbackQuery({ text: result.ok ? `Model: ${label}` : `Error: ${result.error}` });
       if (result.ok) {
@@ -950,7 +947,7 @@ export async function handleCallbackQuery(ctx: Context, deps: CommandDeps): Prom
 
 // --- Text messages ---
 
-export async function handleTextMessage(ctx: Context, deps: CommandDeps): Promise<void> {
+export async function handleTextMessage(ctx: BotContext, deps: CommandDeps): Promise<void> {
   const threadId = ctx.message?.message_thread_id;
   const text = ctx.message?.text;
   if (!threadId || !text) return;

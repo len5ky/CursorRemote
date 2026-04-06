@@ -27,6 +27,7 @@ export function loadConfig(): ServerConfig {
       enabled: process.env.TELEGRAM_ENABLED === 'true',
       botToken: process.env.TELEGRAM_BOT_TOKEN ?? '',
       preRegisteredUsers,
+      impl: (process.env.TELEGRAM_IMPL === 'raw' ? 'raw' : 'grammy') as 'grammy' | 'raw',
     },
   };
 }

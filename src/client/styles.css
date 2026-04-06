@@ -1836,6 +1836,14 @@ header {
   line-height: 1;
 }
 
+.sheet-loading, .sheet-empty {
+  padding: 24px 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-secondary);
+  opacity: 0.7;
+}
+
 .sheet-divider {
   height: 1px;
   background: var(--border-color);

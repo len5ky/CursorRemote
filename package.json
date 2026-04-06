@@ -1,7 +1,7 @@
 {
   "name": "cursor-remote",
   "displayName": "CursorRemote",
-  "version": "0.1.42",
+  "version": "0.1.43",
   "description": "Remote control your local Cursor AI agent — monitor, approve, and send tasks from your phone or Telegram.",
   "publisher": "cursor-remote",
   "repository": {
@@ -53,6 +53,10 @@
       {
         "command": "cursorRemote.buyLicense",
         "title": "CursorRemote: Buy License"
+      },
+      {
+        "command": "cursorRemote.clearLicenseKey",
+        "title": "CursorRemote: Clear License Key"
       },
       {
         "command": "cursorRemote.openSetup",
@@ -127,6 +131,15 @@
           "type": "string",
           "default": "",
           "markdownDescription": "Comma-separated Telegram user IDs allowed to use the bot. See the [Telegram setup guide](https://github.com/len5ky/CursorRemote#telegram-setup)."
+        },
+        "cursorRemote.telegram.impl": {
+          "type": "string",
+          "default": "grammy",
+          "enum": [
+            "grammy",
+            "raw"
+          ],
+          "markdownDescription": "Telegram transport implementation. Use `grammy` (default) for the Grammy framework, or `raw` for a lightweight fetch-based transport if Grammy hangs on startup."
         }
       }
     },

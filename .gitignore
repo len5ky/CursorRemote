@@ -1,4 +1,5 @@
 node_modules/
+.claude/
 dist/
 *.js.map
 .env

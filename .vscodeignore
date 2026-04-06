@@ -1,5 +1,8 @@
 .vscode/
 .cursor/
+.claude/
+tests/
+fixtures/
 node_modules/
 src/
 extension/src/

@@ -217,14 +217,23 @@ The system uses a transport-agnostic architecture. The State Manager emits event
 
 #### Telegram Transport (`transports/telegram/`)
 
-**Responsibility**: Bridge Cursor state to a Telegram supergroup with forum topics via the grammy bot framework.
+**Responsibility**: Bridge Cursor state to a Telegram supergroup with forum topics.
 
-**Components**:
-- `index.ts` — Transport lifecycle: start/stop bot, subscribe to State Manager events, route state patches to the formatter and message tracker
-- `formatter.ts` — Convert each `ChatElement` type to Telegram HTML. Uses `node-html-parser` DOM tree walking for accurate HTML conversion (handles Shiki code blocks, headings, class-based bold, tables). Handles 4096 char splitting, inline keyboard generation for actions
-- `topic-manager.ts` — Map `windowTitle::tabTitle` to Telegram forum topic `threadId`. Create topics via Bot API `createForumTopic`
+**Two implementations** (selected via `TELEGRAM_IMPL` env var):
+- `grammy` (default) — Uses the Grammy bot framework for polling and API calls. Grammy's `fetch` is wrapped with a 30s HTTP timeout to prevent indefinite hangs.
+- `raw` — Uses Node's native `fetch` directly against the Telegram Bot API. No external bot framework. Explicit 30s HTTP timeouts on all API calls and a separate long-poll loop with backoff. Use this if Grammy startup hangs (observed on some macOS configurations).
+
+**Shared components** (used by both implementations):
+- `base.ts` — `BaseTelegramTransport` abstract class with all business logic: auth persistence, sync state, activity indicators, topic auto-creation, message processing, typing indicators, event handlers. Both Grammy and raw transports extend this.
+- `tg-types.ts` — Grammy-free type definitions: `TelegramApiClient` (outbound API interface), `BotContext` (command handler context), `TgKeyboard` (inline keyboard builder)
+- `formatter.ts` — Convert each `ChatElement` type to Telegram HTML. Uses `node-html-parser` DOM tree walking for accurate HTML conversion (handles Shiki code blocks, headings, class-based bold, tables). Handles 4096 char splitting, inline keyboard generation for actions. No Grammy dependency.
+- `topic-manager.ts` — Map `windowTitle::tabTitle` to Telegram forum topic `threadId`. Create topics via `TelegramApiClient.createForumTopic`
 - `message-tracker.ts` — Track `ChatElement.id` → Telegram `message_id` per topic. Decides whether to send a new message or edit an existing one
-- `commands.ts` — Bot command handlers (`/topics`, `/mode`, `/model`, `/status`, `/plan`, `/agent`)
+- `commands.ts` — Bot command handlers (`/sync`, `/mode`, `/model`, `/status`, `/plan`, `/agent`). Uses `BotContext` interface, no Grammy dependency.
+
+**Grammy-specific** (`transports/telegram/index.ts`): Grammy `Bot` construction, `autoRetry` plugin, long-poll via `bot.start()`, Grammy context → `BotContext` adapter.
+
+**Raw-specific** (`transports/telegram-raw/`): `RawTelegramApiClient` (fetch-based), `getUpdates` long-poll loop with offset tracking and error backoff, raw update → `BotContext` adapter.
 
 **Inbound flow** (Telegram → Cursor):
 1. User sends text in a forum topic → resolve topic to window+tab → switch if needed → `commandExecutor.sendMessage(text)`
@@ -328,11 +337,16 @@ cursor-ide-remote/
 │   │   ├── relay.ts              # Web transport: Express + socket.io
 │   │   └── transports/
 │   │       ├── types.ts          # Transport interface
-│   │       └── telegram/
-│   │           ├── index.ts      # TelegramTransport class
-│   │           ├── formatter.ts  # ChatElement → Telegram HTML
-│   │           ├── commands.ts   # Bot command handlers
-│   │           ├── topic-manager.ts  # Topic ↔ window+tab mapping
+│   │       ├── telegram/
+│   │       │   ├── base.ts       # BaseTelegramTransport (shared logic)
+│   │       │   ├── tg-types.ts   # Grammy-free types (API, context, keyboard)
+│   │       │   ├── index.ts      # Grammy TelegramTransport
+│   │       │   ├── formatter.ts  # ChatElement → Telegram HTML
+│   │       │   ├── commands.ts   # Bot command handlers
+│   │       │   ├── topic-manager.ts  # Topic ↔ window+tab mapping
+│   │       └── telegram-raw/
+│   │           ├── index.ts      # RawTelegramTransport (no Grammy)
+│   │           ├── raw-api.ts    # fetch-based Telegram API client
 │   │           └── message-tracker.ts  # Element → message ID tracking
 │   ├── client/
 │   │   ├── index.html            # SPA shell

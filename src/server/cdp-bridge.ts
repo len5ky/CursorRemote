@@ -210,9 +210,14 @@ export class CDPBridge extends EventEmitter {
 
     const targets: CDPTarget[] = await response.json() as CDPTarget[];
     if (verbose) {
-      console.log(`[cdp-bridge] Found ${targets.length} target(s):`);
-      for (const t of targets) {
-        console.log(`  [${t.type}] "${t.title}" — ${t.url}`);
+      const pages = targets.filter(t => t.type === 'page');
+      const rest = targets.filter(t => t.type !== 'page');
+      const summary = Object.entries(
+        rest.reduce<Record<string, number>>((acc, t) => { acc[t.type] = (acc[t.type] ?? 0) + 1; return acc; }, {})
+      ).map(([type, count]) => `${count} ${type}`).join(', ');
+      console.log(`[cdp-bridge] Found ${pages.length} page(s)${summary ? ` (+${summary})` : ''}:`);
+      for (const t of pages) {
+        console.log(`  [page] "${t.title}" — ${t.url}`);
       }
     }
     return targets;

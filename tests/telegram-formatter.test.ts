@@ -375,7 +375,7 @@ describe('formatQuestionnaire', () => {
   it('includes Skip and Continue buttons when not disabled', () => {
     const { keyboard } = formatQuestionnaire(sampleQuestionnaire, dummyHash);
     assert.ok(keyboard, 'Should have keyboard');
-    // Keyboard is an InlineKeyboard instance — verify it serialized
+    // Keyboard is a TgKeyboard plain object — verify it serialized
     const json = JSON.stringify(keyboard);
     assert.match(json, /Skip/);
     assert.match(json, /Continue/);

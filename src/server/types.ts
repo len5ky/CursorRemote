@@ -348,4 +348,5 @@ export interface TelegramConfig {
   enabled: boolean;
   botToken: string;
   preRegisteredUsers: number[];
+  impl: 'grammy' | 'raw';
 }

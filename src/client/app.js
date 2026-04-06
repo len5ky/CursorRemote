@@ -1739,7 +1739,19 @@
       renderModeSheet();
     } else if (type === 'model') {
       $sheetModel.classList.remove('hidden');
-      renderModelSheet();
+      if (cachedModelOptions) {
+        renderModelSheet(cachedModelOptions);
+      } else {
+        renderModelSheetLoading();
+      }
+      fetchModelOptions().then(options => {
+        if (activeSheet !== 'model') return;
+        if (options) {
+          renderModelSheet(options);
+        } else if (!cachedModelOptions) {
+          renderModelSheet(null);
+        }
+      });
     } else if (type === 'plan-model') {
       $sheetPlanModel.classList.remove('hidden');
       renderPlanModelSheet();
@@ -1780,87 +1792,62 @@
     });
   }
 
-  const MODEL_SECTIONS = [
-    {
-      items: [
-        { id: 'max-models', label: 'MAX Mode', toggle: true },
-      ],
-    },
-    { divider: true },
-    {
-      items: [
-        { id: 'default', label: 'Auto', tag: 'Efficiency' },
-        { id: 'premium', label: 'Premium', tag: 'Intelligence' },
-      ],
-    },
-    { divider: true },
-    {
-      items: [
-        { id: 'composer-1_5', label: 'Composer 1.5', thinking: true },
-        { id: 'gpt-5_3-codex', label: 'GPT-5.3 Codex', thinking: true },
-        { id: 'gpt-5_4-medium', label: 'GPT-5.4', thinking: true },
-        { id: 'claude-4_6-sonnet-medium-thinking', label: 'Sonnet 4.6', thinking: true },
-        { id: 'claude-4_6-opus-high-thinking', label: 'Opus 4.6', thinking: true },
-        { id: 'gemini-3_1-pro', label: 'Gemini 3.1 Pro', thinking: true },
-      ],
-    },
-  ];
+  let cachedModelOptions = null;
 
-  let maxModeOn = false;
+  async function fetchModelOptions() {
+    const commandId = newCommandId();
+    const result = await sendCommandAwaitResult('command:get_model_options', {
+      commandId,
+      type: 'get_model_options',
+    });
+    if (result.ok && Array.isArray(result.data?.options)) {
+      cachedModelOptions = result.data.options;
+      return result.data.options;
+    }
+    return null;
+  }
 
-  function renderModelSheet() {
+  function renderModelSheet(options) {
     $sheetModelList.innerHTML = '';
+
+    if (!options || options.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'sheet-empty';
+      empty.textContent = 'No models available';
+      $sheetModelList.appendChild(empty);
+      return;
+    }
+
+    const currentId = ((state.model || {}).currentId || '');
     const currentName = ((state.model || {}).current || '').toLowerCase();
 
-    MODEL_SECTIONS.forEach(section => {
-      if (section.divider) {
-        const div = document.createElement('div');
-        div.className = 'sheet-divider';
-        $sheetModelList.appendChild(div);
-        return;
-      }
-      (section.items || []).forEach(m => {
-        if (m.toggle) {
-          const row = document.createElement('div');
-          row.className = 'sheet-toggle';
-          const label = document.createElement('span');
-          label.textContent = m.label;
-          row.appendChild(label);
-          const sw = document.createElement('button');
-          sw.className = 'toggle-switch' + (maxModeOn ? ' on' : '');
-          sw.innerHTML = '<span class="toggle-knob"></span>';
-          sw.addEventListener('click', () => {
-            maxModeOn = !maxModeOn;
-            socket.emit('command:set_model', { commandId: newCommandId(), modelId: m.id });
-            renderModelSheet();
-          });
-          row.appendChild(sw);
-          $sheetModelList.appendChild(row);
-          return;
-        }
+    options.forEach(opt => {
+      const isSelected = (currentId && opt.id === currentId) || opt.selected ||
+        currentName === opt.label.toLowerCase();
+      const btn = document.createElement('button');
+      btn.className = 'sheet-item' + (isSelected ? ' selected' : '');
 
-        const isSelected = currentName === m.label.toLowerCase();
-        const btn = document.createElement('button');
-        btn.className = 'sheet-item' + (isSelected ? ' selected' : '');
+      let inner = '<span class="sheet-item-label">' + escapeHtml(opt.label) + '</span>';
+      const right = [];
+      if (isSelected) right.push('<span class="sheet-item-check">\u2713</span>');
+      inner += '<span class="sheet-item-right">' + right.join('') + '</span>';
 
-        let inner = '<span class="sheet-item-label">' + escapeHtml(m.label);
-        if (m.tag) inner += '<span class="sheet-item-tag">' + escapeHtml(m.tag) + '</span>';
-        inner += '</span>';
-
-        const right = [];
-        if (m.thinking) right.push('<span class="sheet-item-badge" title="Thinking">\uD83E\uDDE0</span>');
-        if (isSelected) right.push('<span class="sheet-item-check">\u2713</span>');
-        inner += '<span class="sheet-item-right">' + right.join('') + '</span>';
-
-        btn.innerHTML = inner;
-        btn.addEventListener('click', () => {
-          socket.emit('command:set_model', { commandId: newCommandId(), modelId: m.id });
-          closeSheet();
-          showToast(`Model: ${m.label}`, 'success');
-        });
-        $sheetModelList.appendChild(btn);
+      btn.innerHTML = inner;
+      btn.addEventListener('click', () => {
+        socket.emit('command:set_model', { commandId: newCommandId(), modelId: opt.id });
+        closeSheet();
+        showToast(`Model: ${opt.label}`, 'success');
       });
+      $sheetModelList.appendChild(btn);
     });
+  }
+
+  function renderModelSheetLoading() {
+    $sheetModelList.innerHTML = '';
+    const loading = document.createElement('div');
+    loading.className = 'sheet-loading';
+    loading.textContent = 'Loading models…';
+    $sheetModelList.appendChild(loading);
   }
 
   function renderPlanModelSheet() {

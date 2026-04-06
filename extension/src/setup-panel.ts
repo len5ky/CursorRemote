@@ -107,6 +107,17 @@ export class SetupPanel {
         }
         break;
       }
+      case 'setTelegramImpl': {
+        const impl = msg.impl as string;
+        if (impl === 'grammy' || impl === 'raw') {
+          await config.update('telegram.impl', impl, vscode.ConfigurationTarget.Global);
+          vscode.window.showInformationMessage(
+            `Telegram transport set to "${impl}". Restart the server for changes to take effect.`
+          );
+          this.updateWebview();
+        }
+        break;
+      }
       case 'openExternal': {
         const url = msg.url as string;
         vscode.env.openExternal(vscode.Uri.parse(url));
@@ -132,6 +143,7 @@ export class SetupPanel {
       webappPassword: config.get<string>('webappPassword', ''),
       telegramEnabled: config.get<boolean>('telegram.enabled', false),
       telegramBotToken: config.get<string>('telegram.botToken', ''),
+      telegramImpl: config.get<string>('telegram.impl', 'grammy'),
       telegramRegisterToken: telegramAuth?.token ?? '',
       telegramRegisteredUsers: telegramAuth?.registeredUsers ?? [],
     };
@@ -154,6 +166,7 @@ interface PanelState {
   webappPassword: string;
   telegramEnabled: boolean;
   telegramBotToken: string;
+  telegramImpl: string;
   telegramRegisterToken: string;
   telegramRegisteredUsers: { id: number; username?: string; firstName?: string; registeredAt?: string }[];
 }
@@ -485,6 +498,38 @@ function getWebviewContent(state: PanelState): string {
       <p>After registration succeeds, send <code>/sync</code> in the group to create Cursor window topics. You're all set!</p>
     </div>
 
+    <div class="card" style="margin-top: 20px;">
+      <h3>Transport Engine</h3>
+      <p>Choose which HTTP client talks to the Telegram Bot API.</p>
+
+      <div class="radio-group">
+        <label class="radio-option ${state.telegramImpl === 'grammy' ? 'selected' : ''}">
+          <input type="radio" name="tgImpl" value="grammy" ${state.telegramImpl === 'grammy' ? 'checked' : ''} />
+          <div class="radio-label">
+            <strong>Grammy (default)</strong>
+            <span>Full-featured bot framework with auto-retry and rate-limit handling. Works for most users.</span>
+          </div>
+        </label>
+        <label class="radio-option ${state.telegramImpl === 'raw' ? 'selected' : ''}">
+          <input type="radio" name="tgImpl" value="raw" ${state.telegramImpl === 'raw' ? 'checked' : ''} />
+          <div class="radio-label">
+            <strong>Raw (lightweight fallback)</strong>
+            <span>Uses Node.js native <code>fetch</code> directly. Try this if the bot hangs on startup with the error <code>"bot.init() failed: timed out"</code>.</span>
+          </div>
+        </label>
+      </div>
+
+      <div class="actions">
+        <button id="saveTgImpl">Save &amp; Restart</button>
+      </div>
+
+      <p class="info-text mt">
+        <strong>Troubleshooting:</strong> If your bot never reaches "Bot connected" in the logs, switch to <strong>Raw</strong>.
+        This bypasses Grammy's HTTP layer which can hang on some systems (observed on macOS).
+        See the <a href="#" onclick="sendMsg({type:'openExternal',url:'https://github.com/len5ky/CursorRemote/blob/main/docs/telegram-troubleshooting.md'})">full troubleshooting guide</a> for more details.
+      </p>
+    </div>
+
   </div>
 
   <div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border);">
@@ -550,6 +595,25 @@ function getWebviewContent(state: PanelState): string {
     document.getElementById('saveToken')?.addEventListener('click', () => {
       const token = document.getElementById('botTokenInput')?.value;
       if (token) sendMsg({ type: 'saveTelegramToken', token });
+    });
+
+    // Transport engine radio selection
+    document.querySelectorAll('input[name="tgImpl"]').forEach(radio => {
+      radio.addEventListener('change', () => {
+        document.querySelectorAll('input[name="tgImpl"]').forEach(r => {
+          r.closest('.radio-option').classList.remove('selected');
+        });
+        radio.closest('.radio-option').classList.add('selected');
+      });
+    });
+
+    // Save transport engine
+    document.getElementById('saveTgImpl')?.addEventListener('click', () => {
+      const impl = document.querySelector('input[name="tgImpl"]:checked')?.value;
+      if (impl) {
+        sendMsg({ type: 'setTelegramImpl', impl });
+        setTimeout(() => sendMsg({ type: 'restartServer' }), 500);
+      }
     });
 
     // Copy settings filter

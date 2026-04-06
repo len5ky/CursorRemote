@@ -17,6 +17,7 @@ export function buildEnvFromConfig(
     TELEGRAM_ENABLED: String(config.get<boolean>('telegram.enabled', false)),
     TELEGRAM_BOT_TOKEN: config.get<string>('telegram.botToken', ''),
     TELEGRAM_ALLOWED_USERS: config.get<string>('telegram.allowedUsers', ''),
+    TELEGRAM_IMPL: config.get<string>('telegram.impl', 'grammy'),
     LICENSE_KEY: licenseKey ?? '',
     DATA_DIR: context.globalStorageUri.fsPath,
     LOG_FORMAT: 'json',
