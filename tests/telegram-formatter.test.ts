@@ -360,11 +360,16 @@ describe('formatQuestionnaire', () => {
     continueDisabled: false,
   };
 
-  it('formats questionnaire with question text', () => {
+  it('formats questionnaire with question text and option labels in body', () => {
     const { html } = formatQuestionnaire(sampleQuestionnaire, dummyHash);
     assert.match(html, /Questions/);
     assert.match(html, /1 of 2/);
     assert.match(html, /favorite season/);
+    // Options should appear as text in the message body
+    assert.match(html, /A\)/);
+    assert.match(html, /Spring/);
+    assert.match(html, /B\)/);
+    assert.match(html, /Summer/);
   });
 
   it('produces inline keyboard with option buttons', () => {

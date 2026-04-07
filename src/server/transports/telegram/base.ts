@@ -756,6 +756,12 @@ export abstract class BaseTelegramTransport implements Transport {
         await this.sendNewMessage(threadId, element, formatted, contentHash);
       }
     }
+
+    // Process questionnaire using this thread's threadId (guaranteed to exist here).
+    // This ensures the questionnaire is sent even when a new topic was just created
+    // for messages (plan widget) in this same cycle.
+    const currentQuestionnaire = this.stateManager.getCurrentState().questionnaire;
+    await this.processQuestionnaireForThread(threadId, currentQuestionnaire);
   }
 
   private async sendNewMessage(
@@ -863,8 +869,11 @@ export abstract class BaseTelegramTransport implements Transport {
     const formatted = formatApprovals(approvals, hashCallback);
     if (!formatted.html) return;
 
-    const approvalTrackId = `approval-${approvals[0].id}`;
+    const approvalTrackId = 'approval';
+    const contentHash = MessageTracker.contentHash(formatted.html + JSON.stringify(formatted.keyboard));
     const tracked = this.messageTracker.getTracked(threadId, approvalTrackId);
+
+    if (tracked && !this.messageTracker.hasChanged(threadId, approvalTrackId, contentHash)) return;
 
     try {
       if (tracked && tracked.telegramMsgIds[0]) {
@@ -874,6 +883,10 @@ export abstract class BaseTelegramTransport implements Transport {
             reply_markup: formatted.keyboard,
           }),
           'edit'
+        );
+        this.messageTracker.track(
+          threadId, approvalTrackId, tracked.telegramMsgIds,
+          contentHash, 'approval'
         );
       } else {
         const sent = await this.sendQueue.enqueue(
@@ -886,12 +899,12 @@ export abstract class BaseTelegramTransport implements Transport {
         );
         this.messageTracker.track(
           threadId, approvalTrackId, [sent.message_id],
-          MessageTracker.contentHash(formatted.html), 'approval'
+          contentHash, 'approval'
         );
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (!msg.includes('not found')) {
+      if (!msg.includes('not found') && !msg.includes('not modified')) {
         console.warn('[telegram] Approval error:', msg);
       }
     }
@@ -905,6 +918,12 @@ export abstract class BaseTelegramTransport implements Transport {
       state.windows, state.activeWindowId, state.chatTabs
     );
     if (!threadId) return;
+
+    await this.processQuestionnaireForThread(threadId, questionnaire);
+  }
+
+  private async processQuestionnaireForThread(threadId: number, questionnaire: import('../../types.js').Questionnaire | null): Promise<void> {
+    if (!this.chatId) return;
 
     const trackId = 'questionnaire';
 
@@ -926,7 +945,10 @@ export abstract class BaseTelegramTransport implements Transport {
     const formatted = formatQuestionnaire(questionnaire, hashCallback);
     if (!formatted.html) return;
 
+    const contentHash = MessageTracker.contentHash(formatted.html + JSON.stringify(formatted.keyboard));
     const tracked = this.messageTracker.getTracked(threadId, trackId);
+
+    if (tracked && !this.messageTracker.hasChanged(threadId, trackId, contentHash)) return;
 
     try {
       if (tracked && tracked.telegramMsgIds[0]) {
@@ -936,6 +958,10 @@ export abstract class BaseTelegramTransport implements Transport {
             reply_markup: formatted.keyboard,
           }),
           'edit'
+        );
+        this.messageTracker.track(
+          threadId, trackId, tracked.telegramMsgIds,
+          contentHash, 'questionnaire'
         );
       } else {
         const sent = await this.sendQueue.enqueue(
@@ -948,7 +974,7 @@ export abstract class BaseTelegramTransport implements Transport {
         );
         this.messageTracker.track(
           threadId, trackId, [sent.message_id],
-          MessageTracker.contentHash(formatted.html), 'questionnaire'
+          contentHash, 'questionnaire'
         );
       }
     } catch (err) {

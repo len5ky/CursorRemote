@@ -6,6 +6,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.44] - 2026-04-07
+
+### Fixed
+- **Telegram approval spam**: approval messages no longer flood the chat. Root cause was `Date.now()` in the approval ID causing every poll cycle to generate a "new" approval that bypassed message tracking. Now uses a deterministic ID based on button labels, and adds content-hash dedup so unchanged approvals are never re-sent.
+- Questionnaire options in the web app now display vertically with full text instead of being squeezed into small horizontal pills that cut off long answers.
+- Questionnaire options in Telegram now appear as individual full-width keyboard buttons (one per row) with option text also shown in the message body for readability.
+- Questionnaire now appears in Telegram immediately even when shown alongside a plan widget. Previously the first question was silently dropped because the questionnaire was only processed via `state:patch` (which depends on a thread mapping that may not exist yet), while plan messages were processed via `window:update` (which creates the thread). Now the questionnaire is also processed at the end of `doProcessWindow` using the guaranteed thread ID.
+- Telegram questionnaire now shows ALL questions (not just the active one), with `👉` marking the current question. This prevents questions from being lost if the active index advances between poll cycles.
+
 ## [0.1.43] - 2026-04-06
 
 ### Added

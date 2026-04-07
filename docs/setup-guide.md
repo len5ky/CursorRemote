@@ -46,7 +46,7 @@ The CursorRemote extension provides the easiest setup experience with built-in s
 Download the latest `.vsix` from [releases](https://github.com/len5ky/CursorRemote/releases) and install:
 
 ```bash
-cursor --install-extension cursor-remote-0.1.43.vsix
+cursor --install-extension cursor-remote-0.1.44.vsix
 ```
 
 Or in Cursor: Command Palette (`Ctrl+Shift+P`) > **Extensions: Install from VSIX...** > select the file.

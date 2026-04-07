@@ -1206,8 +1206,9 @@ export function extractionFunction(
       for (const btn of rejectButtons) {
         actions.push({ label: btn.label, type: 'reject', selectorPath: btn.selector });
       }
+      const idParts = approveButtons.map(b => b.label).join(',') + '|' + rejectButtons.map(b => b.label).join(',');
       pendingApprovals.push({
-        id: 'approval-' + Date.now(),
+        id: idParts,
         description: approveButtons[0]?.label || 'Pending approval',
         actions,
       });

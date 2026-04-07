@@ -1341,20 +1341,23 @@ header {
 
 .questionnaire-options {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 6px;
 }
 
 .questionnaire-option {
   display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 10px;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 8px 12px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-color);
   background: var(--bg-input);
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: left;
+  width: 100%;
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
   -webkit-tap-highlight-color: transparent;

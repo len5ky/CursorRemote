@@ -451,19 +451,30 @@ export function formatQuestionnaire(
 ): FormattedMessage {
   if (!questionnaire.questions.length) return { html: '' };
 
+  const activeIdx = questionnaire.activeIndex;
+  const activeQ = questionnaire.questions[activeIdx] || questionnaire.questions[0];
+
   const lines: string[] = [];
   lines.push(`❓ <b>Questions</b> (${escapeHtml(questionnaire.totalLabel)})`);
 
-  const activeQ = questionnaire.questions[questionnaire.activeIndex] || questionnaire.questions[0];
-  lines.push('');
-  lines.push(`<b>${escapeHtml(activeQ.number)}</b> ${escapeHtml(activeQ.text)}`);
+  for (let i = 0; i < questionnaire.questions.length; i++) {
+    const q = questionnaire.questions[i];
+    const isActive = i === activeIdx;
+    lines.push('');
+    const prefix = isActive ? '👉 ' : '';
+    lines.push(`${prefix}<b>${escapeHtml(q.number)}</b> ${escapeHtml(q.text)}`);
+    for (const opt of q.options) {
+      lines.push(`  <b>${escapeHtml(opt.letter)})</b> ${escapeHtml(opt.label)}`);
+    }
+  }
 
+  // Keyboard buttons only for the active question
   const kb = tgKeyboard();
   for (const opt of activeQ.options) {
     const hash = hashCallback(opt.selectorPath);
     kb.text(`${opt.letter}) ${opt.label}`, `qan:${hash}`);
+    kb.row();
   }
-  kb.row();
   if (questionnaire.skipSelectorPath) {
     kb.text('⏭ Skip', `qsk:${hashCallback(questionnaire.skipSelectorPath)}`);
   }
