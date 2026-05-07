@@ -7,7 +7,9 @@ dist/
 data/
 releases/
 temp/server.log
+tmp/
 scripts/generate-keys.ts
 azure_token
 openvsx_token
 # marketing/
+.specstory/

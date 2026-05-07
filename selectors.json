@@ -10,6 +10,8 @@
   },
   "approveButton": {
     "strategies": [
+      "button.ui-shell-tool-call__run-btn",
+      "button.ui-shell-tool-call__allowlist-button",
       "button[aria-label*='Accept']",
       "button[aria-label*='Approve']",
       "button[aria-label*='Run']",
@@ -19,6 +21,7 @@
   },
   "rejectButton": {
     "strategies": [
+      "button.ui-shell-tool-call__skip-btn",
       "button[aria-label*='Reject']",
       "button[aria-label*='Deny']",
       "button[aria-label*='Cancel']"
@@ -48,7 +51,8 @@
   },
   "chatTabList": {
     "strategies": [
-      ".agent-sidebar-cell"
+      ".agent-sidebar-cell",
+      ".glass-sidebar-agent-list-container li.ui-sidebar-menu-item > div.glass-sidebar-agent-menu-btn"
     ]
   },
   "newChatButton": {

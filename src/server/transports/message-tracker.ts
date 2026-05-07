@@ -77,6 +77,16 @@ export class MessageTracker {
     this.scheduleSave();
   }
 
+  listInThread(threadId: number, elementIdPrefix?: string): TrackedMessage[] {
+    const out: TrackedMessage[] = [];
+    for (const msg of this.messages.values()) {
+      if (msg.threadId !== threadId) continue;
+      if (elementIdPrefix && !msg.elementId.startsWith(elementIdPrefix)) continue;
+      out.push(msg);
+    }
+    return out;
+  }
+
   clearAll(): void {
     this.messages.clear();
     this.selectorHashes.clear();

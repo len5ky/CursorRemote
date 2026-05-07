@@ -7,6 +7,7 @@ import type { WindowMonitor } from '../../window-monitor.js';
 import { escapeHtml, formatElement, formatPlanFull, mergeFormattedBlocks, splitMessage } from './formatter.js';
 import type { PlanBlock } from '../../types.js';
 import { cleanTabTitle } from '../../dom-extractor.js';
+import { normalizeWindowTitle } from './topic-manager.js';
 import { tgKeyboard, type BotContext, type TelegramApiClient } from './tg-types.js';
 
 export interface CommandDeps {
@@ -365,6 +366,249 @@ async function doCleanupInBackground(api: TelegramApiClient, chatId: number, tra
     await api.sendMessage(chatId, `🧹 Cleanup done: ${deleted} untracked topic(s) deleted.`);
   } catch { /* ok */ }
   console.log(`[telegram] Cleanup: ${deleted} deleted, ${trackedIds.size} kept`);
+}
+
+// --- /resync ---
+
+export async function handleResync(ctx: BotContext, deps: CommandDeps): Promise<void> {
+  const chatId = deps.chatId ?? ctx.chat?.id;
+  if (!chatId) return;
+
+  const threadId = ctx.message?.message_thread_id;
+  if (!threadId) {
+    await ctx.reply('⚠️ Run /resync inside the topic you want to rebind, not the General chat.');
+    return;
+  }
+
+  const mapping = deps.topicManager.resolveThread(threadId);
+  if (!mapping) {
+    await ctx.reply('⚠️ This topic isn\'t tracked yet. Run /sync first to create the initial mapping.');
+    return;
+  }
+
+  await deps.cdpBridge.refreshWindows();
+  deps.stateManager.updateWindows(deps.cdpBridge.windows, deps.cdpBridge.activeTargetId);
+  const state = deps.stateManager.getCurrentState();
+
+  // Resolve the new (window, tab) target. Two paths:
+  //   - No argument: use the CDP-active window's active tab from global state.
+  //     Works when the user has already focused the right window in Cursor.
+  //   - Argument: match a window by name (case-insensitive substring) and read
+  //     that window's per-window snapshot to find its active tab. Necessary
+  //     when the relay's home is *not* the window the user wants — common
+  //     with Cursor's global agent rail where multiple windows can host the
+  //     same agent and only one of them is the CDP home.
+  const arg = (ctx.match ?? '').trim();
+  let targetWin: typeof state.windows[number] | undefined;
+  let targetTabTitle: string | undefined;
+
+  if (arg) {
+    const argLower = arg.toLowerCase();
+    const candidates = state.windows.filter((w) => w.title.toLowerCase().includes(argLower));
+    if (candidates.length === 0) {
+      await ctx.reply(
+        `⚠️ No Cursor window matches "${arg}".\n\nKnown windows:\n` +
+        state.windows.map((w) => `• ${w.title}`).join('\n')
+      );
+      return;
+    }
+    if (candidates.length > 1) {
+      await ctx.reply(
+        `⚠️ Multiple windows match "${arg}". Use a more specific name:\n` +
+        candidates.map((w) => `• ${w.title}`).join('\n')
+      );
+      return;
+    }
+    targetWin = candidates[0];
+    const snapshot = deps.windowMonitor.getAllSnapshots().get(targetWin.id);
+    if (!snapshot || snapshot.chatTabs.length === 0) {
+      await ctx.reply(
+        `⚠️ Window "${targetWin.title}" has no chat tabs visible yet — window-monitor hasn't extracted them. Wait a poll cycle (~10s) and try again.`
+      );
+      return;
+    }
+    const activeTab = snapshot.chatTabs.find((t) => t.isActive)
+      ?? (snapshot.chatTabs.length === 1 ? snapshot.chatTabs[0] : undefined);
+    if (!activeTab) {
+      await ctx.reply(
+        `⚠️ Window "${targetWin.title}" has ${snapshot.chatTabs.length} chat tab(s) but none marked active in the DOM. ` +
+        `Click a chat in that window's Cursor sidebar, then try again.`
+      );
+      return;
+    }
+    targetTabTitle = activeTab.title;
+  } else {
+    targetWin = state.windows.find((w) => w.id === state.activeWindowId);
+    const activeTab = state.chatTabs.find((t) => t.isActive)
+      ?? (state.chatTabs.length === 1 ? state.chatTabs[0] : undefined);
+    if (!targetWin || !activeTab) {
+      await ctx.reply(
+        `⚠️ Can't determine the active Cursor window/tab.\n\n` +
+        `activeWindow: ${targetWin?.title ?? '(none)'}\n` +
+        `activeTab: ${activeTab?.title ?? '(none)'}\n\n` +
+        `Either focus the Cursor window+chat you want and run /resync again, or pass a window name:\n` +
+        `<code>/resync &lt;part of window name&gt;</code>\n\n` +
+        `Available windows:\n` +
+        state.windows.map((w) => `• ${w.title}`).join('\n'),
+        { parse_mode: 'HTML' }
+      );
+      return;
+    }
+    targetTabTitle = activeTab.title;
+  }
+
+  const activeWin = targetWin;
+  const activeTab = { title: targetTabTitle };
+
+  const cleanedTab = cleanTabTitle(activeTab.title);
+  const oldLabel = `${mapping.windowTitle} — ${mapping.tabTitle}`;
+  const newLabel = `${activeWin.title} — ${cleanedTab}`;
+
+  if (
+    mapping.windowId === activeWin.id &&
+    mapping.windowTitle === activeWin.title &&
+    cleanTabTitle(mapping.tabTitle) === cleanedTab
+  ) {
+    await ctx.reply(`✅ Already bound to: ${escapeHtml(newLabel)}`, { parse_mode: 'HTML' });
+    return;
+  }
+
+  // Refuse if the new (windowId, tab) is already mapped to a different topic —
+  // that would create the duplicate-topic problem we just spent the night fixing.
+  const collision = deps.topicManager.getThreadForSnapshot(activeWin.id, activeWin.title, cleanedTab);
+  if (collision && collision !== threadId) {
+    await ctx.reply(
+      `⚠️ Cursor's active (window, tab) is already bound to topic ${collision}.\n\n` +
+      `Move messages there manually or use /dedupe to consolidate.`
+    );
+    return;
+  }
+
+  const updated = deps.topicManager.updateMappingTarget(threadId, activeWin.id, activeWin.title, cleanedTab);
+  if (!updated) {
+    await ctx.reply('⚠️ Failed to update mapping (threadId disappeared).');
+    return;
+  }
+
+  // Best-effort topic rename. If the bot lacks Manage Topics permission this
+  // throws; the mapping update still stands so future banners route correctly,
+  // the topic name just stays stale until the user fixes permissions.
+  let renamed = true;
+  try {
+    await deps.api.editForumTopic(chatId, threadId, newLabel.substring(0, 128));
+  } catch (err) {
+    renamed = false;
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[telegram] Rename topic ${threadId} failed: ${msg}`);
+  }
+
+  const lines = [
+    `✅ Topic ${threadId} rebound.`,
+    `<b>From:</b> ${escapeHtml(oldLabel)}`,
+    `<b>To:</b> ${escapeHtml(newLabel)}`,
+  ];
+  if (!renamed) {
+    lines.push('');
+    lines.push('<i>Note:</i> couldn\'t rename the Telegram topic — bot is missing the <b>Manage Topics</b> permission. Mapping is updated; future banners will go here.');
+  }
+  await ctx.reply(lines.join('\n'), { parse_mode: 'HTML' });
+}
+
+// --- /dedupe ---
+
+export async function handleDedupe(ctx: BotContext, deps: CommandDeps): Promise<void> {
+  const chatId = deps.chatId ?? ctx.chat?.id;
+  if (!chatId) return;
+
+  const arg = (ctx.match ?? '').trim().toLowerCase();
+  const confirm = arg === 'yes' || arg === 'confirm';
+
+  // Group duplicates two ways:
+  //   1. Same Cursor agent (data-composer-id matches) — strongest signal,
+  //      these are unambiguously the same chat seen via different windows.
+  //   2. Same normalized (windowTitle, tabTitle) — catches WSL/SSH-suffix
+  //      variants of the same project from prior sessions.
+  // composerId-based grouping wins when both apply, because it's the only
+  // reliable cross-window-shape identity Cursor exposes.
+  const mappings = deps.topicManager.getAllMappings();
+  const groups = new Map<string, typeof mappings>();
+  for (const m of mappings) {
+    const key = m.composerId
+      ? `composer::${m.composerId}`
+      : `title::${normalizeWindowTitle(m.windowTitle).toLowerCase()}::${cleanTabTitle(m.tabTitle).toLowerCase()}`;
+    const list = groups.get(key) ?? [];
+    list.push(m);
+    groups.set(key, list);
+  }
+
+  const dupGroups = Array.from(groups.values()).filter((g) => g.length > 1);
+  if (dupGroups.length === 0) {
+    await ctx.reply('✅ No duplicate topics. Each (project, tab) maps to exactly one Telegram topic.');
+    return;
+  }
+
+  // For each duplicate group, the most-recently-active mapping wins; the rest
+  // are orphans we'll delete.
+  const keep: typeof mappings = [];
+  const drop: typeof mappings = [];
+  for (const group of dupGroups) {
+    const sorted = [...group].sort((a, b) => (b.lastActive ?? 0) - (a.lastActive ?? 0));
+    keep.push(sorted[0]);
+    drop.push(...sorted.slice(1));
+  }
+
+  if (!confirm) {
+    const lines: string[] = [];
+    lines.push(`<b>${dupGroups.length} duplicate group(s)</b> — would delete <b>${drop.length}</b> orphan topic(s):`);
+    lines.push('');
+    for (const group of dupGroups.slice(0, 10)) {
+      const sorted = [...group].sort((a, b) => (b.lastActive ?? 0) - (a.lastActive ?? 0));
+      const title = `${normalizeWindowTitle(sorted[0].windowTitle)} — ${sorted[0].tabTitle}`;
+      lines.push(`<b>${escapeHtml(title)}</b>`);
+      for (let i = 0; i < sorted.length; i++) {
+        const m = sorted[i];
+        const marker = i === 0 ? '✅ keep' : '🗑 drop';
+        lines.push(`  ${marker} thread=${m.threadId} window="${escapeHtml(m.windowTitle)}"`);
+      }
+      lines.push('');
+    }
+    if (dupGroups.length > 10) lines.push(`…and ${dupGroups.length - 10} more group(s).`);
+    lines.push('Run <code>/dedupe yes</code> to delete the orphans.');
+    await ctx.reply(lines.join('\n'), { parse_mode: 'HTML' });
+    return;
+  }
+
+  await ctx.reply(`🧹 Deduping: deleting ${drop.length} orphan topic(s) across ${dupGroups.length} group(s)...`);
+
+  doDedupeInBackground(deps, chatId, drop).catch((err) => {
+    console.error('[telegram] Dedupe error:', err);
+  });
+}
+
+async function doDedupeInBackground(
+  deps: CommandDeps,
+  chatId: number,
+  drop: import('./topic-manager.js').TopicMapping[]
+): Promise<void> {
+  let deleted = 0;
+  let failed = 0;
+  for (const m of drop) {
+    try {
+      await deps.api.deleteForumTopic(chatId, m.threadId);
+      deleted++;
+    } catch {
+      failed++;
+    }
+    deps.topicManager.removeMapping(m.threadId);
+    await sleep(TOPIC_CREATE_DELAY_MS);
+  }
+  try {
+    const summary = failed === 0
+      ? `✅ Dedupe done: removed ${deleted} orphan topic(s).`
+      : `✅ Dedupe done: removed ${deleted} orphan topic(s) (${failed} delete call(s) failed — those mappings were still untracked).`;
+    await deps.api.sendMessage(chatId, summary);
+  } catch { /* ok */ }
+  console.log(`[telegram] Dedupe: deleted ${deleted}/${drop.length}, ${failed} delete failures`);
 }
 
 // --- /purge ---

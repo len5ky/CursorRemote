@@ -34,7 +34,11 @@ export class RawTelegramApiClient implements TelegramApiClient {
     if (options?.message_thread_id != null) body.message_thread_id = options.message_thread_id;
     if (options?.parse_mode) body.parse_mode = options.parse_mode;
     if (options?.reply_markup) body.reply_markup = options.reply_markup;
-    return this.call<{ message_id: number }>('sendMessage', body);
+    const result = await this.call<{ message_id: number }>('sendMessage', body);
+    // Trace every send so we can prove which thread(s) a duplicate landed in.
+    const preview = text.replace(/\s+/g, ' ').slice(0, 60);
+    console.log(`[telegram-api] send thread=${options?.message_thread_id ?? 'main'} msgId=${result.message_id} text="${preview}"`);
+    return result;
   }
 
   async editMessageText(chatId: number, messageId: number, text: string, options?: {
@@ -65,6 +69,14 @@ export class RawTelegramApiClient implements TelegramApiClient {
   async createForumTopic(chatId: number, name: string): Promise<{ message_thread_id: number }> {
     return this.call<{ message_thread_id: number }>('createForumTopic', {
       chat_id: chatId,
+      name,
+    });
+  }
+
+  async editForumTopic(chatId: number, threadId: number, name: string): Promise<void> {
+    await this.call('editForumTopic', {
+      chat_id: chatId,
+      message_thread_id: threadId,
       name,
     });
   }

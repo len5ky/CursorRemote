@@ -244,11 +244,26 @@
     $btnSend.disabled = !$input.value.trim();
   });
 
+  // Send-on-Enter behaves differently per primary input device:
+  //   - Touch (mobile): Enter = newline (textarea default), tap Send to send.
+  //     Mobile keyboards have no Shift+Enter so without this you can't write
+  //     multi-line messages — reported as public#5.
+  //   - Mouse/keyboard (desktop): Enter = send (preserved existing behavior),
+  //     Shift+Enter = newline.
+  // Cmd/Ctrl+Enter always sends, both platforms — for hardware keyboards
+  // attached to phones/tablets and as a familiar shortcut on desktop.
+  const isTouchPrimary = () => window.matchMedia('(pointer: coarse)').matches;
   $input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key !== 'Enter') return;
+    if (e.metaKey || e.ctrlKey) {
       e.preventDefault();
       sendMessage();
+      return;
     }
+    if (e.shiftKey) return; // textarea default → newline
+    if (isTouchPrimary()) return; // mobile: newline, send button only
+    e.preventDefault();
+    sendMessage();
   });
 
   $btnSend.addEventListener('click', sendMessage);

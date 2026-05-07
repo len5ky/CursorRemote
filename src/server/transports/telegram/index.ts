@@ -25,6 +25,8 @@ function grammyApiAdapter(bot: Bot): TelegramApiClient {
       bot.api.sendChatAction(chatId, action as 'typing', opts).then(() => {}),
     createForumTopic: (chatId, name) =>
       bot.api.createForumTopic(chatId, name),
+    editForumTopic: (chatId, threadId, name) =>
+      bot.api.editForumTopic(chatId, threadId, { name }).then(() => {}),
     deleteForumTopic: (chatId, threadId) =>
       bot.api.deleteForumTopic(chatId, threadId).then(() => {}),
     setMyCommands: (commands) =>

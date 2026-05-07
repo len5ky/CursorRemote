@@ -9,6 +9,13 @@ export interface TopicMapping {
   windowTitle: string;
   tabTitle: string;
   lastActive: number;
+  /** data-composer-id of the agent this topic belongs to. Lets us tell apart
+   *  two agents that happen to share a tab title across projects, and lets
+   *  the cross-window fallback know when it's looking at the *same* agent
+   *  shown via Cursor's global rail vs a coincidentally-named different one.
+   *  Optional — older mappings persisted before this field was added won't
+   *  have it, and per-(windowId, tabTitle) lookups still work for those. */
+  composerId?: string;
 }
 
 const dataDir = process.env.DATA_DIR ?? './data';
@@ -22,8 +29,27 @@ function makeRuntimeKey(windowId: string, tabTitle: string): string {
   return `${windowId}::${cleanTabTitle(tabTitle).toLowerCase()}`;
 }
 
+/**
+ * Strip Cursor's connection-context suffixes from window titles so the same
+ * project resolves to the same topic across sessions / connection modes.
+ * Cursor adds these when a project is opened over WSL/SSH/Codespaces:
+ *   "myproj"
+ *   "myproj [WSL: ubuntu-24.04]"
+ *   "myproj [SSH: my-host]"
+ *   "myproj [Dev Container: foo]"
+ *   "myproj [Codespaces]"
+ * Without normalization the relay creates a fresh Telegram topic the first
+ * time the user reopens a project in WSL — leaving the old non-WSL topic
+ * orphaned and the new WSL topic empty of history.
+ */
+export function normalizeWindowTitle(title: string): string {
+  return title
+    .replace(/\s+\[(WSL|SSH|Dev Container|Codespaces|Container|Tunnel)[^\]]*\]\s*$/i, '')
+    .trim();
+}
+
 function makeTitleKey(windowTitle: string, tabTitle: string): string {
-  return `${windowTitle.toLowerCase()}::${cleanTabTitle(tabTitle).toLowerCase()}`;
+  return `${normalizeWindowTitle(windowTitle).toLowerCase()}::${cleanTabTitle(tabTitle).toLowerCase()}`;
 }
 
 export class TopicManager {
@@ -57,7 +83,7 @@ export class TopicManager {
   ): number | undefined {
     const cleaned = cleanTabTitle(tabTitle);
     const tabLower = cleaned.toLowerCase();
-    const winLower = windowTitle.toLowerCase();
+    const winLower = normalizeWindowTitle(windowTitle).toLowerCase();
 
     // 1. Primary: exact match by (windowId, tabTitle)
     const runtimeKey = makeRuntimeKey(windowId, cleaned);
@@ -88,20 +114,23 @@ export class TopicManager {
       return byWindowId.threadId;
     }
 
-    if (candidates.length === 1) {
-      const m = candidates[0];
-      // Only reassign windowId if the windowTitle matches — prevents cross-window hijacking
-      // when DOM extraction returns tabs from the wrong project
-      if (m.windowTitle.toLowerCase() === winLower) {
-        m.windowId = windowId;
-        this.byWindowIdTab.set(runtimeKey, m);
-        m.lastActive = Date.now();
-        return m.threadId;
-      }
-      return undefined;
-    }
+    // Filter to candidates whose normalized title actually matches — prevents
+    // cross-window hijacking when DOM extraction returns tabs from a sibling
+    // project that happens to share a tab title.
+    const titleMatches = candidates.filter(
+      (m) => normalizeWindowTitle(m.windowTitle).toLowerCase() === winLower
+    );
+    if (titleMatches.length === 0) return undefined;
 
-    return undefined;
+    // Multiple persisted mappings share the same (normalized title, tab) but
+    // come from prior Cursor sessions with different windowIds. Reuse the most
+    // recently active one — this is what the user last interacted with — and
+    // re-bind it to the current windowId so future lookups go straight through.
+    const best = titleMatches.reduce((a, b) => (a.lastActive >= b.lastActive ? a : b));
+    best.windowId = windowId;
+    this.byWindowIdTab.set(runtimeKey, best);
+    best.lastActive = Date.now();
+    return best.threadId;
   }
 
   /** @deprecated Use getThreadForSnapshot. Kept for sync_all and other callers. */
@@ -197,8 +226,87 @@ export class TopicManager {
     this.saveToDisk();
   }
 
+  /** Save current state without modifying mappings. Used after callers mutate
+   *  fields on a returned mapping reference (e.g. backfilling composerId on
+   *  legacy entries). */
+  persistInPlace(): void {
+    this.saveToDisk();
+  }
+
   getAllMappings(): TopicMapping[] {
     return Array.from(this.byThread.values());
+  }
+
+  /** Find an existing mapping whose composerId matches. Used to prevent
+   *  duplicate topics when the same agent (stable Cursor data-composer-id)
+   *  appears via different window+tab paths — e.g. once via the project's
+   *  own workbench window, then again via the global 'Cursor Agents' window
+   *  with a composite '<group> / <agent>' title that wouldn't otherwise
+   *  collide on the (windowId, tabTitle) key. Returns the most-recently
+   *  active mapping if there are several. */
+  findByComposerId(composerId: string): TopicMapping | undefined {
+    if (!composerId) return undefined;
+    let best: TopicMapping | undefined;
+    for (const m of this.byThread.values()) {
+      if (m.composerId !== composerId) continue;
+      if (!best || (m.lastActive ?? 0) > (best.lastActive ?? 0)) best = m;
+    }
+    return best;
+  }
+
+  /** Update a mapping's window/tab in place. Used by /remap when the user wants
+   *  an existing topic re-bound to a different (windowId, windowTitle, tabTitle).
+   *  Returns the updated mapping or undefined if threadId isn't tracked. */
+  updateMappingTarget(threadId: number, windowId: string, windowTitle: string, tabTitle: string): TopicMapping | undefined {
+    const existing = this.byThread.get(threadId);
+    if (!existing) return undefined;
+    // Drop old indexes that referenced the previous target.
+    const oldRuntimeKey = makeRuntimeKey(existing.windowId, existing.tabTitle);
+    if (this.byWindowIdTab.get(oldRuntimeKey)?.threadId === threadId) {
+      this.byWindowIdTab.delete(oldRuntimeKey);
+    }
+    const oldTitleKey = makeTitleKey(existing.windowTitle, existing.tabTitle);
+    const oldList = this.byTitleTab.get(oldTitleKey);
+    if (oldList) {
+      const filtered = oldList.filter((m) => m.threadId !== threadId);
+      if (filtered.length === 0) this.byTitleTab.delete(oldTitleKey);
+      else this.byTitleTab.set(oldTitleKey, filtered);
+    }
+    // Mutate in place so `byThread` and any external references stay consistent.
+    existing.windowId = windowId;
+    existing.windowTitle = windowTitle;
+    existing.tabTitle = cleanTabTitle(tabTitle);
+    existing.lastActive = Date.now();
+    // Re-insert into runtime/title indexes under the new keys.
+    const newRuntimeKey = makeRuntimeKey(existing.windowId, existing.tabTitle);
+    this.byWindowIdTab.set(newRuntimeKey, existing);
+    const newTitleKey = makeTitleKey(existing.windowTitle, existing.tabTitle);
+    const list = this.byTitleTab.get(newTitleKey) ?? [];
+    if (!list.find((m) => m.threadId === threadId)) {
+      list.push(existing);
+      this.byTitleTab.set(newTitleKey, list);
+    }
+    this.saveToDisk();
+    return existing;
+  }
+
+  removeMapping(threadId: number): boolean {
+    const mapping = this.byThread.get(threadId);
+    if (!mapping) return false;
+    this.byThread.delete(threadId);
+    const runtimeKey = makeRuntimeKey(mapping.windowId, mapping.tabTitle);
+    if (this.byWindowIdTab.get(runtimeKey)?.threadId === threadId) {
+      this.byWindowIdTab.delete(runtimeKey);
+    }
+    const titleKey = makeTitleKey(mapping.windowTitle, mapping.tabTitle);
+    const list = this.byTitleTab.get(titleKey);
+    if (list) {
+      const filtered = list.filter((m) => m.threadId !== threadId);
+      if (filtered.length === 0) this.byTitleTab.delete(titleKey);
+      else this.byTitleTab.set(titleKey, filtered);
+    }
+    this.saveToDisk();
+    return true;
   }
 
   clearAll(): void {

@@ -1,7 +1,7 @@
 {
   "name": "cursor-remote",
   "displayName": "CursorRemote",
-  "version": "0.1.44",
+  "version": "0.1.45",
   "description": "Remote control your local Cursor AI agent — monitor, approve, and send tasks from your phone or Telegram.",
   "publisher": "cursor-remote",
   "repository": {

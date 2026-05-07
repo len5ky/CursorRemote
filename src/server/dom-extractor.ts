@@ -1147,71 +1147,168 @@ export function extractionFunction(
       });
     }
 
-    // --- Approval buttons ---
+    // --- Approval extraction. Two paths:
+    //
+    // Primary (per-card): each pending shell tool-call card carries its own
+    // Run / Skip / Allowlist buttons plus the actual command text. We surface
+    // one approval entry per card with the command as the description — much
+    // more useful than just the button label.
+    //
+    // Fallback (legacy/non-shell): older Cursor builds and non-shell approval
+    // surfaces. Collapses everything found into a single entry.
+    //
+    // Both paths must:
+    //   - scope to `container` (otherwise multi-agent workbenches leak
+    //     buttons across composers and approvals never clear), and
+    //   - skip elements with aria-haspopup (Cursor's "Auto-Run in Sandbox"
+    //     mode-dropdown trigger has text "Auto-Run …" and would match a
+    //     generic "Run" textMatch — but it opens a settings menu, not an
+    //     approval action).
     const pendingApprovals: CursorState['pendingApprovals'] = [];
-    const approveButtons: { label: string; selector: string }[] = [];
-    const rejectButtons: { label: string; selector: string }[] = [];
+    const isMenuTrigger = (btn: Element): boolean => {
+      const popup = btn.getAttribute('aria-haspopup');
+      return popup === 'menu' || popup === 'true' || popup === 'listbox';
+    };
+    const cleanBtnLabel = (raw: string): string =>
+      raw.replace(/\s*(Shift\+)?⏎\s*/g, '').replace(/\s+/g, ' ').trim();
 
-    for (const sel of approveSelectors) {
-      try {
-        const btns = document.querySelectorAll(sel);
-        for (const btn of Array.from(btns)) {
-          const label = btn.textContent?.trim() || btn.getAttribute('aria-label') || '';
-          if (label) approveButtons.push({ label, selector: buildSelectorPath(btn) });
-        }
-      } catch { /* skip */ }
-    }
-    if (approveButtons.length === 0 && approveTextMatch.length > 0) {
-      for (const btn of Array.from(document.querySelectorAll('button'))) {
-        const text = `${btn.textContent?.trim() || ''} ${btn.getAttribute('aria-label') || ''}`.toLowerCase();
-        for (const pat of approveTextMatch) {
-          if (text.includes(pat.toLowerCase())) {
-            approveButtons.push({ label: btn.textContent?.trim() || pat, selector: buildSelectorPath(btn) });
-            break;
-          }
-        }
-      }
-    }
+    const seenCards = new Set<Element>();
+    const approvalRows = container.querySelectorAll('.ui-shell-tool-call__approval-row');
+    for (const row of Array.from(approvalRows)) {
+      const card = row.closest('.ui-tool-call-card') || row.closest('.ui-shell-tool-call');
+      if (!card || seenCards.has(card)) continue;
 
-    for (const sel of rejectSelectors) {
-      try {
-        const btns = document.querySelectorAll(sel);
-        for (const btn of Array.from(btns)) {
-          const label = btn.textContent?.trim() || btn.getAttribute('aria-label') || '';
-          if (label) rejectButtons.push({ label, selector: buildSelectorPath(btn) });
-        }
-      } catch { /* skip */ }
-    }
-    if (rejectButtons.length === 0 && rejectTextMatch.length > 0) {
-      for (const btn of Array.from(document.querySelectorAll('button'))) {
-        const text = `${btn.textContent?.trim() || ''} ${btn.getAttribute('aria-label') || ''}`.toLowerCase();
-        for (const pat of rejectTextMatch) {
-          if (text.includes(pat.toLowerCase())) {
-            rejectButtons.push({ label: btn.textContent?.trim() || pat, selector: buildSelectorPath(btn) });
-            break;
-          }
-        }
-      }
-    }
-
-    if (approveButtons.length > 0 || rejectButtons.length > 0) {
       const actions: CursorState['pendingApprovals'][0]['actions'] = [];
-      for (const btn of approveButtons) {
+
+      const runBtn = row.querySelector('button.ui-shell-tool-call__run-btn');
+      if (runBtn && !isMenuTrigger(runBtn)) {
         actions.push({
-          label: btn.label,
-          type: btn.label.toLowerCase().includes('all') ? 'approve_all' : 'approve',
-          selectorPath: btn.selector,
+          label: cleanBtnLabel(runBtn.textContent || '') || 'Run',
+          type: 'approve',
+          selectorPath: buildSelectorPath(runBtn),
         });
       }
-      for (const btn of rejectButtons) {
-        actions.push({ label: btn.label, type: 'reject', selectorPath: btn.selector });
+      const allowlistBtn = row.querySelector('button.ui-shell-tool-call__allowlist-button');
+      if (allowlistBtn && !isMenuTrigger(allowlistBtn)) {
+        const lblEl = allowlistBtn.querySelector('.ui-shell-tool-call__allowlist-button-label');
+        actions.push({
+          label: cleanBtnLabel(lblEl?.textContent || allowlistBtn.textContent || '') || 'Allowlist',
+          type: 'approve',
+          selectorPath: buildSelectorPath(allowlistBtn),
+        });
       }
-      const idParts = approveButtons.map(b => b.label).join(',') + '|' + rejectButtons.map(b => b.label).join(',');
+      const skipBtn = row.querySelector('button.ui-shell-tool-call__skip-btn');
+      if (skipBtn && !isMenuTrigger(skipBtn)) {
+        actions.push({
+          label: cleanBtnLabel(skipBtn.textContent || '') || 'Skip',
+          type: 'reject',
+          selectorPath: buildSelectorPath(skipBtn),
+        });
+      }
+
+      if (!actions.some((a) => a.type === 'approve')) continue;
+      seenCards.add(card);
+
+      const cmdEl = card.querySelector('.ui-shell-tool-call__command');
+      const cmdText = (cmdEl?.textContent || '')
+        .trim()
+        .replace(/^\$\s*/, '')
+        .replace(/\s+/g, ' ')
+        .substring(0, 240);
+      const descEl = card.querySelector('.ui-shell-tool-call__description');
+      const descText = (descEl?.textContent || '').trim().substring(0, 200);
+      const description = cmdText || descText || 'Pending approval';
+
+      // Stable per-card id — Cursor's tool-call id when available, falling
+      // back to selector path. Keeps the entry consistent across polls.
+      const bubble = card.closest('[data-tool-call-id]');
+      const toolCallId = bubble?.getAttribute('data-tool-call-id') || buildSelectorPath(card);
       pendingApprovals.push({
-        id: idParts,
-        description: approveButtons[0]?.label || 'Pending approval',
+        id: `tool:${toolCallId}`,
+        description,
         actions,
       });
+    }
+
+    if (pendingApprovals.length === 0) {
+      const approveButtons: { label: string; selector: string }[] = [];
+      const rejectButtons: { label: string; selector: string }[] = [];
+      const seenApproveBtns = new Set<Element>();
+      const seenRejectBtns = new Set<Element>();
+
+      for (const sel of approveSelectors) {
+        try {
+          const btns = container.querySelectorAll(sel);
+          for (const btn of Array.from(btns)) {
+            if (seenApproveBtns.has(btn) || isMenuTrigger(btn)) continue;
+            const label = btn.textContent?.trim() || btn.getAttribute('aria-label') || '';
+            if (label) {
+              seenApproveBtns.add(btn);
+              approveButtons.push({ label, selector: buildSelectorPath(btn) });
+            }
+          }
+        } catch { /* skip */ }
+      }
+      if (approveButtons.length === 0 && approveTextMatch.length > 0) {
+        for (const btn of Array.from(container.querySelectorAll('button'))) {
+          if (seenApproveBtns.has(btn) || isMenuTrigger(btn)) continue;
+          const text = `${btn.textContent?.trim() || ''} ${btn.getAttribute('aria-label') || ''}`.toLowerCase();
+          for (const pat of approveTextMatch) {
+            if (text.includes(pat.toLowerCase())) {
+              seenApproveBtns.add(btn);
+              approveButtons.push({ label: btn.textContent?.trim() || pat, selector: buildSelectorPath(btn) });
+              break;
+            }
+          }
+        }
+      }
+
+      for (const sel of rejectSelectors) {
+        try {
+          const btns = container.querySelectorAll(sel);
+          for (const btn of Array.from(btns)) {
+            if (seenRejectBtns.has(btn) || isMenuTrigger(btn)) continue;
+            const label = btn.textContent?.trim() || btn.getAttribute('aria-label') || '';
+            if (label) {
+              seenRejectBtns.add(btn);
+              rejectButtons.push({ label, selector: buildSelectorPath(btn) });
+            }
+          }
+        } catch { /* skip */ }
+      }
+      if (rejectButtons.length === 0 && rejectTextMatch.length > 0) {
+        for (const btn of Array.from(container.querySelectorAll('button'))) {
+          if (seenRejectBtns.has(btn) || isMenuTrigger(btn)) continue;
+          const text = `${btn.textContent?.trim() || ''} ${btn.getAttribute('aria-label') || ''}`.toLowerCase();
+          for (const pat of rejectTextMatch) {
+            if (text.includes(pat.toLowerCase())) {
+              seenRejectBtns.add(btn);
+              rejectButtons.push({ label: btn.textContent?.trim() || pat, selector: buildSelectorPath(btn) });
+              break;
+            }
+          }
+        }
+      }
+
+      if (approveButtons.length > 0 || rejectButtons.length > 0) {
+        const actions: CursorState['pendingApprovals'][0]['actions'] = [];
+        for (const btn of approveButtons) {
+          actions.push({
+            label: btn.label,
+            type: btn.label.toLowerCase().includes('all') ? 'approve_all' : 'approve',
+            selectorPath: btn.selector,
+          });
+        }
+        for (const btn of rejectButtons) {
+          actions.push({ label: btn.label, type: 'reject', selectorPath: btn.selector });
+        }
+        const idParts = approveButtons.map(b => b.label).join(',') + '|' + rejectButtons.map(b => b.label).join(',');
+        pendingApprovals.push({
+          id: idParts,
+          description: approveButtons[0]?.label || 'Pending approval',
+          actions,
+        });
+      }
     }
 
     // --- Agent status ---
@@ -1270,7 +1367,69 @@ export function extractionFunction(
           }
         }
       }
+      // Cursor Agents unified window: glass sidebar rows (replaces .agent-sidebar-cell in newer builds)
+      const glassTabRoots = document.querySelectorAll(
+        '.glass-sidebar-agent-list-container li.ui-sidebar-menu-item > div.glass-sidebar-agent-menu-btn'
+      );
+      if (glassTabRoots.length > 0) {
+        for (const tab of Array.from(glassTabRoots)) {
+          const labelEl = tab.querySelector('.ui-sidebar-menu-button-label');
+          const rawAgentTitle = (labelEl?.textContent || '').trim();
+          if (!rawAgentTitle) continue;
+
+          const group = tab.closest('.ui-sidebar-group');
+          const groupTitleEl = group?.querySelector('.ui-sidebar-group-label-title');
+          const rawGroupTitle = (groupTitleEl?.textContent || '').trim();
+
+          let displayTitle = cleanTabTitle(rawAgentTitle);
+          if (rawGroupTitle) {
+            const g = cleanTabTitle(rawGroupTitle);
+            if (g) {
+              displayTitle = `${g} / ${cleanTabTitle(rawAgentTitle)}`.substring(0, 120);
+            }
+          }
+
+          if (seenTitles.has(displayTitle)) continue;
+          seenTitles.add(displayTitle);
+
+          const composerId =
+            tab.getAttribute('data-composer-id')
+            || tab.closest('[data-composer-id]')?.getAttribute('data-composer-id')
+            || `glass:${displayTitle}`;
+
+          const isActive = tab.getAttribute('data-active') === 'true';
+
+          chatTabs.push({
+            composerId,
+            title: displayTitle,
+            isActive,
+            status: isActive ? 'active' : 'idle',
+            selectorPath: buildSelectorPath(tab),
+          });
+        }
+
+        if (containerComposerId) {
+          let matched = false;
+          for (const t of chatTabs) {
+            if (t.composerId === containerComposerId) {
+              matched = true;
+              t.isActive = true;
+              t.status = 'active';
+            }
+          }
+          if (matched) {
+            for (const t of chatTabs) {
+              if (t.composerId !== containerComposerId) {
+                t.isActive = false;
+                t.status = 'idle';
+              }
+            }
+          }
+        }
+      }
+
       for (const sel of chatTabSelectors) {
+        if (chatTabs.length > 0) break;
         let tabItems: NodeListOf<Element>;
         try {
           const root: Element | Document = scopeRoot || document;
@@ -1528,6 +1687,7 @@ export function extractionFunction(
       pendingApprovals,
       inputAvailable: inputEl !== null,
       chatTabs,
+      activeComposerId: containerComposerId || (chatTabs.find((t) => t.isActive)?.composerId ?? ''),
       mode,
       model,
       windows: [],

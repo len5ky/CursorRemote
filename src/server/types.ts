@@ -87,6 +87,10 @@ export interface CursorState {
   pendingApprovals: Approval[];
   inputAvailable: boolean;
   chatTabs: ChatTab[];
+  /** data-composer-id of the active composer in the extracted DOM. Stable
+   *  across windows that share an agent via Cursor's global rail; differs
+   *  for two genuinely different agents that happen to share a tab title. */
+  activeComposerId: string;
   mode: ModeInfo;
   model: ModelInfo;
   windows: CursorWindow[];

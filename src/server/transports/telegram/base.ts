@@ -29,6 +29,8 @@ import {
   handleUnsync,
   handlePurge,
   handleCleanup,
+  handleDedupe,
+  handleResync,
   handleStatus,
   handleHistory,
   handleMode,
@@ -70,6 +72,8 @@ export const BOT_COMMANDS = [
   { command: 'sync_all', description: 'Create topics for ALL tabs in all windows' },
   { command: 'unsync', description: 'Disable sync and delete tracked topics' },
   { command: 'cleanup', description: 'Delete untracked/stale topics' },
+  { command: 'dedupe', description: 'Merge duplicate topics (same project, WSL/non-WSL variants)' },
+  { command: 'resync', description: 'Rebind current topic to whatever Cursor has active' },
   { command: 'purge', description: 'Delete ALL forum topics (nuclear reset)' },
   { command: 'status', description: 'Connection status, sync state' },
   { command: 'history', description: 'Chat history: /history [count]' },
@@ -101,6 +105,25 @@ export abstract class BaseTelegramTransport implements Transport {
   private pendingSnapshots = new Map<string, WindowSnapshot>();
   protected syncEnabled = false;
   private creatingTopic = new Set<string>();
+  /** Dedupe key for the cross-window tab-skip warning so it doesn't spam the log every poll. */
+  private warnedSkipPairs = new Set<string>();
+  /** Deferred-deletion timestamps for approval banners: key=`<threadId>:<elementId>`, value=deleteAt ms.
+   *  Cursor's DOM transiently drops then re-renders approval rows during interaction, so a single
+   *  empty pendingApprovals poll shouldn't immediately delete the banner — wait a grace period to
+   *  see whether the approval re-appears. */
+  private approvalPendingDeletion = new Map<string, number>();
+  /** Must comfortably exceed window-monitor's cycle (10s) so a non-active window's
+   *  approval isn't deleted between its polls. Otherwise: poll N detects approval,
+   *  poll N+1 (10s later) re-extracts, and in between the global path sees nothing
+   *  and would delete the banner — flicker. 30s ≈ 3 cycles of grace. */
+  private static readonly APPROVAL_DELETE_GRACE_MS = 30_000;
+  /** Inflight set for approval trackIds. Both the global state-patch path and the
+   *  per-window doProcessWindow path can call processApprovalsForThread for the
+   *  same approval; without this guard they each see an empty tracker (because
+   *  neither has called track() yet), each call sendMessage, and the user sees
+   *  duplicate banners — confirmed in production at msgId 10352+10353 for one
+   *  approval. Skip if another invocation is already sending this trackId. */
+  private approvalInflight = new Set<string>();
   private activityMsgIds = new Map<number, number>();
   private lastActivityText = new Map<number, string>();
   private activityTimestamps = new Map<number, number>();
@@ -303,6 +326,8 @@ export abstract class BaseTelegramTransport implements Transport {
       case 'sync_all': return handleSyncAll(ctx, deps);
       case 'unsync': return handleUnsync(ctx, deps);
       case 'cleanup': return handleCleanup(ctx, deps);
+      case 'dedupe': return handleDedupe(ctx, deps);
+      case 'resync': return handleResync(ctx, deps);
       case 'purge': return handlePurge(ctx, deps);
       case 'status': return handleStatus(ctx, deps);
       case 'history': return handleHistory(ctx, deps);
@@ -589,21 +614,77 @@ export abstract class BaseTelegramTransport implements Transport {
       if (!existingByTitle) {
         const mapping = this.findMappingByTabTitle(cleanedTab);
         if (mapping && mapping.windowId !== windowId && mapping.windowTitle.toLowerCase() !== snapshot.windowTitle.toLowerCase()) {
-          console.warn(`[telegram] Skipping "${cleanedTab}" for window "${snapshot.windowTitle}" — already belongs to "${mapping.windowTitle}"`);
-          return;
+          // Two scenarios share this code path:
+          //   (a) Cursor's global agent rail surfaces the same agent (same
+          //       data-composer-id) in another window's DOM — we should
+          //       route to the existing topic to avoid duplicates.
+          //   (b) Two genuinely different agents in different projects that
+          //       happen to share a tab title (e.g. "Shell command approval
+          //       process" exists independently in two projects) — these
+          //       deserve their own topics; routing the second one to the
+          //       first one's topic was the bug @e49ene reported.
+          // Disambiguate by composerId: if our snapshot's active composerId
+          // matches the existing mapping's, it's the same agent (case a);
+          // otherwise let autoCreateTopic mint a fresh topic (case b).
+          const sameAgent =
+            !!snapshot.activeComposerId &&
+            !!mapping.composerId &&
+            snapshot.activeComposerId === mapping.composerId;
+          if (sameAgent) {
+            const skipKey = `${windowId}::${cleanedTab}::${mapping.windowTitle}`;
+            if (!this.warnedSkipPairs.has(skipKey)) {
+              this.warnedSkipPairs.add(skipKey);
+              console.warn(`[telegram] Skipping "${cleanedTab}" for window "${snapshot.windowTitle}" — same agent (composer=${snapshot.activeComposerId.substring(0, 8)}) already belongs to "${mapping.windowTitle}" (will not warn again for this pair)`);
+            }
+            // Approvals from a non-owning window still need to surface — route
+            // them to the canonical topic so the user sees a banner regardless
+            // of which window's DOM is currently being polled.
+            if (snapshot.pendingApprovals.length > 0) {
+              await this.processApprovalsForThread(mapping.threadId, snapshot.pendingApprovals);
+            }
+            return;
+          }
+          // Different agent that happens to share a title — fall through and
+          // let the auto-create path below mint a separate topic for it.
         }
       }
     }
 
     let threadId = existingThread;
 
+    // Composer-id reuse: before minting a fresh topic, check whether any
+    // existing mapping already covers this exact agent (same composerId).
+    // Different windows can surface the same agent under different
+    // window+tab combos — e.g. the project's own workbench window vs. the
+    // global 'Cursor Agents' window which uses a composite '<group>/<agent>'
+    // tab title. Reuse the existing topic instead of duplicating.
+    if (!threadId && snapshot.activeComposerId) {
+      const sameAgent = this.topicManager.findByComposerId(snapshot.activeComposerId);
+      if (sameAgent) {
+        threadId = sameAgent.threadId;
+        const reuseKey = `composerReuse::${snapshot.activeComposerId}::${windowId}`;
+        if (!this.warnedSkipPairs.has(reuseKey)) {
+          this.warnedSkipPairs.add(reuseKey);
+          console.log(`[telegram] Routing window "${snapshot.windowTitle}" tab "${cleanedTab}" → existing topic ${threadId} (same agent composer=${snapshot.activeComposerId.substring(0, 8)})`);
+        }
+      }
+    }
+
     if (!threadId) {
-      threadId = await this.autoCreateTopic(snapshot.windowTitle, cleanedTab, windowId);
+      threadId = await this.autoCreateTopic(snapshot.windowTitle, cleanedTab, windowId, snapshot.activeComposerId || undefined);
       if (!threadId) return;
     }
 
     const mapping = this.topicManager.resolveThread(threadId);
     if (!mapping) return;
+
+    // Backfill composerId on legacy mappings the first time we see them paired
+    // with a real activeComposerId. Lets the cross-window same-agent guard
+    // start working for topics created before this field existed.
+    if (!mapping.composerId && snapshot.activeComposerId) {
+      mapping.composerId = snapshot.activeComposerId;
+      this.topicManager.persistInPlace();
+    }
 
     const messages = snapshot.messages;
 
@@ -658,6 +739,13 @@ export abstract class BaseTelegramTransport implements Transport {
     }
 
     await this.syncComposerQueueMessage(threadId, snapshot);
+
+    // Per-window approval banner. The global state-patch path only sees the
+    // active CDP window; non-active windows are polled by window-monitor and
+    // their pendingApprovals would never reach Telegram otherwise. Routing
+    // per window also means each window's banner lands in its own thread.
+    // Safe to dual-fire with the global path: per-id contentHash dedupes.
+    await this.processApprovalsForThread(threadId, snapshot.pendingApprovals);
 
     if (messages.length === 0) return;
 
@@ -822,7 +910,7 @@ export abstract class BaseTelegramTransport implements Transport {
     return undefined;
   }
 
-  private async autoCreateTopic(windowTitle: string, tabTitle: string, windowId: string): Promise<number | undefined> {
+  private async autoCreateTopic(windowTitle: string, tabTitle: string, windowId: string, composerId?: string): Promise<number | undefined> {
     if (!this.chatId) return undefined;
 
     const key = `${windowId}::${tabTitle}`;
@@ -839,6 +927,7 @@ export abstract class BaseTelegramTransport implements Transport {
         windowTitle,
         tabTitle,
         lastActive: Date.now(),
+        ...(composerId ? { composerId } : {}),
       });
       return result.message_thread_id;
     } catch (err) {
@@ -857,55 +946,167 @@ export abstract class BaseTelegramTransport implements Transport {
   }
 
   private async processApprovals(approvals: CursorState['pendingApprovals']): Promise<void> {
-    if (approvals.length === 0 || !this.chatId) return;
+    if (!this.chatId) return;
 
     const state = this.stateManager.getCurrentState();
-    const threadId = this.topicManager.getActiveThread(
+    const activeWin = state.windows.find((w) => w.id === state.activeWindowId);
+    const activeTab = state.chatTabs.find((t) => t.isActive);
+    let threadId = this.topicManager.getActiveThread(
       state.windows, state.activeWindowId, state.chatTabs
     );
-    if (!threadId) return;
 
-    const hashCallback = (sp: string) => this.messageTracker.hashSelector(sp);
-    const formatted = formatApprovals(approvals, hashCallback);
-    if (!formatted.html) return;
+    // Cursor's global agent rail can show the same selected tab in any
+    // workbench DOM. When the user switches windows in the web client, the
+    // active CDP target may not own the active tab (e.g. dating_automation
+    // is the home window but "Shell command approval process" — owned by
+    // cursor-ide-remote — is what's selected). Strict (window, tab) lookup
+    // returns nothing; fall back to tab-title-only lookup so the banner
+    // still surfaces in the canonical topic.
+    if (!threadId && activeTab) {
+      const fallback = this.findMappingByTabTitle(activeTab.title);
+      if (fallback) {
+        threadId = fallback.threadId;
+        if (approvals.length > 0) {
+          console.log(
+            `[telegram] Approval routed via tab-title fallback: ` +
+            `tab="${activeTab.title}" → thread=${threadId} (owner="${fallback.windowTitle}", ` +
+            `active CDP window="${activeWin?.title ?? 'none'}")`
+          );
+        }
+      }
+    }
 
-    const approvalTrackId = 'approval';
-    const contentHash = MessageTracker.contentHash(formatted.html + JSON.stringify(formatted.keyboard));
-    const tracked = this.messageTracker.getTracked(threadId, approvalTrackId);
-
-    if (tracked && !this.messageTracker.hasChanged(threadId, approvalTrackId, contentHash)) return;
-
-    try {
-      if (tracked && tracked.telegramMsgIds[0]) {
-        await this.sendQueue.enqueue(
-          () => this.api.editMessageText(this.chatId!, tracked.telegramMsgIds[0], formatted.html, {
-            parse_mode: 'HTML',
-            reply_markup: formatted.keyboard,
-          }),
-          'edit'
-        );
-        this.messageTracker.track(
-          threadId, approvalTrackId, tracked.telegramMsgIds,
-          contentHash, 'approval'
-        );
-      } else {
-        const sent = await this.sendQueue.enqueue(
-          () => this.api.sendMessage(this.chatId!, formatted.html, {
-            message_thread_id: threadId,
-            parse_mode: 'HTML',
-            reply_markup: formatted.keyboard,
-          }),
-          'send'
-        );
-        this.messageTracker.track(
-          threadId, approvalTrackId, [sent.message_id],
-          contentHash, 'approval'
+    if (!threadId) {
+      if (approvals.length > 0) {
+        console.warn(
+          `[telegram] Approval(${approvals.length}) on global path but no thread resolved ` +
+          `(activeWindow="${activeWin?.title ?? state.activeWindowId ?? 'none'}", ` +
+          `activeTab="${activeTab?.title ?? 'none'}", windows=${state.windows.length}, ` +
+          `chatTabs=${state.chatTabs.length}). Per-window path will retry.`
         );
       }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (!msg.includes('not found') && !msg.includes('not modified')) {
-        console.warn('[telegram] Approval error:', msg);
+      return;
+    }
+    await this.processApprovalsForThread(threadId, approvals);
+  }
+
+  private async processApprovalsForThread(
+    threadId: number,
+    approvals: CursorState['pendingApprovals']
+  ): Promise<void> {
+    if (!this.chatId) return;
+
+    const APPROVAL_PREFIX = 'approval:';
+    const hashCallback = (sp: string) => this.messageTracker.hashSelector(sp);
+    const currentTrackIds = new Set(approvals.map((a) => `${APPROVAL_PREFIX}${a.id}`));
+
+    // Sweep stale approval entries. Two flavors:
+    //   - Legacy keys ('approval' single, 'approval-approval-<TS>' from much
+    //     older builds): always delete immediately — these never match a
+    //     current approval id, are pure garbage from previous sessions.
+    //   - Current per-id keys ('approval:<id>') where the underlying approval
+    //     is no longer pending: defer deletion by APPROVAL_DELETE_GRACE_MS.
+    //     Cursor's DOM transiently drops then re-renders approval rows during
+    //     interaction (composer scroll, focus changes, agent step boundaries),
+    //     and immediate deletion → next-poll re-send produces visible flicker.
+    //     The grace period absorbs that without harming the eventually-cleared
+    //     case (banner sticks ~4s longer than strictly needed; acceptable).
+    const now = Date.now();
+    for (const tracked of this.messageTracker.listInThread(threadId)) {
+      const eid = tracked.elementId;
+      const isCurrent = eid.startsWith(APPROVAL_PREFIX) && currentTrackIds.has(eid);
+      if (isCurrent) {
+        // Re-appeared inside the grace window — cancel any pending deletion.
+        this.approvalPendingDeletion.delete(`${threadId}:${eid}`);
+        continue;
+      }
+      const isLegacyApprovalKey =
+        eid === 'approval' ||
+        (eid.startsWith('approval-') && !eid.startsWith(APPROVAL_PREFIX));
+      const isCurrentFmtKey = eid.startsWith(APPROVAL_PREFIX);
+      if (!isLegacyApprovalKey && !isCurrentFmtKey) continue;
+
+      const pendKey = `${threadId}:${eid}`;
+      let shouldDelete = isLegacyApprovalKey;
+      if (isCurrentFmtKey) {
+        const deleteAt = this.approvalPendingDeletion.get(pendKey);
+        if (deleteAt === undefined) {
+          // First poll without this approval — schedule deletion, but don't
+          // act this cycle. If the approval re-appears next poll, we cancel.
+          this.approvalPendingDeletion.set(pendKey, now + BaseTelegramTransport.APPROVAL_DELETE_GRACE_MS);
+        } else if (now >= deleteAt) {
+          shouldDelete = true;
+        }
+      }
+      if (!shouldDelete) continue;
+
+      if (tracked.telegramMsgIds[0]) {
+        try {
+          await this.sendQueue.enqueue(
+            () => this.api.deleteMessage(this.chatId!, tracked.telegramMsgIds[0]),
+            'edit'
+          );
+        } catch { /* may already be gone */ }
+      }
+      this.messageTracker.untrack(threadId, eid);
+      this.approvalPendingDeletion.delete(pendKey);
+    }
+
+    // Send (or edit) a banner per current approval. Editing only happens
+    // when the same approval id reappears with changed content (rare but
+    // possible — e.g. button labels updating mid-flight).
+    for (const approval of approvals) {
+      const trackId = `${APPROVAL_PREFIX}${approval.id}`;
+      const formatted = formatApprovals([approval], hashCallback);
+      if (!formatted.html) continue;
+
+      const contentHash = MessageTracker.contentHash(formatted.html + JSON.stringify(formatted.keyboard));
+      const tracked = this.messageTracker.getTracked(threadId, trackId);
+
+      if (tracked && !this.messageTracker.hasChanged(threadId, trackId, contentHash)) continue;
+
+      // Race guard: prevent concurrent global+per-window invocations from each
+      // sending a fresh banner (both saw an empty tracker before either tracked).
+      const inflightKey = `${threadId}:${trackId}`;
+      if (this.approvalInflight.has(inflightKey)) continue;
+      this.approvalInflight.add(inflightKey);
+
+      try {
+        if (tracked && tracked.telegramMsgIds[0]) {
+          await this.sendQueue.enqueue(
+            () => this.api.editMessageText(this.chatId!, tracked.telegramMsgIds[0], formatted.html, {
+              parse_mode: 'HTML',
+              reply_markup: formatted.keyboard,
+            }),
+            'edit'
+          );
+          this.messageTracker.track(
+            threadId, trackId, tracked.telegramMsgIds,
+            contentHash, 'approval'
+          );
+          console.log(`[telegram] Approval edited: id=${approval.id} thread=${threadId} desc="${approval.description.substring(0, 80)}"`);
+        } else {
+          const sent = await this.sendQueue.enqueue(
+            () => this.api.sendMessage(this.chatId!, formatted.html, {
+              message_thread_id: threadId,
+              parse_mode: 'HTML',
+              reply_markup: formatted.keyboard,
+            }),
+            'send'
+          );
+          this.messageTracker.track(
+            threadId, trackId, [sent.message_id],
+            contentHash, 'approval'
+          );
+          console.log(`[telegram] Approval sent: id=${approval.id} thread=${threadId} msgId=${sent.message_id} desc="${approval.description.substring(0, 80)}"`);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!msg.includes('not found') && !msg.includes('not modified')) {
+          console.warn('[telegram] Approval error:', msg);
+        }
+      } finally {
+        this.approvalInflight.delete(inflightKey);
       }
     }
   }

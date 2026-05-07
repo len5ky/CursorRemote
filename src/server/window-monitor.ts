@@ -33,6 +33,11 @@ export interface WindowSnapshot {
   mode: ModeInfo;
   model: ModelInfo;
   lastUpdated: number;
+  /** data-composer-id of the active composer in this window. Same agent shown
+   *  via Cursor's global rail in another window will share this id; two
+   *  different agents that happen to share a tab title will not. Used by
+   *  topic-manager to disambiguate. Empty string if not extractable. */
+  activeComposerId: string;
 }
 
 const CYCLE_INTERVAL_MS = 10000;
@@ -69,6 +74,20 @@ function messageFingerprint(messages: ChatElement[]): string {
   if (messages.length === 0) return '';
   const last = messages[messages.length - 1];
   return `${messages.length}:${last.type}:${last.id}:${elementContentKey(last)}`;
+}
+
+/**
+ * Stable signature over pendingApprovals contents — id + action labels.
+ * Bare length comparison misses the case where one approval clears at the
+ * same time another appears (count stays 1 but the underlying tool-call
+ * changed), so the snapshot wouldn't emit and Telegram wouldn't refresh
+ * the banner.
+ */
+function approvalsFingerprint(approvals: { id: string; actions: { label: string; type: string }[] }[]): string {
+  if (approvals.length === 0) return '';
+  return approvals
+    .map((a) => `${a.id}|${a.actions.map((act) => `${act.type}:${act.label}`).join(',')}`)
+    .join(';');
 }
 
 /**
@@ -218,11 +237,14 @@ export class WindowMonitor extends EventEmitter {
       mode: state.mode,
       model: state.model,
       lastUpdated: Date.now(),
+      activeComposerId: state.activeComposerId ?? '',
     };
 
     const prev = this.snapshots.get(windowId);
     const queueSig = JSON.stringify(snapshot.composerQueue);
     const prevQueueSig = prev ? JSON.stringify(prev.composerQueue) : '';
+    const approvalSig = approvalsFingerprint(snapshot.pendingApprovals);
+    const prevApprovalSig = prev ? approvalsFingerprint(prev.pendingApprovals) : '';
     const changed = !prev
       || prev.messages.length !== snapshot.messages.length
       || (prev.messages.length > 0 && prev.messages[prev.messages.length - 1]?.id !== snapshot.messages[snapshot.messages.length - 1]?.id)
@@ -230,7 +252,7 @@ export class WindowMonitor extends EventEmitter {
       || prev.agentActivityText !== snapshot.agentActivityText
       || prev.agentActivityLive !== snapshot.agentActivityLive
       || prev.agentActivitySource !== snapshot.agentActivitySource
-      || prev.pendingApprovals.length !== snapshot.pendingApprovals.length
+      || approvalSig !== prevApprovalSig
       || queueSig !== prevQueueSig
       || prev.mode?.current !== snapshot.mode?.current
       || prev.model?.current !== snapshot.model?.current
@@ -332,11 +354,14 @@ export class WindowMonitor extends EventEmitter {
           mode: state.mode,
           model: state.model,
           lastUpdated: Date.now(),
+          activeComposerId: state.activeComposerId ?? '',
         };
 
         const prev = this.snapshots.get(win.id);
         const qSig = JSON.stringify(snapshot.composerQueue);
         const pqSig = prev ? JSON.stringify(prev.composerQueue) : '';
+        const aSig = approvalsFingerprint(snapshot.pendingApprovals);
+        const paSig = prev ? approvalsFingerprint(prev.pendingApprovals) : '';
         const changed = !prev
           || prev.messages.length !== snapshot.messages.length
           || (prev.messages.length > 0 && prev.messages[prev.messages.length - 1]?.id !== snapshot.messages[snapshot.messages.length - 1]?.id)
@@ -344,7 +369,7 @@ export class WindowMonitor extends EventEmitter {
           || prev.agentActivityText !== snapshot.agentActivityText
           || prev.agentActivityLive !== snapshot.agentActivityLive
           || prev.agentActivitySource !== snapshot.agentActivitySource
-          || prev.pendingApprovals.length !== snapshot.pendingApprovals.length
+          || aSig !== paSig
           || qSig !== pqSig
           || prev.mode?.current !== snapshot.mode?.current
           || prev.model?.current !== snapshot.model?.current

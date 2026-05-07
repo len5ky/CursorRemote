@@ -66,6 +66,7 @@ export interface TelegramApiClient {
     message_thread_id?: number;
   }): Promise<void>;
   createForumTopic(chatId: number, name: string): Promise<{ message_thread_id: number }>;
+  editForumTopic(chatId: number, threadId: number, name: string): Promise<void>;
   deleteForumTopic(chatId: number, threadId: number): Promise<void>;
   setMyCommands(commands: Array<{ command: string; description: string }>): Promise<void>;
   getMe(): Promise<{ id: number; username?: string; is_bot: boolean; first_name: string }>;
