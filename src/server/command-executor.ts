@@ -5,6 +5,172 @@ const MAX_RETRIES = 2;
 const RETRY_DELAY_MS = 500;
 const FOCUS_DELAY_MS = 100;
 
+// Resolves the currently-open model picker menu element across Cursor versions.
+// Older builds expose `[data-testid="model-picker-menu"]`; newer builds (~3.5.17)
+// removed the testid and render the picker as a generic `[role="menu"]` opened
+// via `.ui-model-picker__trigger`, so we cascade through several lookups.
+// Stable across model-picker renders — Cursor's React 19 useId-generated IDs
+// (`_r_ld_`, `_r_qm_`, …) change on every mount, so they round-trip badly as
+// model identifiers. Treat anything matching this pattern as no-id and fall
+// back to the synthetic `label::<text>` form.
+const REACT_USE_ID_RE = /^_r_[a-z0-9]+_$/;
+
+// Shared in-browser helpers for reading and clicking model-picker rows. Both
+// the read path (`get_model_options`) and the write path (`set_model` /
+// `set_plan_model`) use the same `collectModelItems()` / `pickModelById()`
+// implementations so the round-trip is consistent — there's exactly one
+// definition of "what counts as a model row" and "how to map an id back to a
+// row." Inject as `${MODEL_ITEM_HELPERS_JS}` inside an evaluate().
+export const MODEL_ITEM_HELPERS_JS = `
+  const REACT_USE_ID_RE = ${REACT_USE_ID_RE.toString()};
+
+  // Row label, excluding text from descendant <button> elements (each row has
+  // an inner "Edit" button whose text would otherwise pollute the label).
+  const labelOf = (el) => {
+    const clone = el.cloneNode(true);
+    for (const b of Array.from(clone.querySelectorAll('button'))) b.remove();
+    return (clone.textContent || '').replace(/\\s+/g, ' ').trim();
+  };
+
+  // Returns the DOM id only if it's stable; React useId values round-trip badly.
+  const stableIdOf = (el) => {
+    const raw = el.id || '';
+    if (!raw || REACT_USE_ID_RE.test(raw)) return '';
+    return raw;
+  };
+
+  // Top-level rows under the menu — drops items contained inside another
+  // candidate so per-row Edit buttons don't show up as separate "models."
+  const modelRowsIn = (menu) => {
+    if (!menu) return [];
+    const raw = Array.from(menu.querySelectorAll('[id], [role="menuitem"], button, [data-testid]'));
+    return raw.filter(item => !raw.some(other => other !== item && other.contains(item)));
+  };
+
+  const clickModelRow = (item) => {
+    const clickable = item.querySelector('.composer-unified-context-menu-item') || item;
+    clickable.click();
+  };
+
+  const collectModelItems = (menu) => {
+    const items = modelRowsIn(menu);
+    const seen = new Set();
+    const out = [];
+    for (const item of items) {
+      const label = labelOf(item);
+      if (!label) continue;
+      // Skip pure action-button entries that survived the nesting filter
+      // (defensive — e.g. floating Edit/Configure buttons not inside a row).
+      if (/^(edit|configure|remove|delete|star)$/i.test(label)) continue;
+      const stableId = stableIdOf(item);
+      const key = stableId || label.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const clickable = item.querySelector('.composer-unified-context-menu-item') || item;
+      const cls = clickable.className || item.className || '';
+      const aria = clickable.getAttribute?.('aria-checked') || item.getAttribute?.('aria-checked') || '';
+      const selected = /selected|active|checked/.test(cls) || aria === 'true';
+      out.push({
+        id: stableId || ('label::' + label),
+        label,
+        selected,
+      });
+    }
+    return out;
+  };
+
+  // Finds and clicks the row whose id (or synthesized label::id) matches the
+  // requested target. Targets can be: a real DOM id ("model-opus"), a
+  // synthesized "label::<text>" (when the row has no stable id), an unstable
+  // React useId ("_r_ld_"), or the bare label text. Returns true on success.
+  const pickModelById = (menu, targetId) => {
+    if (!menu || !targetId) return false;
+    const isLabelId = targetId.startsWith('label::');
+    const isUnstable = REACT_USE_ID_RE.test(targetId);
+    const labelTarget = (isLabelId ? targetId.slice(7) : '').trim().toLowerCase();
+    const targetLc = targetId.toLowerCase();
+    const fuzzy = (isLabelId || isUnstable) ? '' : targetLc.replace(/[-_]/g, ' ');
+
+    if (!isLabelId && !isUnstable) {
+      const byId = document.getElementById(targetId);
+      if (byId && (byId === menu || menu.contains(byId))) {
+        clickModelRow(byId);
+        return true;
+      }
+    }
+
+    const rows = modelRowsIn(menu);
+    // Pass 1: exact match (preferred — avoids "GPT-5" matching "GPT-5.5").
+    for (const item of rows) {
+      const label = labelOf(item);
+      if (!label) continue;
+      const labelLc = label.toLowerCase();
+      const stableId = stableIdOf(item);
+      if (isLabelId || isUnstable) {
+        if (labelLc === labelTarget || labelLc === targetLc) {
+          clickModelRow(item);
+          return true;
+        }
+      } else {
+        if (stableId === targetId || ('label::' + label) === targetId) {
+          clickModelRow(item);
+          return true;
+        }
+      }
+    }
+    // Pass 2: fuzzy/substring fallback for label::-style targets, in case the
+    // live row has extra text (e.g. a "Premium" badge, subtitle) beyond what
+    // collectModelItems captured. Guarded by length to avoid partial matches
+    // like "GPT-5" matching "GPT-5.5".
+    for (const item of rows) {
+      const label = labelOf(item);
+      if (!label) continue;
+      const labelLc = label.toLowerCase();
+      if (isLabelId || isUnstable) {
+        if (labelTarget.length >= 4 && labelLc.includes(labelTarget)) {
+          clickModelRow(item);
+          return true;
+        }
+      } else if (fuzzy && labelLc.includes(fuzzy)) {
+        clickModelRow(item);
+        return true;
+      }
+    }
+    return false;
+  };
+`;
+
+// Back-compat alias for tests that imported the old name.
+export const MODEL_ITEM_COLLECTOR_JS = MODEL_ITEM_HELPERS_JS;
+
+// Inject as `${MODEL_MENU_LOOKUP_JS}` inside an evaluate; call `findModelMenu()`.
+export const MODEL_MENU_LOOKUP_JS = `
+  const findModelMenu = () => {
+    const byTestId = document.querySelector('[data-testid="model-picker-menu"]');
+    if (byTestId) return byTestId;
+    const triggers = document.querySelectorAll(
+      '.ui-model-picker__trigger[aria-expanded="true"],' +
+      '.composer-unified-dropdown-model[aria-expanded="true"],' +
+      '.composer-unified-dropdown[aria-expanded="true"]'
+    );
+    for (const t of Array.from(triggers)) {
+      const controls = t.getAttribute('aria-controls');
+      if (controls) {
+        const byControls = document.getElementById(controls);
+        if (byControls) return byControls;
+      }
+    }
+    const openMenu = document.querySelector('[role="menu"][data-state="open"]');
+    if (openMenu) return openMenu;
+    const visibleMenus = document.querySelectorAll('[role="menu"]:not([hidden])');
+    for (const m of Array.from(visibleMenus)) {
+      const rect = m.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) return m;
+    }
+    return null;
+  };
+`;
+
 export class CommandExecutor {
   private selectors: SelectorConfig;
   private client: CdpClient | null = null;
@@ -421,14 +587,22 @@ export class CommandExecutor {
     return this.withRetry(commandId, async (client) => {
       const strategies = this.selectors.modelDropdown?.strategies ?? [];
 
-      // Step 1: Open the dropdown via JS .click() (same pattern as setMode)
+      // Step 1: Open the dropdown via JS .click() (same pattern as setMode).
+      // Skip any trigger whose id starts with `plan-exec-model` (those belong
+      // to the plan-execution picker, not the composer's model picker) — same
+      // filter as openModelMenuAndReadOptions.
       const opened = await client.evaluate(`
         (() => {
           const strategies = ${JSON.stringify(strategies)};
           for (const sel of strategies) {
             try {
-              const el = document.querySelector(sel);
-              if (el) { el.click(); return true; }
+              const candidates = document.querySelectorAll(sel);
+              for (const c of Array.from(candidates)) {
+                const cId = c.getAttribute('id') || '';
+                if (cId.startsWith('plan-exec-model')) continue;
+                c.click();
+                return true;
+              }
             } catch {}
           }
           return false;
@@ -440,29 +614,21 @@ export class CommandExecutor {
 
       // Step 2: Verify menu opened
       const menuVisible = await client.evaluate(`
-        document.querySelector('[data-testid="model-picker-menu"]') !== null
+        (() => {
+          ${MODEL_MENU_LOOKUP_JS}
+          return findModelMenu() !== null;
+        })()
       `) as boolean;
       if (!menuVisible) throw new Error('Model picker did not open');
 
-      // Step 3: Find and click the model item via JS .click()
+      // Step 3: Find and click the model item via the shared helper so
+      // setModel, setPlanModel, web client, and Telegram all resolve the
+      // same way.
       const selected = await client.evaluate(`
         (() => {
-          const modelId = ${JSON.stringify(modelId)};
-          let wrapper = document.getElementById(modelId);
-          if (!wrapper) {
-            const items = document.querySelectorAll('[data-testid="model-picker-menu"] [id]');
-            for (const el of Array.from(items)) {
-              const text = (el.textContent || '').trim().toLowerCase();
-              if (text.includes(modelId.toLowerCase().replace(/[-_]/g, ' '))) {
-                wrapper = el;
-                break;
-              }
-            }
-          }
-          if (!wrapper) return false;
-          const clickable = wrapper.querySelector('.composer-unified-context-menu-item') || wrapper;
-          clickable.click();
-          return true;
+          ${MODEL_MENU_LOOKUP_JS}
+          ${MODEL_ITEM_HELPERS_JS}
+          return pickModelById(findModelMenu(), ${JSON.stringify(modelId)});
         })()
       `) as boolean;
       if (!selected) throw new Error(`Model "${modelId}" not found in dropdown`);
@@ -471,7 +637,10 @@ export class CommandExecutor {
 
       // Step 4: Verify dropdown closed (confirms selection was accepted)
       const menuStillOpen = await client.evaluate(`
-        document.querySelector('[data-testid="model-picker-menu"]') !== null
+        (() => {
+          ${MODEL_MENU_LOOKUP_JS}
+          return findModelMenu() !== null;
+        })()
       `) as boolean;
       if (menuStillOpen) {
         console.warn(`[command-executor] Model dropdown still open — pressing Escape`);
@@ -504,38 +673,19 @@ export class CommandExecutor {
       await this.openPlanModelMenu(client, selectorPath);
       const selected = await client.evaluate(`
         (() => {
-          const targetId = ${JSON.stringify(planModelId)};
-          const menu = document.querySelector('[data-testid="model-picker-menu"]');
-          if (!menu) return false;
-
-          const items = Array.from(menu.querySelectorAll('[id], [role="menuitem"], button, [data-testid]'));
-          const targetNorm = targetId.replace(/^label::/, '').trim().toLowerCase();
-
-          for (const item of items) {
-            const id = item.id || '';
-            const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();
-            if (!text) continue;
-
-            if (id === targetId || ('label::' + text) === targetId) {
-              const clickable = item.querySelector('.composer-unified-context-menu-item') || item;
-              clickable.click();
-              return true;
-            }
-
-            if (targetId.startsWith('label::') && text.toLowerCase() === targetNorm) {
-              const clickable = item.querySelector('.composer-unified-context-menu-item') || item;
-              clickable.click();
-              return true;
-            }
-          }
-          return false;
+          ${MODEL_MENU_LOOKUP_JS}
+          ${MODEL_ITEM_HELPERS_JS}
+          return pickModelById(findModelMenu(), ${JSON.stringify(planModelId)});
         })()
       `) as boolean;
       if (!selected) throw new Error(`Plan model "${planModelId}" not found`);
 
       await sleep(200);
       const menuStillOpen = await client.evaluate(`
-        document.querySelector('[data-testid="model-picker-menu"]') !== null
+        (() => {
+          ${MODEL_MENU_LOOKUP_JS}
+          return findModelMenu() !== null;
+        })()
       `) as boolean;
       if (menuStillOpen) {
         await client.pressKey('Escape', 'Escape', 27);
@@ -614,7 +764,10 @@ export class CommandExecutor {
 
     await sleep(300);
     const menuVisible = await client.evaluate(`
-      document.querySelector('[data-testid="model-picker-menu"]') !== null
+      (() => {
+        ${MODEL_MENU_LOOKUP_JS}
+        return findModelMenu() !== null;
+      })()
     `) as boolean;
     if (!menuVisible) throw new Error('Plan model picker did not open');
   }
@@ -627,32 +780,9 @@ export class CommandExecutor {
 
     const options = await client.evaluate(`
       (() => {
-        const menu = document.querySelector('[data-testid="model-picker-menu"]');
-        if (!menu) return [];
-
-        const seen = new Set();
-        const out = [];
-        const items = Array.from(menu.querySelectorAll('[id], [role="menuitem"], button, [data-testid]'));
-        for (const item of items) {
-          const id = item.id || '';
-          const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();
-          if (!text) continue;
-
-          const clickable = item.querySelector('.composer-unified-context-menu-item') || item;
-          const key = id || text.toLowerCase();
-          if (!clickable || seen.has(key)) continue;
-          seen.add(key);
-
-          const cls = clickable.className || item.className || '';
-          const aria = clickable.getAttribute?.('aria-checked') || item.getAttribute?.('aria-checked') || '';
-          const selected = /selected|active|checked/.test(cls) || aria === 'true';
-          out.push({
-            id: id || ('label::' + text),
-            label: text,
-            selected,
-          });
-        }
-        return out;
+        ${MODEL_MENU_LOOKUP_JS}
+        ${MODEL_ITEM_HELPERS_JS}
+        return collectModelItems(findModelMenu());
       })()
     `) as PlanModelOption[];
 
@@ -689,38 +819,18 @@ export class CommandExecutor {
     await sleep(300);
 
     const menuVisible = await client.evaluate(`
-      document.querySelector('[data-testid="model-picker-menu"]') !== null
+      (() => {
+        ${MODEL_MENU_LOOKUP_JS}
+        return findModelMenu() !== null;
+      })()
     `) as boolean;
     if (!menuVisible) throw new Error('Model picker did not open');
 
     const options = await client.evaluate(`
       (() => {
-        const menu = document.querySelector('[data-testid="model-picker-menu"]');
-        if (!menu) return [];
-
-        const seen = new Set();
-        const out = [];
-        const items = Array.from(menu.querySelectorAll('[id], [role="menuitem"], button, [data-testid]'));
-        for (const item of items) {
-          const id = item.id || '';
-          const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();
-          if (!text) continue;
-
-          const clickable = item.querySelector('.composer-unified-context-menu-item') || item;
-          const key = id || text.toLowerCase();
-          if (!clickable || seen.has(key)) continue;
-          seen.add(key);
-
-          const cls = clickable.className || item.className || '';
-          const aria = clickable.getAttribute?.('aria-checked') || item.getAttribute?.('aria-checked') || '';
-          const selected = /selected|active|checked/.test(cls) || aria === 'true';
-          out.push({
-            id: id || ('label::' + text),
-            label: text,
-            selected,
-          });
-        }
-        return out;
+        ${MODEL_MENU_LOOKUP_JS}
+        ${MODEL_ITEM_HELPERS_JS}
+        return collectModelItems(findModelMenu());
       })()
     `) as PlanModelOption[];
 

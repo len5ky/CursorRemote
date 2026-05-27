@@ -70,6 +70,7 @@
   },
   "modelDropdown": {
     "strategies": [
+      ".ui-model-picker__trigger",
       ".composer-unified-dropdown-model"
     ]
   }

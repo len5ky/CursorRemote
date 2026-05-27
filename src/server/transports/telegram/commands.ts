@@ -1012,12 +1012,65 @@ export async function handleAgentCommand(ctx: BotContext, deps: CommandDeps): Pr
 
 // --- Callback queries ---
 
-const ACTION_SELECTORS: Record<string, string> = {
-  bld: '.composer-create-plan-build-button',
-  run: '.composer-tool-call-status-row .anysphere-button.composer-run-button',
-  skp: '.composer-skip-button',
-  alw: '.composer-tool-call-status-row .anysphere-secondary-button.composer-run-button',
+// Last-resort fallback selectors for callback actions whose per-card hash has
+// been evicted (server restart, second bot instance, or stale tracker entry).
+// Resolves to the first matching button on the page — only safe when a single
+// approval card is visible, which is the common case. The hash from the
+// callback_data is preferred because it scopes to the specific card.
+//
+// Current (Cursor 3.4+) per-card layout selectors come from dom-extractor.ts;
+// legacy `.composer-*` selectors are kept as a second fallback for older Cursor.
+export const ACTION_SELECTORS: Record<string, string[]> = {
+  apr: ['button.ui-shell-tool-call__run-btn', '.composer-tool-call-status-row .anysphere-button.composer-run-button'],
+  rej: ['button.ui-shell-tool-call__skip-btn', '.composer-skip-button'],
+  all: ['button.ui-shell-tool-call__allowlist-button', '.composer-tool-call-status-row .anysphere-secondary-button.composer-run-button'],
+  run: ['button.ui-shell-tool-call__run-btn', '.composer-tool-call-status-row .anysphere-button.composer-run-button'],
+  skp: ['button.ui-shell-tool-call__skip-btn', '.composer-skip-button'],
+  alw: ['button.ui-shell-tool-call__allowlist-button', '.composer-tool-call-status-row .anysphere-secondary-button.composer-run-button'],
+  bld: ['.composer-create-plan-build-button'],
 };
+
+export function resolveStableActionSelector(action: string): string | undefined {
+  const candidates = ACTION_SELECTORS[action];
+  if (!candidates || candidates.length === 0) return undefined;
+  // Join into a single CSS selector list so `document.querySelector` picks the
+  // first one that matches anything in the live DOM.
+  return candidates.join(', ');
+}
+
+/**
+ * Callback data is `action:<payload>` where `<payload>` shape depends on the
+ * action. Several actions (notably `model`) carry ids that contain literal
+ * colons (e.g. `label::GPT-5.5 High`), so we must NOT naively split the whole
+ * string on `:`. Parse the action prefix, then route by action.
+ */
+export function parseCallbackData(data: string): { action: string; id: string; hash: string } {
+  const firstColon = data.indexOf(':');
+  if (firstColon < 0) return { action: data, id: '', hash: '' };
+  const action = data.slice(0, firstColon);
+  const rest = data.slice(firstColon + 1);
+
+  // Actions whose payload is `id:hash` — the id is everything up to the
+  // LAST colon, the hash is the suffix. Hash is an 8-char hex string from
+  // message-tracker.ts so it's safe to take the tail. `vpl` and `bld` come
+  // from the plan widget (see formatter.ts) and share the same shape.
+  const HASHED_ACTIONS = new Set(['apr', 'rej', 'all', 'run', 'skp', 'alw', 'bld', 'vpl', 'dif']);
+  if (HASHED_ACTIONS.has(action)) {
+    const lastColon = rest.lastIndexOf(':');
+    if (lastColon >= 0) {
+      return { action, id: rest.slice(0, lastColon), hash: rest.slice(lastColon + 1) };
+    }
+    return { action, id: rest, hash: '' };
+  }
+
+  // Questionnaire actions carry only a hash: `qan:<hash>`.
+  if (action === 'qan' || action === 'qsk' || action === 'qco') {
+    return { action, id: '', hash: rest };
+  }
+
+  // Default (mode, model, …): the entire rest is the id, colons allowed.
+  return { action, id: rest, hash: '' };
+}
 
 export async function handleCallbackQuery(ctx: BotContext, deps: CommandDeps): Promise<void> {
   const data = ctx.callbackQuery?.data;
@@ -1026,10 +1079,7 @@ export async function handleCallbackQuery(ctx: BotContext, deps: CommandDeps): P
     return;
   }
 
-  const parts = data.split(':');
-  const action = parts[0];
-  const id = parts[1] ?? '';
-  const hash = parts[2] ?? '';
+  const { action, id, hash } = parseCallbackData(data);
   const commandId = genId();
 
   try {
@@ -1133,9 +1183,9 @@ export async function handleCallbackQuery(ctx: BotContext, deps: CommandDeps): P
         await ctx.answerCallbackQuery({ text: 'Failed to switch window' });
         return;
       }
-      // For questionnaire, the hash is in parts[1] (format: qan:<hash>)
-      const qHash = parts[1] ?? '';
-      const qSelector = deps.messageTracker.resolveHash(qHash);
+      // Questionnaire callback format is `qan:<hash>` — parseCallbackData
+      // routes the hash into the `hash` field for these actions.
+      const qSelector = deps.messageTracker.resolveHash(hash);
       if (!qSelector) {
         await ctx.answerCallbackQuery({ text: 'Action expired.' });
         return;
@@ -1151,17 +1201,18 @@ export async function handleCallbackQuery(ctx: BotContext, deps: CommandDeps): P
       return;
     }
 
-    // For known action types, use stable CSS class selectors instead of stale nth-of-type paths
-    const stableSelector = ACTION_SELECTORS[action];
-    let selectorPath: string | undefined;
-    if (stableSelector) {
-      selectorPath = stableSelector;
-    } else {
-      selectorPath = deps.messageTracker.resolveHash(hash);
-    }
+    // Prefer the per-card hash from callback_data — it targets the exact card
+    // the user tapped in Telegram. Fall back to a stable CSS-class selector if
+    // the hash has been evicted (server restart, two-bot scenarios), which
+    // still works when only one approval card is currently visible.
+    const fromHash = deps.messageTracker.resolveHash(hash);
+    const stableFallback = resolveStableActionSelector(action);
+    const selectorPath = fromHash ?? stableFallback;
 
     if (!selectorPath) {
-      await ctx.answerCallbackQuery({ text: 'Action expired.' });
+      await ctx.answerCallbackQuery({
+        text: 'Action no longer pending (already actioned, cleared, or restart).',
+      });
       return;
     }
 
