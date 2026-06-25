@@ -64,7 +64,7 @@ async function main(): Promise<void> {
       const result = await client.evaluate(`
         (() => {
           const out = [];
-          const wrappers = document.querySelectorAll('[data-flat-index]');
+          const wrappers = document.querySelectorAll('[data-message-index], [data-flat-index]');
           for (const w of wrappers) {
             const hasLoading = !!w.querySelector('.loading-indicator-v3');
             const hasStepGroup = !!w.querySelector('.ui-collapsible.ui-step-group-collapsible');
@@ -79,7 +79,7 @@ async function main(): Promise<void> {
             const preview = w.querySelector('.ui-step-group-preview');
 
             out.push({
-              flatIndex: parseInt(w.getAttribute('data-flat-index') || '0', 10),
+              flatIndex: parseInt(w.getAttribute('data-message-index') || w.getAttribute('data-flat-index') || '0', 10),
               hasLoading,
               hasStepGroup,
               hasThinkingCollapsible: hasThinking,

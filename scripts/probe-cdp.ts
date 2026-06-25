@@ -58,7 +58,7 @@ async function main() {
     // All .make-shine elements
     const shineEls = container.querySelectorAll('.make-shine');
     for (const el of Array.from(shineEls)) {
-      const wrapper = el.closest('[data-flat-index]');
+      const wrapper = el.closest('[data-message-index], [data-flat-index]');
       const toolCall = el.closest('[data-tool-call-id]');
       const header = el.closest('.ui-collapsible-header');
       const loadingInd = el.closest('.loading-indicator-v3') || wrapper?.querySelector('.loading-indicator-v3');
@@ -66,7 +66,7 @@ async function main() {
         type: 'make-shine',
         text: (el.textContent || '').trim().substring(0, 200),
         parentText: (el.parentElement?.textContent || '').trim().substring(0, 200),
-        wrapperFlatIndex: wrapper?.getAttribute('data-flat-index'),
+        wrapperFlatIndex: wrapper?.getAttribute('data-message-index') || wrapper?.getAttribute('data-flat-index'),
         insideToolCall: !!toolCall,
         toolCallId: toolCall?.getAttribute('data-tool-call-id'),
         insideHeader: !!header,
@@ -79,12 +79,12 @@ async function main() {
     // Loading indicators
     const loadingEls = container.querySelectorAll('.loading-indicator-v3');
     for (const el of Array.from(loadingEls)) {
-      const wrapper = el.closest('[data-flat-index]');
+      const wrapper = el.closest('[data-message-index], [data-flat-index]');
       out.push({
         type: 'loading-indicator',
         text: (el.textContent || '').trim().substring(0, 200),
         wrapperText: (wrapper?.textContent || '').trim().substring(0, 200),
-        wrapperFlatIndex: wrapper?.getAttribute('data-flat-index'),
+        wrapperFlatIndex: wrapper?.getAttribute('data-message-index') || wrapper?.getAttribute('data-flat-index'),
         classes: el.className,
         wrapperClasses: wrapper?.className || '',
       });
@@ -94,12 +94,12 @@ async function main() {
     const thinkingCollapsibles = container.querySelectorAll('.ui-collapsible.ui-thinking-collapsible');
     for (const tc of Array.from(thinkingCollapsibles).slice(0, 15)) {
       const hdr = tc.querySelector('.ui-collapsible-header');
-      const wrapper = tc.closest('[data-flat-index]');
+      const wrapper = tc.closest('[data-message-index], [data-flat-index]');
       out.push({
         type: 'ui-thinking-collapsible',
         headerText: (hdr?.textContent || '').replace(/\s+/g, ' ').trim().substring(0, 200),
         hasMakeShine: !!tc.querySelector('.make-shine') || !!hdr?.querySelector('.make-shine'),
-        wrapperFlatIndex: wrapper?.getAttribute('data-flat-index'),
+        wrapperFlatIndex: wrapper?.getAttribute('data-message-index') || wrapper?.getAttribute('data-flat-index'),
         dataOpen: tc.getAttribute('data-open'),
         dataExpandable: tc.getAttribute('data-expandable'),
       });
@@ -110,7 +110,7 @@ async function main() {
     for (const sg of Array.from(stepGroups)) {
       const header = sg.querySelector('.ui-collapsible-header');
       if (!header) continue;
-      const wrapper = sg.closest('[data-flat-index]');
+      const wrapper = sg.closest('[data-message-index], [data-flat-index]');
       const allChildren = header.querySelectorAll('*');
       const animatedClasses: string[] = [];
       for (const child of Array.from(allChildren)) {
@@ -125,7 +125,7 @@ async function main() {
         type: 'step-group-header',
         text: (header.textContent || '').trim().substring(0, 200),
         headerClasses: hEl.className,
-        wrapperFlatIndex: wrapper?.getAttribute('data-flat-index'),
+        wrapperFlatIndex: wrapper?.getAttribute('data-message-index') || wrapper?.getAttribute('data-flat-index'),
         childClasses: animatedClasses.slice(0, 20),
         animation: computed.animation || computed.getPropertyValue('animation'),
         transition: computed.transition,
@@ -135,10 +135,10 @@ async function main() {
     }
 
     // Last [data-flat-index] element — often the most interesting (tail of chat)
-    const allFlatIdx = container.querySelectorAll('[data-flat-index]');
+    const allFlatIdx = container.querySelectorAll('[data-message-index], [data-flat-index]');
     if (allFlatIdx.length > 0) {
       const lastWrapper = allFlatIdx[allFlatIdx.length - 1] as HTMLElement;
-      const fi = lastWrapper.getAttribute('data-flat-index');
+      const fi = lastWrapper.getAttribute('data-message-index') || lastWrapper.getAttribute('data-flat-index');
       const role = lastWrapper.getAttribute('data-tab0-role');
       const kind = lastWrapper.getAttribute('data-tab0-kind');
       const stepGroup = lastWrapper.querySelector('.ui-collapsible.ui-step-group-collapsible');
@@ -165,13 +165,13 @@ async function main() {
       try {
         const els = container.querySelectorAll(sel);
         for (const el of Array.from(els).slice(0, 5)) {
-          const wrapper = el.closest('[data-flat-index]');
+          const wrapper = el.closest('[data-message-index], [data-flat-index]');
           out.push({
             type: 'shimmer-pattern',
             selector: sel,
             text: (el.textContent || '').trim().substring(0, 100),
             classes: el.className.substring(0, 200),
-            wrapperFlatIndex: wrapper?.getAttribute('data-flat-index'),
+            wrapperFlatIndex: wrapper?.getAttribute('data-message-index') || wrapper?.getAttribute('data-flat-index'),
             tag: el.tagName,
           });
         }
