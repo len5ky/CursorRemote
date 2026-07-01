@@ -7,7 +7,7 @@ import type { WindowMonitor } from '../../window-monitor.js';
 import { escapeHtml, formatElement, formatPlanFull, mergeFormattedBlocks, splitMessage } from './formatter.js';
 import type { PlanBlock } from '../../types.js';
 import { cleanTabTitle } from '../../dom-extractor.js';
-import { normalizeWindowTitle } from './topic-manager.js';
+import { normalizeWindowTitle, findWindowForMapping } from './topic-manager.js';
 import { tgKeyboard, type BotContext, type TelegramApiClient } from './tg-types.js';
 
 export interface CommandDeps {
@@ -1257,20 +1257,21 @@ export async function handleTextMessage(ctx: BotContext, deps: CommandDeps): Pro
   const commandId = genId();
 
   const currentWin = state.windows.find(w => w.id === state.activeWindowId);
-  const alreadyOnWindow = currentWin && (
-    currentWin.id === mapping.windowId ||
-    currentWin.title.toLowerCase() === mapping.windowTitle.toLowerCase()
-  );
+  const mappedWin = findWindowForMapping(state.windows, mapping);
+  const alreadyOnWindow = currentWin && mappedWin && currentWin.id === mappedWin.id;
 
   if (!alreadyOnWindow) {
     await deps.cdpBridge.refreshWindows();
     deps.stateManager.updateWindows(deps.cdpBridge.windows, deps.cdpBridge.activeTargetId);
     state = deps.stateManager.getCurrentState();
 
-    let targetWin = state.windows.find(w => w.id === mapping.windowId);
-    if (!targetWin) {
-      targetWin = state.windows.find(w => w.title.toLowerCase() === mapping.windowTitle.toLowerCase());
-      if (targetWin) mapping.windowId = targetWin.id;
+    let targetWin = findWindowForMapping(state.windows, mapping);
+    if (targetWin) {
+      if (targetWin.id !== mapping.windowId || targetWin.title !== mapping.windowTitle) {
+        mapping.windowId = targetWin.id;
+        mapping.windowTitle = targetWin.title;
+        deps.topicManager.persistInPlace();
+      }
     }
 
     if (!targetWin) {

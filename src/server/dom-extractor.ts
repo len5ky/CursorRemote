@@ -109,12 +109,37 @@ export function extractionFunction(
     if (!container) return null;
 
     const flatIndexEls = container.querySelectorAll('[data-flat-index]');
+    // Cursor 3.8+ often omits data-flat-index; messages carry data-message-role directly
+    // on .composer-rendered-message nodes inside .composer-messages-container.
+    let messageWrappers: Element[];
+    if (flatIndexEls.length > 0) {
+      messageWrappers = Array.from(flatIndexEls);
+    } else {
+      const msgsRoot =
+        container.querySelector('.composer-messages-container') || container;
+      messageWrappers = Array.from(
+        msgsRoot.querySelectorAll('.composer-rendered-message[data-message-role]')
+      );
+      if (messageWrappers.length === 0) {
+        messageWrappers = Array.from(
+          msgsRoot.querySelectorAll('[data-message-role][data-message-id]')
+        );
+      }
+      // Drop nested duplicates (tool cards sometimes wrap an inner [data-message-role]).
+      messageWrappers = messageWrappers.filter((el) => {
+        const outer = el.parentElement?.closest(
+          '.composer-rendered-message[data-message-role]'
+        );
+        return !outer || outer === el;
+      });
+    }
+
     let containerComposerId =
       container.getAttribute('data-composer-id') ||
       container.closest('[data-composer-id]')?.getAttribute('data-composer-id') ||
       '';
-    if (!containerComposerId && flatIndexEls.length > 0) {
-      const firstMsg = flatIndexEls[0];
+    if (!containerComposerId && messageWrappers.length > 0) {
+      const firstMsg = messageWrappers[0];
       containerComposerId = firstMsg.closest('[data-composer-id]')?.getAttribute('data-composer-id') || '';
     }
 
@@ -861,8 +886,13 @@ export function extractionFunction(
       };
     }
 
-    for (const wrapper of Array.from(flatIndexEls)) {
-      const flatIndex = parseInt(wrapper.getAttribute('data-flat-index') || '0', 10);
+    for (const wrapper of messageWrappers) {
+      const flatIndex = parseInt(
+        wrapper.getAttribute('data-flat-index') ||
+          wrapper.getAttribute('data-message-index') ||
+          '0',
+        10
+      );
 
       const msgEl = wrapper.querySelector('[data-message-role]') || wrapper;
       const role = msgEl.getAttribute('data-message-role');
@@ -1139,7 +1169,7 @@ export function extractionFunction(
     const _orphanIndicators: Array<{ cls: string; text: string; parentCls: string }> = [];
     const allIndicators = container.querySelectorAll('.loading-indicator-v3, .make-shine');
     for (const ind of Array.from(allIndicators)) {
-      if (ind.closest('[data-flat-index]')) continue;
+      if (ind.closest('[data-flat-index]') || ind.closest('[data-message-role]')) continue;
       _orphanIndicators.push({
         cls: ind.className.substring(0, 200),
         text: (ind.textContent || '').trim().substring(0, 120),

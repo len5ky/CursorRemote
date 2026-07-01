@@ -48,6 +48,41 @@ export function normalizeWindowTitle(title: string): string {
     .trim();
 }
 
+/** e.g. "Kapps — shopi.world (Workspace)" → "shopi.world" */
+export function workspaceFolderFromTitle(title: string): string | null {
+  const norm = normalizeWindowTitle(title);
+  const m = norm.match(/—\s*(.+?)\s*\(Workspace\)\s*$/i);
+  return m ? m[1].trim().toLowerCase() : null;
+}
+
+/** Resolve a live window when windowId/title changed (rename, reinstall, extension prefix). */
+export function findWindowForMapping(
+  windows: CursorWindow[],
+  mapping: Pick<TopicMapping, 'windowId' | 'windowTitle'>,
+): CursorWindow | undefined {
+  let target = windows.find((w) => w.id === mapping.windowId);
+  if (target) return target;
+
+  const mapNorm = normalizeWindowTitle(mapping.windowTitle).toLowerCase();
+  target = windows.find(
+    (w) => normalizeWindowTitle(w.title).toLowerCase() === mapNorm,
+  );
+  if (target) return target;
+
+  target = windows.find(
+    (w) => w.title.toLowerCase() === mapping.windowTitle.toLowerCase(),
+  );
+  if (target) return target;
+
+  const mapWs = workspaceFolderFromTitle(mapping.windowTitle);
+  if (mapWs) {
+    target = windows.find((w) => workspaceFolderFromTitle(w.title) === mapWs);
+    if (target) return target;
+  }
+
+  return undefined;
+}
+
 function makeTitleKey(windowTitle: string, tabTitle: string): string {
   return `${normalizeWindowTitle(windowTitle).toLowerCase()}::${cleanTabTitle(tabTitle).toLowerCase()}`;
 }
