@@ -25,6 +25,8 @@ const FORBIDDEN_PATTERNS = [
   'src/',
   'scripts/',
   '.cursor/',
+  'tmp/',
+  'temp/',
 ];
 
 function main(): void {

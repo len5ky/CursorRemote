@@ -6,6 +6,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.48] - 2026-07-07
+
+### Fixed
+- **Packaging**: internal development files under `tmp/` are no longer included in the extension package. They were accidentally packaged in 0.1.45–0.1.47; the published artifacts for those versions have been replaced with cleaned builds.
+
 ## [0.1.47] - 2026-07-07
 
 ### Fixed

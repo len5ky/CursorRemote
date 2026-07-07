@@ -10,6 +10,7 @@ scripts/
 temp/
 temp2
 temp2/
+tmp/
 docs/
 data/
 releases/
