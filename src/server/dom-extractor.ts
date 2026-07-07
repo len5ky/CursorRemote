@@ -34,19 +34,13 @@ export function selectMessageWrappers(container: ParentNode): MessageWrapperSele
     });
   };
 
-  let wrappers = dedupeNestedMatches(
-    Array.from(container.querySelectorAll('[data-flat-index], [data-message-index]'))
+  const wrappers = dedupeNestedMatches(
+    Array.from(
+      container.querySelectorAll(
+        '[data-flat-index], [data-message-index], .composer-rendered-message[data-message-role], [data-message-role][data-message-id]'
+      )
+    )
   );
-  if (wrappers.length === 0) {
-    wrappers = dedupeNestedMatches(
-      Array.from(container.querySelectorAll('.composer-rendered-message[data-message-role]'))
-    );
-  }
-  if (wrappers.length === 0) {
-    wrappers = dedupeNestedMatches(
-      Array.from(container.querySelectorAll('[data-message-role][data-message-id]'))
-    );
-  }
 
   return wrappers.map((element, position) => {
     const rawIndex = element.getAttribute('data-flat-index') ?? element.getAttribute('data-message-index');
@@ -166,19 +160,13 @@ export function extractionFunction(
       });
     }
 
-    let messageWrappers = dedupeNestedMessageMatches(
-      Array.from(container.querySelectorAll('[data-flat-index], [data-message-index]'))
+    const messageWrappers = dedupeNestedMessageMatches(
+      Array.from(
+        container.querySelectorAll(
+          '[data-flat-index], [data-message-index], .composer-rendered-message[data-message-role], [data-message-role][data-message-id]'
+        )
+      )
     );
-    if (messageWrappers.length === 0) {
-      messageWrappers = dedupeNestedMessageMatches(
-        Array.from(container.querySelectorAll('.composer-rendered-message[data-message-role]'))
-      );
-    }
-    if (messageWrappers.length === 0) {
-      messageWrappers = dedupeNestedMessageMatches(
-        Array.from(container.querySelectorAll('[data-message-role][data-message-id]'))
-      );
-    }
 
     let containerComposerId =
       container.getAttribute('data-composer-id') ||
@@ -939,7 +927,12 @@ export function extractionFunction(
 
       const msgEl = wrapper.querySelector('[data-message-role]') || wrapper;
       const role = msgEl.getAttribute('data-message-role');
-      const kind = msgEl.getAttribute('data-message-kind');
+      const rowKind = msgEl.getAttribute('data-react-transcript-row-kind');
+      // Observed but intentionally unmapped row-kind values: workGroup, turnActions,
+      // activityGroup, activity, tailStatus.
+      const kind =
+        msgEl.getAttribute('data-message-kind') ||
+        (rowKind === 'assistantMarkdown' ? 'assistant' : null);
       const messageId = msgEl.getAttribute('data-message-id') || `fi-${flatIndex}`;
 
       const rawEl = {

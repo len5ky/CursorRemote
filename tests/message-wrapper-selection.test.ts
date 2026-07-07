@@ -37,6 +37,42 @@ describe('message wrapper selection', () => {
     assert.deepEqual(selected.map(item => item.index), [4, 5]);
   });
 
+  it('includes mixed Cursor 3.8 role/id AI rows alongside indexed human rows', () => {
+    const root = containerFor(`
+      <section data-message-index="0" data-message-role="human" data-message-kind="human" data-message-id="h1"></section>
+      <div class="virtualized-composer-messages-row" data-find-row-key="assistant-markdown:a1">
+        <article data-message-role="ai" data-message-id="a1" data-react-transcript-row-kind="assistantMarkdown"></article>
+      </div>
+    `);
+
+    const selected = selectMessageWrappers(root);
+
+    assert.equal(selected.length, 2);
+    assert.deepEqual(selected.map(item => item.index), [0, 1]);
+    assert.deepEqual(selected.map(item => item.element.getAttribute('data-message-id')), ['h1', 'a1']);
+  });
+
+  it('preserves legacy flat-index wrappers when descendant message nodes also match', () => {
+    const root = containerFor(`
+      <article data-flat-index="0">
+        <div class="composer-rendered-message" data-message-role="human" data-message-kind="human" data-message-id="h1"></div>
+      </article>
+      <article data-flat-index="1">
+        <div class="composer-rendered-message" data-message-role="ai" data-message-kind="assistant" data-message-id="a1"></div>
+      </article>
+      <article data-flat-index="2">
+        <div class="composer-rendered-message" data-message-role="ai" data-message-kind="tool" data-message-id="t1"></div>
+      </article>
+    `);
+
+    const selected = selectMessageWrappers(root);
+
+    assert.equal(selected.length, 3);
+    assert.deepEqual(selected.map(item => item.index), [0, 1, 2]);
+    assert.deepEqual(selected.map(item => item.element.getAttribute('data-flat-index')), ['0', '1', '2']);
+    assert.deepEqual(selected.map(item => item.element.getAttribute('data-message-id')), [null, null, null]);
+  });
+
   it('dedupes nested transitional flat-index and message-index matches', () => {
     const root = containerFor(`
       <article data-flat-index="7">

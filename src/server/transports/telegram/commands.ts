@@ -1188,7 +1188,12 @@ export async function handleCallbackQuery(ctx: BotContext, deps: CommandDeps): P
         await ctx.answerCallbackQuery({ text: 'Action expired.' });
         return;
       }
-      const result = await deps.commandExecutor.clickAction(commandId, qSelector);
+      const qActionLabel: Record<string, string | undefined> = {
+        qan: undefined,
+        qsk: 'Skip',
+        qco: 'Continue',
+      };
+      const result = await deps.commandExecutor.clickAction(commandId, qSelector, qActionLabel[action]);
       const qNames: Record<string, string> = { qan: 'Answered', qsk: 'Skipped', qco: 'Continued' };
       await ctx.answerCallbackQuery({ text: result.ok ? qNames[action] ?? action : `Error: ${result.error}` });
       return;

@@ -29,6 +29,25 @@ const FORBIDDEN_PATTERNS = [
   'temp/',
 ];
 
+// Allowlist: every file in the VSIX must match, or verification fails.
+// If a new file is intentional, add it here consciously — this list is the
+// gate that keeps stray private files out of published packages.
+const ALLOWED_ZIP_ROOT = ['[Content_Types].xml', 'extension.vsixmanifest'];
+const ALLOWED_EXACT = [
+  'LICENSE.txt',
+  'changelog.md',
+  'readme.md',
+  'package.json',
+  'selectors.json',
+  'dist/extension.cjs',
+  'dist/server/bundle.mjs',
+];
+const ALLOWED_PREFIXES = [
+  'dist/client/',
+  'media/',
+  'extension/media/walkthrough/',
+];
+
 function main(): void {
   const vsixArg = process.argv[2];
   let vsixPath: string;
@@ -87,6 +106,25 @@ with zipfile.ZipFile(sys.argv[1]) as z:
       if (matches.length > 5) console.error(`      … and ${matches.length - 5} more`);
       errors++;
     }
+  }
+
+  console.log('\n— Allowlist —');
+  const unexpected = files.filter(f => {
+    if (f.endsWith('/')) return false;
+    if (ALLOWED_ZIP_ROOT.includes(f)) return false;
+    if (!f.startsWith('extension/')) return true;
+    const inner = f.replace(/^extension\//, '');
+    if (ALLOWED_EXACT.includes(inner)) return false;
+    return !ALLOWED_PREFIXES.some(p => inner.startsWith(p));
+  });
+  if (unexpected.length === 0) {
+    console.log('  ✓ Every file matches the allowlist');
+  } else {
+    console.error(`  ✗ ${unexpected.length} file(s) NOT on the allowlist:`);
+    for (const u of unexpected.slice(0, 10)) console.error(`      ${u}`);
+    if (unexpected.length > 10) console.error(`      … and ${unexpected.length - 10} more`);
+    console.error('    If a file is intentional, add it to ALLOWED_* in scripts/verify-vsix.ts.');
+    errors++;
   }
 
   const pkg = JSON.parse(readFileSync(PKG_PATH, 'utf-8'));

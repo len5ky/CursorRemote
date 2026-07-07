@@ -174,6 +174,149 @@ export const MODEL_MENU_LOOKUP_JS = `
   };
 `;
 
+export type ActionClickTargetResult = { element: Element } | { error: string };
+
+const ACTION_BUTTON_SELECTOR = 'button, [role="button"], [class*="ui-button"]';
+
+function normalizeActionLabel(value: string | null | undefined): string {
+  return (value ?? '').trim().toLowerCase();
+}
+
+function elementLabelMatches(element: Element, expectedLabel: string): boolean {
+  return normalizeActionLabel(element.textContent) === normalizeActionLabel(expectedLabel);
+}
+
+function isElementRoot(root: Document | Element): root is Element {
+  return root.nodeType === 1;
+}
+
+function queryWithin(root: Document | Element, selector: string): Element | null {
+  try {
+    if (isElementRoot(root) && root.matches(selector)) return root;
+    return root.querySelector(selector);
+  } catch {
+    return null;
+  }
+}
+
+function firstSelectorSegment(selectorPath: string): string {
+  return selectorPath.split('>')[0]?.trim() ?? '';
+}
+
+function actionSearchRoot(root: Document | Element, selectorPath: string): Document | Element {
+  const firstSegment = firstSelectorSegment(selectorPath);
+  if (!firstSegment) return root;
+  return queryWithin(root, firstSegment) ?? root;
+}
+
+function buttonLikeCandidates(root: Document | Element): Element[] {
+  const descendants = Array.from(root.querySelectorAll(ACTION_BUTTON_SELECTOR));
+  if (isElementRoot(root) && root.matches(ACTION_BUTTON_SELECTOR)) {
+    return [root, ...descendants.filter(el => el !== root)];
+  }
+  return descendants;
+}
+
+function matchingResolvedActionTarget(element: Element, expectedLabel: string): Element | null {
+  const closest = element.closest(ACTION_BUTTON_SELECTOR);
+  if (closest && elementLabelMatches(closest, expectedLabel)) return closest;
+  if (element.matches(ACTION_BUTTON_SELECTOR) && elementLabelMatches(element, expectedLabel)) return element;
+
+  for (const child of Array.from(element.querySelectorAll(ACTION_BUTTON_SELECTOR))) {
+    if (elementLabelMatches(child, expectedLabel)) return child;
+  }
+
+  if (elementLabelMatches(element, expectedLabel)) return element;
+  return null;
+}
+
+// Keep in sync with ACTION_CLICK_RESOLVER_JS below.
+export function resolveActionClickTarget(
+  root: Document | Element,
+  selectorPath: string,
+  expectedLabel: string
+): ActionClickTargetResult {
+  const resolved = queryWithin(root, selectorPath);
+  if (resolved) {
+    const matched = matchingResolvedActionTarget(resolved, expectedLabel);
+    if (matched) return { element: matched };
+  }
+
+  const scope = actionSearchRoot(root, selectorPath);
+  const matches = buttonLikeCandidates(scope)
+    .filter(element => elementLabelMatches(element, expectedLabel));
+
+  if (matches.length === 1) return { element: matches[0] };
+  return { error: `action target not found (label: ${expectedLabel})` };
+}
+
+// Keep in sync with resolveActionClickTarget() above. Inject as
+// `${ACTION_CLICK_RESOLVER_JS}` inside an evaluate().
+export const ACTION_CLICK_RESOLVER_JS = `
+  const ACTION_BUTTON_SELECTOR = 'button, [role="button"], [class*="ui-button"]';
+
+  const normalizeActionLabel = (value) => (value || '').trim().toLowerCase();
+
+  const elementLabelMatches = (element, expectedLabel) =>
+    normalizeActionLabel(element.textContent) === normalizeActionLabel(expectedLabel);
+
+  const queryWithin = (root, selector) => {
+    try {
+      if (root instanceof Element && root.matches(selector)) return root;
+      return root.querySelector(selector);
+    } catch {
+      return null;
+    }
+  };
+
+  const firstSelectorSegment = (selectorPath) => {
+    const first = selectorPath.split('>')[0];
+    return first ? first.trim() : '';
+  };
+
+  const actionSearchRoot = (root, selectorPath) => {
+    const firstSegment = firstSelectorSegment(selectorPath);
+    if (!firstSegment) return root;
+    return queryWithin(root, firstSegment) || root;
+  };
+
+  const buttonLikeCandidates = (root) => {
+    const descendants = Array.from(root.querySelectorAll(ACTION_BUTTON_SELECTOR));
+    if (root instanceof Element && root.matches(ACTION_BUTTON_SELECTOR)) {
+      return [root, ...descendants.filter(el => el !== root)];
+    }
+    return descendants;
+  };
+
+  const matchingResolvedActionTarget = (element, expectedLabel) => {
+    const closest = element.closest(ACTION_BUTTON_SELECTOR);
+    if (closest && elementLabelMatches(closest, expectedLabel)) return closest;
+    if (element.matches(ACTION_BUTTON_SELECTOR) && elementLabelMatches(element, expectedLabel)) return element;
+
+    for (const child of Array.from(element.querySelectorAll(ACTION_BUTTON_SELECTOR))) {
+      if (elementLabelMatches(child, expectedLabel)) return child;
+    }
+
+    if (elementLabelMatches(element, expectedLabel)) return element;
+    return null;
+  };
+
+  const resolveActionClickTarget = (root, selectorPath, expectedLabel) => {
+    const resolved = queryWithin(root, selectorPath);
+    if (resolved) {
+      const matched = matchingResolvedActionTarget(resolved, expectedLabel);
+      if (matched) return { element: matched };
+    }
+
+    const scope = actionSearchRoot(root, selectorPath);
+    const matches = buttonLikeCandidates(scope)
+      .filter(element => elementLabelMatches(element, expectedLabel));
+
+    if (matches.length === 1) return { element: matches[0] };
+    return { error: 'action target not found (label: ' + expectedLabel + ')' };
+  };
+`;
+
 export class CommandExecutor {
   private selectors: SelectorConfig;
   private client: CdpClient | null = null;
@@ -476,10 +619,33 @@ export class CommandExecutor {
     });
   }
 
-  async clickAction(commandId: string, selectorPath: string): Promise<CommandResult> {
+  async clickAction(commandId: string, selectorPath: string, expectedLabel?: string): Promise<CommandResult> {
     return this.withRetry(commandId, async (client) => {
-      await client.click(selectorPath);
-      console.log(`[command-executor] Clicked action: ${selectorPath.substring(0, 60)}`);
+      if (expectedLabel === undefined) {
+        await client.click(selectorPath);
+        console.log(`[command-executor] Clicked action: ${selectorPath.substring(0, 60)}`);
+        return;
+      }
+
+      const result = await client.evaluate(`
+        (() => {
+          ${ACTION_CLICK_RESOLVER_JS}
+
+          const selectorPath = ${JSON.stringify(selectorPath)};
+          const expectedLabel = ${JSON.stringify(expectedLabel)};
+          const target = resolveActionClickTarget(document, selectorPath, expectedLabel);
+          if (!target.element) return { ok: false, error: target.error };
+
+          target.element.scrollIntoView({ block: 'center', behavior: 'instant' });
+          target.element.click();
+          return { ok: true };
+        })()
+      `) as { ok: boolean; error?: string } | null;
+
+      if (!result?.ok) {
+        throw new Error(result?.error ?? `action target not found (label: ${expectedLabel})`);
+      }
+      console.log(`[command-executor] Clicked action: ${selectorPath.substring(0, 60)} (${expectedLabel})`);
     });
   }
 

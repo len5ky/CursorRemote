@@ -618,7 +618,8 @@ export class Relay {
         console.log(`[relay] Command: click_action from ${socket.id}`);
         const result = await this.commandExecutor.clickAction(
           payload.commandId,
-          payload.selectorPath
+          payload.selectorPath,
+          payload.actionLabel
         );
         socket.emit('command:result', result);
       });

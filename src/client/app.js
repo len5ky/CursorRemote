@@ -299,6 +299,7 @@
     socket.emit('command:click_action', {
       commandId: newCommandId(),
       selectorPath: state.questionnaire.skipSelectorPath,
+      actionLabel: 'Skip',
     });
     showToast('Skip sent', 'success');
   });
@@ -308,6 +309,7 @@
     socket.emit('command:click_action', {
       commandId: newCommandId(),
       selectorPath: state.questionnaire.continueSelectorPath,
+      actionLabel: 'Continue',
     });
     showToast('Continue sent', 'success');
   });
@@ -986,10 +988,11 @@
 
   // --- Plan block ---
 
-  function emitClickAction(selectorPath) {
+  function emitClickAction(selectorPath, actionLabel) {
     socket.emit('command:click_action', {
       commandId: newCommandId(),
       selectorPath,
+      actionLabel,
     });
   }
 
@@ -1253,7 +1256,7 @@
           btn.type = 'button';
           btn.className = 'plan-btn plan-btn-build';
           btn.textContent = buildAct.label || 'Build';
-          btn.addEventListener('click', () => emitClickAction(buildAct.selectorPath));
+          btn.addEventListener('click', () => emitClickAction(buildAct.selectorPath, buildAct.label || 'Build'));
           right.appendChild(btn);
         }
       }
@@ -1331,6 +1334,7 @@
         socket.emit('command:click_action', {
           commandId: newCommandId(),
           selectorPath: action.selectorPath,
+          actionLabel: action.label,
         });
       });
       container.appendChild(btn);
@@ -1567,6 +1571,7 @@
         optBtn.dataset.selectorPath = opt.selectorPath;
         optBtn.dataset.questionNumber = question.number;
         optBtn.dataset.letter = opt.letter;
+        optBtn.dataset.label = opt.label;
         optBtn.addEventListener('click', function() {
           questionnaireSelections[this.dataset.questionNumber] = this.dataset.letter;
           var siblings = this.parentNode.querySelectorAll('.questionnaire-option');
@@ -1575,6 +1580,7 @@
           socket.emit('command:click_action', {
             commandId: newCommandId(),
             selectorPath: this.dataset.selectorPath,
+            actionLabel: this.dataset.label,
           });
           showToast('Answer sent', 'success');
         });

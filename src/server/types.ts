@@ -318,6 +318,7 @@ export interface CommandPayload {
   approvalId?: string;
   actionType?: string;
   selectorPath?: string;
+  actionLabel?: string;
   composerId?: string;
   modeId?: string;
   modelId?: string;

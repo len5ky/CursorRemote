@@ -6,6 +6,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.49] - 2026-07-07
+
+### Fixed
+- **Assistant messages dropped on Cursor 3.8+ mixed-transcript DOM**: on current Cursor builds human turns still carry `data-message-index`, but AI rows now expose only `data-message-role` + `data-message-id`, so the v0.1.47 fallback (gated on a zero-match count) never fired and assistant replies silently disappeared from the web client and Telegram. Extraction now uses a merged union selector with nested-ancestor de-dupe to pick up both row populations, and maps `data-react-transcript-row-kind="assistantMarkdown"` to the assistant classifier. Pre-3.8 extraction is provably unchanged (pinned by a unit-tested invariant). Fixes [public#44](https://github.com/len5ky/CursorRemote/issues/44) (issue 1); thanks @habruzzo for the field report and probe data that drove the fix.
+- **Questionnaire action buttons needed two or three taps on Cursor 3.8+**: Cursor replaced the `composer-questionnaire-*` classes with atomic CSS, so the stored positional selectors resolved to inert sibling elements and the first tap (or two) did nothing. The command executor now verifies the resolved element's text against the action label and prefers a scoped text-content match; when it can't find anything better it falls back to the legacy positional click, so working setups are unaffected. Fixes [public#44](https://github.com/len5ky/CursorRemote/issues/44) (issue 2); thanks @habruzzo.
+
+### Changed
+- VSIX packaging verification is now allowlist-based — the build fails on any file outside the expected runtime set, instead of only checking a denylist of known-bad paths.
+
 ## [0.1.48] - 2026-07-07
 
 ### Fixed
