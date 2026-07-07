@@ -46,7 +46,7 @@ The CursorRemote extension provides the easiest setup experience with built-in s
 Download the latest `.vsix` from [releases](https://github.com/len5ky/CursorRemote/releases) and install:
 
 ```bash
-cursor --install-extension cursor-remote-0.1.46.vsix
+cursor --install-extension cursor-remote-0.1.47.vsix
 ```
 
 Or in Cursor: Command Palette (`Ctrl+Shift+P`) > **Extensions: Install from VSIX...** > select the file.
@@ -237,7 +237,7 @@ The server prints the registration token on startup:
 1. Create a Telegram group
 2. Add your bot to the group
 3. **Enable Topics**: Group Settings > Topics > Enable
-4. **Make bot admin**: Group Settings > Administrators > Add bot with all permissions (especially Manage Topics, Delete Messages, Pin Messages)
+4. **Make bot admin**: Group Settings > Administrators > Add bot with all permissions (especially Manage Topics, Delete Messages)
 
 ### 4.5 Register and Sync
 
@@ -258,7 +258,7 @@ The bot checks permissions and creates topics for all current windows. From now 
 | `/cleanup` | Delete stale/untracked topics, keep active ones |
 | `/purge` | Delete ALL topics (runs in background) |
 | `/status` | Sync state, connection, agent info, group ID |
-| `/history [N]` | Last N messages (default 30). `/history 100` for more |
+| `/history [N]` | Last N messages (default 5). `/history 100` for more |
 | `/mode` | Show/switch mode (Agent/Plan/Ask/Debug) |
 | `/model` | Show current model |
 | `/plan <text>` | Prompt in Plan mode |
@@ -374,7 +374,7 @@ Ensure `data/license.key` exists before running `npm start` (no prompt in produc
 
 #### /sync says "missing permissions"
 - Go to Group Settings > Administrators > Bot > enable all listed permissions
-- Required: Manage Topics, Delete Messages, Pin Messages
+- Required: Manage Topics, Delete Messages
 
 #### Build doesn't work on macOS
 - `npm run build` compiles TS and copies `src/client/` to `dist/client/`

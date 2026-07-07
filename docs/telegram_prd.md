@@ -238,7 +238,7 @@ The bot uses token-based authentication. On first startup, a registration token 
 | `/cleanup` | — | Delete untracked/stale topics, keep active synced ones. |
 | `/purge` | — | Delete ALL forum topics (nuclear reset, runs in background). |
 | `/status` | — | Show sync state, group ID, connection, agent status, mode, model |
-| `/history` | `[count]` | Send last N messages (default 30) of the active conversation. |
+| `/history` | `[count]` | Send last N messages (default 5) of the active conversation. |
 | `/mode` | — | Show current mode with inline keyboard to switch (Agent/Ask/Plan/Debug) |
 | `/model` | — | Show current model with inline keyboard to switch |
 | `/plan` | `<text>` | Switch to Plan mode and send the text as a prompt |
@@ -338,7 +338,7 @@ Three layers of protection:
 
 ### 7.3 Initial Sync Throttling
 
-When a topic thread is first seen by the bot (e.g. after restart or first `/sync`), only the last 5 messages are sent. Older messages are marked as "seen" in the tracker so they won't be re-sent. Use `/history [N]` to retrieve more (default 30, scrolls chat to load older messages).
+When a topic thread is first seen by the bot (e.g. after restart or first `/sync`), only the last 5 messages are sent. Older messages are marked as "seen" in the tracker so they won't be re-sent. Use `/history [N]` to retrieve more (default 5, scrolls chat to load older messages).
 
 ### 7.4 Message Batching
 
@@ -408,7 +408,7 @@ The Telegram transport is considered successful when:
 9. Run command cards show the command text and [Run]/[Skip]/[Allow] buttons
 10. Plan widgets show the todo list and [Build]/[View Plan] buttons
 11. Text sent in a topic is forwarded to the mapped Cursor agent (window/tab auto-switched)
-12. `/history [N]` sends the last N messages (default 30) with rate-limited pacing
+12. `/history [N]` sends the last N messages (default 5) with rate-limited pacing
 13. `/mode` and `/model` commands show current state and allow switching
 14. Typing indicator shown while agent is active
 15. `/unsync` cleanly disables sync and deletes tracked topics; `/purge` deletes all topics

@@ -62,7 +62,7 @@ Download the latest `.vsix` from [releases](https://github.com/len5ky/CursorRemo
 
 ```bash
 # From the command line
-cursor --install-extension cursor-remote-0.1.46.vsix
+cursor --install-extension cursor-remote-0.1.47.vsix
 ```
 
 Or in Cursor: open the Command Palette (`Ctrl+Shift+P`), run **Extensions: Install from VSIX...**, and select the file.
@@ -250,7 +250,7 @@ The easiest way to set up Telegram is via the **Setup Panel** — run **CursorRe
 | `/cleanup` | Delete stale/untracked topics |
 | `/purge` | Delete ALL topics (nuclear, runs in background) |
 | `/status` | Connection, sync, group ID, agent info |
-| `/history [N]` | Last N messages (default 30), scrolls chat to load more |
+| `/history [N]` | Last N messages (default 5), scrolls chat to load more |
 | `/mode` | Show/switch agent mode (switches to topic's window) |
 | `/model` | Show current model |
 | `/plan <text>` | Prompt in Plan mode |

@@ -845,11 +845,13 @@ export abstract class BaseTelegramTransport implements Transport {
       }
     }
 
-    // Process questionnaire using this thread's threadId (guaranteed to exist here).
-    // This ensures the questionnaire is sent even when a new topic was just created
-    // for messages (plan widget) in this same cycle.
-    const currentQuestionnaire = this.stateManager.getCurrentState().questionnaire;
-    await this.processQuestionnaireForThread(threadId, currentQuestionnaire);
+    // Process this window's questionnaire against this thread. Using the
+    // snapshot's own questionnaire (rather than the global home-window state)
+    // means the questions card reaches the correct topic even when the window
+    // is not the active CDP home window — the case where it was silently
+    // dropped before. Guaranteed threadId exists here, so a card created in the
+    // same cycle as a new topic still lands.
+    await this.processQuestionnaireForThread(threadId, snapshot.questionnaire ?? null);
   }
 
   private async sendNewMessage(

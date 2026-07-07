@@ -6,6 +6,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.47] - 2026-07-07
+
+### Fixed
+- **Message extraction broke on Cursor 3.8+ virtualized chat DOM**: newer Cursor builds virtualize the chat transcript and reshuffle the message wrapper markup, so the relay stopped finding `data-flat-index` / `data-message-role` nodes and the web client and Telegram showed an empty or frozen conversation. Extraction now falls back to the 3.8+ virtualized wrappers (with tightened guards so it never matches stray nodes), and the composer-targeting selectors in `command-executor` were refreshed to match. The new path is **fallback-only** — the legacy pre-3.8 extraction is tried first and its behavior is unchanged, so older Cursor builds are unaffected. Ports [public#39](https://github.com/len5ky/CursorRemote/pull/39) (thanks @gilzhaiek) with tightened fallbacks, and folds in the command-executor selector updates from [public#38](https://github.com/len5ky/CursorRemote/pull/38) (thanks @cachrisman). Closes [public#36](https://github.com/len5ky/CursorRemote/issues/36), [public#35](https://github.com/len5ky/CursorRemote/issues/35).
+- **Messages weren't sent for users with Cursor's "Submit with ⌘+Enter" setting**: the relay submits prompts by dispatching a plain Enter, which does nothing when Cursor is configured to require Cmd/Ctrl+Enter — the text just sat in the composer. The submit path now retries with Cmd/Ctrl+Enter as a fallback, firing only when the composer still contains the text 300ms after the plain Enter (so normal setups are unaffected). Closes [public#37](https://github.com/len5ky/CursorRemote/issues/37).
+- **Telegram questionnaire only rendered in one topic**: multiple-choice questionnaire cards were processed on the global state path, so with several Cursor windows/agents open the card surfaced in just one topic. Questionnaires are now routed per window through `doProcessWindow`, so each agent's questions render in its own topic, with the option labels folded into the change fingerprint to avoid missed updates. Ports [public#40](https://github.com/len5ky/CursorRemote/pull/40) (thanks @rodrigopavezi).
+- **Telegram bot token now stored in VS Code SecretStorage** instead of plaintext in `settings.json`. Existing tokens in `settings.json` are auto-migrated into SecretStorage on activation and cleared from settings. Closes [public#33](https://github.com/len5ky/CursorRemote/issues/33).
+
+### Changed
+- `/history` now documents its real default of 5 messages, and the setup docs no longer ask for the Telegram "Pin Messages" permission — the bot never pinned. The dead `can_pin_messages` check was also removed from `/sync`. Closes [public#29](https://github.com/len5ky/CursorRemote/issues/29), [public#30](https://github.com/len5ky/CursorRemote/issues/30).
+
 ## [0.1.46] - 2026-05-27
 
 ### Fixed

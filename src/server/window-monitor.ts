@@ -14,6 +14,7 @@ import type {
   CursorState,
   ModeInfo,
   ModelInfo,
+  Questionnaire,
   ServerConfig,
   SelectorConfig,
 } from './types.js';
@@ -32,6 +33,10 @@ export interface WindowSnapshot {
   composerQueue: ComposerQueueState;
   mode: ModeInfo;
   model: ModelInfo;
+  /** Agent multiple-choice questionnaire widget for this window, if present.
+   *  Extracted per window so its card can be routed to the correct topic even
+   *  when the window is not the active CDP home window. Null when absent. */
+  questionnaire: Questionnaire | null;
   lastUpdated: number;
   /** data-composer-id of the active composer in this window. Same agent shown
    *  via Cursor's global rail in another window will share this id; two
@@ -88,6 +93,20 @@ function approvalsFingerprint(approvals: { id: string; actions: { label: string;
   return approvals
     .map((a) => `${a.id}|${a.actions.map((act) => `${act.type}:${act.label}`).join(',')}`)
     .join(';');
+}
+
+/**
+ * Stable signature over the questionnaire widget. A questionnaire appearing,
+ * changing its active question, or clearing must trigger a snapshot emit so
+ * the per-window Telegram path can send/edit/delete the questions card. The
+ * home-window fast path already handles this via state patches, but non-home
+ * windows are only surfaced through window-monitor snapshots.
+ */
+export function questionnaireFingerprint(questionnaire: Questionnaire | null): string {
+  if (!questionnaire || questionnaire.questions.length === 0) return '';
+  const q = questionnaire.questions[questionnaire.activeIndex] ?? questionnaire.questions[0];
+  const optionLabels = q?.options.map((option) => option.label).join(',') ?? '';
+  return `${questionnaire.totalLabel}|${questionnaire.activeIndex}|${questionnaire.continueDisabled ? 1 : 0}|${q?.number ?? ''}|${q?.options.length ?? 0}|${optionLabels}`;
 }
 
 /**
@@ -236,6 +255,7 @@ export class WindowMonitor extends EventEmitter {
       composerQueue: state.composerQueue,
       mode: state.mode,
       model: state.model,
+      questionnaire: state.questionnaire,
       lastUpdated: Date.now(),
       activeComposerId: state.activeComposerId ?? '',
     };
@@ -245,6 +265,8 @@ export class WindowMonitor extends EventEmitter {
     const prevQueueSig = prev ? JSON.stringify(prev.composerQueue) : '';
     const approvalSig = approvalsFingerprint(snapshot.pendingApprovals);
     const prevApprovalSig = prev ? approvalsFingerprint(prev.pendingApprovals) : '';
+    const questionnaireSig = questionnaireFingerprint(snapshot.questionnaire);
+    const prevQuestionnaireSig = prev ? questionnaireFingerprint(prev.questionnaire) : '';
     const changed = !prev
       || prev.messages.length !== snapshot.messages.length
       || (prev.messages.length > 0 && prev.messages[prev.messages.length - 1]?.id !== snapshot.messages[snapshot.messages.length - 1]?.id)
@@ -253,6 +275,7 @@ export class WindowMonitor extends EventEmitter {
       || prev.agentActivityLive !== snapshot.agentActivityLive
       || prev.agentActivitySource !== snapshot.agentActivitySource
       || approvalSig !== prevApprovalSig
+      || questionnaireSig !== prevQuestionnaireSig
       || queueSig !== prevQueueSig
       || prev.mode?.current !== snapshot.mode?.current
       || prev.model?.current !== snapshot.model?.current
@@ -353,6 +376,7 @@ export class WindowMonitor extends EventEmitter {
           composerQueue: state.composerQueue,
           mode: state.mode,
           model: state.model,
+          questionnaire: state.questionnaire,
           lastUpdated: Date.now(),
           activeComposerId: state.activeComposerId ?? '',
         };
@@ -362,6 +386,8 @@ export class WindowMonitor extends EventEmitter {
         const pqSig = prev ? JSON.stringify(prev.composerQueue) : '';
         const aSig = approvalsFingerprint(snapshot.pendingApprovals);
         const paSig = prev ? approvalsFingerprint(prev.pendingApprovals) : '';
+        const qnSig = questionnaireFingerprint(snapshot.questionnaire);
+        const pqnSig = prev ? questionnaireFingerprint(prev.questionnaire) : '';
         const changed = !prev
           || prev.messages.length !== snapshot.messages.length
           || (prev.messages.length > 0 && prev.messages[prev.messages.length - 1]?.id !== snapshot.messages[snapshot.messages.length - 1]?.id)
@@ -370,6 +396,7 @@ export class WindowMonitor extends EventEmitter {
           || prev.agentActivityLive !== snapshot.agentActivityLive
           || prev.agentActivitySource !== snapshot.agentActivitySource
           || aSig !== paSig
+          || qnSig !== pqnSig
           || qSig !== pqSig
           || prev.mode?.current !== snapshot.mode?.current
           || prev.model?.current !== snapshot.model?.current

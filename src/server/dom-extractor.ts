@@ -14,6 +14,50 @@ import { applyDerivedActivityToState } from './activity-derive.js';
 const EVALUATE_TIMEOUT_MS = 5000;
 const MAX_POLL_BACKOFF_MS = 5000;
 
+export interface MessageWrapperSelection {
+  element: Element;
+  index: number;
+}
+
+// Keep this in sync with the inline copy inside extractionFunction. The inline
+// copy is required because extractionFunction is serialized into Cursor's renderer.
+export function selectMessageWrappers(container: ParentNode): MessageWrapperSelection[] {
+  const dedupeNestedMatches = (elements: Element[]): Element[] => {
+    const matched = new Set(elements);
+    return elements.filter((element) => {
+      let parent = element.parentElement;
+      while (parent) {
+        if (matched.has(parent)) return false;
+        parent = parent.parentElement;
+      }
+      return true;
+    });
+  };
+
+  let wrappers = dedupeNestedMatches(
+    Array.from(container.querySelectorAll('[data-flat-index], [data-message-index]'))
+  );
+  if (wrappers.length === 0) {
+    wrappers = dedupeNestedMatches(
+      Array.from(container.querySelectorAll('.composer-rendered-message[data-message-role]'))
+    );
+  }
+  if (wrappers.length === 0) {
+    wrappers = dedupeNestedMatches(
+      Array.from(container.querySelectorAll('[data-message-role][data-message-id]'))
+    );
+  }
+
+  return wrappers.map((element, position) => {
+    const rawIndex = element.getAttribute('data-flat-index') ?? element.getAttribute('data-message-index');
+    const parsedIndex = rawIndex === null ? NaN : parseInt(rawIndex, 10);
+    return {
+      element,
+      index: Number.isNaN(parsedIndex) ? position : parsedIndex,
+    };
+  });
+}
+
 /** Canonical tab title cleaning - matches extractionFunction's cleanTabTitle for consistent lookups. */
 export function cleanTabTitle(raw: string): string {
   let t = raw.trim().replace(/\s+/g, ' ');
@@ -25,8 +69,8 @@ export function cleanTabTitle(raw: string): string {
  * Runs inside Cursor's renderer process via Runtime.evaluate.
  * Must be completely self-contained (no Node.js imports).
  *
- * Uses Cursor's data attributes (data-flat-index, data-message-role,
- * data-message-kind, data-tool-status) for reliable extraction.
+ * Uses Cursor's data attributes (data-flat-index, data-message-index,
+ * data-message-role, data-message-kind, data-tool-status) for reliable extraction.
  */
 export function extractionFunction(
   containerSelectors: string[],
@@ -108,13 +152,40 @@ export function extractionFunction(
     const container = findFirst(containerSelectors);
     if (!container) return null;
 
-    const flatIndexEls = container.querySelectorAll('[data-flat-index]');
+    // Keep this in sync with selectMessageWrappers above. This copy must stay
+    // self-contained because extractionFunction is serialized into Cursor's renderer.
+    function dedupeNestedMessageMatches(elements: Element[]): Element[] {
+      const matched = new Set(elements);
+      return elements.filter((element) => {
+        let parent = element.parentElement;
+        while (parent) {
+          if (matched.has(parent)) return false;
+          parent = parent.parentElement;
+        }
+        return true;
+      });
+    }
+
+    let messageWrappers = dedupeNestedMessageMatches(
+      Array.from(container.querySelectorAll('[data-flat-index], [data-message-index]'))
+    );
+    if (messageWrappers.length === 0) {
+      messageWrappers = dedupeNestedMessageMatches(
+        Array.from(container.querySelectorAll('.composer-rendered-message[data-message-role]'))
+      );
+    }
+    if (messageWrappers.length === 0) {
+      messageWrappers = dedupeNestedMessageMatches(
+        Array.from(container.querySelectorAll('[data-message-role][data-message-id]'))
+      );
+    }
+
     let containerComposerId =
       container.getAttribute('data-composer-id') ||
       container.closest('[data-composer-id]')?.getAttribute('data-composer-id') ||
       '';
-    if (!containerComposerId && flatIndexEls.length > 0) {
-      const firstMsg = flatIndexEls[0];
+    if (!containerComposerId && messageWrappers.length > 0) {
+      const firstMsg = messageWrappers[0];
       containerComposerId = firstMsg.closest('[data-composer-id]')?.getAttribute('data-composer-id') || '';
     }
 
@@ -861,8 +932,10 @@ export function extractionFunction(
       };
     }
 
-    for (const wrapper of Array.from(flatIndexEls)) {
-      const flatIndex = parseInt(wrapper.getAttribute('data-flat-index') || '0', 10);
+    for (const [wrapperPosition, wrapper] of messageWrappers.entries()) {
+      const rawFlatIndex = wrapper.getAttribute('data-flat-index') ?? wrapper.getAttribute('data-message-index');
+      const parsedFlatIndex = rawFlatIndex === null ? NaN : parseInt(rawFlatIndex, 10);
+      const flatIndex = Number.isNaN(parsedFlatIndex) ? wrapperPosition : parsedFlatIndex;
 
       const msgEl = wrapper.querySelector('[data-message-role]') || wrapper;
       const role = msgEl.getAttribute('data-message-role');
@@ -1135,11 +1208,11 @@ export function extractionFunction(
       }
     }
 
-    // --- Orphan activity indicators (not inside any [data-flat-index]) ---
+    // --- Orphan activity indicators (not inside any message wrapper) ---
     const _orphanIndicators: Array<{ cls: string; text: string; parentCls: string }> = [];
     const allIndicators = container.querySelectorAll('.loading-indicator-v3, .make-shine');
     for (const ind of Array.from(allIndicators)) {
-      if (ind.closest('[data-flat-index]')) continue;
+      if (ind.closest('[data-flat-index], [data-message-index], .composer-rendered-message[data-message-role]')) continue;
       _orphanIndicators.push({
         cls: ind.className.substring(0, 200),
         text: (ind.textContent || '').trim().substring(0, 120),
@@ -1567,7 +1640,7 @@ export function extractionFunction(
                  sh.closest('.composer-terminal-top-header-text')) {
         text = (sh.textContent || '').trim();
       } else {
-        const descEl = (sh.closest('[data-flat-index]') || sh.parentElement)
+        const descEl = (sh.closest('[data-flat-index], [data-message-index], .composer-rendered-message[data-message-role]') || sh.parentElement)
           ?.querySelector('.composer-terminal-top-header-description, .ui-tool-call-line-action, .ui-edit-tool-call__filename');
         text = descEl ? (descEl.textContent || '').trim() : (sh.textContent || '').trim();
       }

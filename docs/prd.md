@@ -763,7 +763,7 @@ The system is considered successful when:
 11. The Telegram bot connects, users register with `/register <token>`, and `/sync` enables auto-sync to a forum group
 12. Topics are auto-created for new windows and chat tabs when sync is enabled. All windows monitored via parallel CDP connections (no UI switching)
 13. The active window+tab's conversation streams into its Telegram topic with proper formatting (last 5 messages on initial sync)
-14. `/history [N]` sends the last N messages (default 30) into the topic with rate-limited pacing
+14. `/history [N]` sends the last N messages (default 5) into the topic with rate-limited pacing
 15. Each ChatElement type renders with appropriate Telegram formatting (HTML, code blocks, inline keyboards)
 16. Approval inline buttons (Accept/Reject/Accept All) trigger the correct action in Cursor
 17. Run command cards show the command and offer Run/Skip/Allow inline buttons

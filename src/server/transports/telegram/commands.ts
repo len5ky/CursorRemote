@@ -111,8 +111,7 @@ export async function handleSync(ctx: BotContext, deps: CommandDeps): Promise<vo
         '⚠️ Bot is not an admin.\n\n' +
         'Go to Group Settings > Administrators > Add bot with these permissions:\n' +
         '• Manage Topics\n' +
-        '• Delete Messages\n' +
-        '• Pin Messages\n\n' +
+        '• Delete Messages\n\n' +
         'Then run /sync again.'
       );
       return;
@@ -121,7 +120,6 @@ export async function handleSync(ctx: BotContext, deps: CommandDeps): Promise<vo
       const missing: string[] = [];
       if (!member.can_manage_topics) missing.push('Manage Topics');
       if (!member.can_delete_messages) missing.push('Delete Messages');
-      if (!member.can_pin_messages) missing.push('Pin Messages');
       if (missing.length > 0) {
         await ctx.reply(
           `⚠️ Bot is missing permissions: ${missing.join(', ')}\n\n` +

@@ -146,7 +146,7 @@ export class ServerManager extends EventEmitter {
     }
 
     const licenseKey = await this.getLicenseKey();
-    const env = buildEnvFromConfig(this.context, licenseKey);
+    const env = await buildEnvFromConfig(this.context, licenseKey);
 
     const dataDir = env.DATA_DIR;
     if (!existsSync(dataDir)) {

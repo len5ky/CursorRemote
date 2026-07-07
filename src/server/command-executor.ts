@@ -5,6 +5,9 @@ const MAX_RETRIES = 2;
 const RETRY_DELAY_MS = 500;
 const FOCUS_DELAY_MS = 100;
 
+// Cursor 3.8+ uses data-message-index; older builds use data-flat-index.
+const MESSAGE_WRAPPER_SELECTOR = '[data-message-index], [data-flat-index]';
+
 // Resolves the currently-open model picker menu element across Cursor versions.
 // Older builds expose `[data-testid="model-picker-menu"]`; newer builds (~3.5.17)
 // removed the testid and render the picker as a generic `[role="menu"]` opened
@@ -230,6 +233,35 @@ export class CommandExecutor {
       // Step 4: Submit with Enter via CDP Input.dispatchKeyEvent
       await client.pressKey('Enter', 'Enter', 13);
       console.log(`[command-executor] Enter pressed via CDP Input.dispatchKeyEvent`);
+
+      const trimmedText = text.trim();
+      if (trimmedText.length > 0) {
+        await sleep(300);
+        const stillContainsTypedText = await client.evaluate(`
+          (() => {
+            const strategies = ${JSON.stringify(strategies)};
+            const typedText = ${JSON.stringify(trimmedText)};
+            let input = null;
+            for (const sel of strategies) {
+              try {
+                input = document.querySelector(sel);
+                if (input) break;
+              } catch {}
+            }
+            if (!input) return false;
+            const valueText = typeof input.value === 'string' ? input.value : '';
+            const contentText = input.textContent ?? input.innerText ?? '';
+            const currentText = (input.isContentEditable ? contentText : (valueText || contentText)).trim();
+            return currentText.length > 0 && currentText.includes(typedText);
+          })()
+        `) as boolean;
+
+        if (stillContainsTypedText) {
+          const isMac = process.platform === 'darwin';
+          await client.pressKey('Enter', 'Enter', 13, isMac ? 4 : 2);
+          console.log(`[command-executor] ${isMac ? 'Cmd' : 'Ctrl'}+Enter retry fired because composer still contained typed text`);
+        }
+      }
     });
   }
 
@@ -457,10 +489,11 @@ export class CommandExecutor {
     const result = await this.client.evaluate(`
       (() => {
         const tcId = ${JSON.stringify(toolCallId)};
+        const wrapperSel = ${JSON.stringify(MESSAGE_WRAPPER_SELECTOR)};
         const wrapper = document.querySelector('[data-tool-call-id="' + tcId + '"]')
-          || document.querySelector('[data-tool-call-id="' + tcId + '"]')?.closest('[data-flat-index]')
+          || document.querySelector('[data-tool-call-id="' + tcId + '"]')?.closest(wrapperSel)
           || (() => {
-            for (const el of document.querySelectorAll('[data-flat-index]')) {
+            for (const el of document.querySelectorAll(wrapperSel)) {
               const inner = el.querySelector('[data-tool-call-id="' + tcId + '"]');
               if (inner) return el;
             }
@@ -521,9 +554,10 @@ export class CommandExecutor {
       const expanded = await this.client.evaluate(`
         (() => {
           const tcId = ${JSON.stringify(toolCallId)};
+          const wrapperSel = ${JSON.stringify(MESSAGE_WRAPPER_SELECTOR)};
           const wrapper = document.querySelector('[data-tool-call-id="' + tcId + '"]')
             || (() => {
-              for (const el of document.querySelectorAll('[data-flat-index]')) {
+              for (const el of document.querySelectorAll(wrapperSel)) {
                 const inner = el.querySelector('[data-tool-call-id="' + tcId + '"]');
                 if (inner) return el;
               }
@@ -563,9 +597,10 @@ export class CommandExecutor {
       await this.client.evaluate(`
         (() => {
           const tcId = ${JSON.stringify(toolCallId)};
+          const wrapperSel = ${JSON.stringify(MESSAGE_WRAPPER_SELECTOR)};
           const wrapper = document.querySelector('[data-tool-call-id="' + tcId + '"]')
             || (() => {
-              for (const el of document.querySelectorAll('[data-flat-index]')) {
+              for (const el of document.querySelectorAll(wrapperSel)) {
                 const inner = el.querySelector('[data-tool-call-id="' + tcId + '"]');
                 if (inner) return el;
               }

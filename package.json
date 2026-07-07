@@ -1,7 +1,7 @@
 {
   "name": "cursor-remote",
   "displayName": "CursorRemote",
-  "version": "0.1.46",
+  "version": "0.1.47",
   "description": "Remote control your local Cursor AI agent — monitor, approve, and send tasks from your phone or Telegram.",
   "publisher": "cursor-remote",
   "repository": {
@@ -125,7 +125,7 @@
         "cursorRemote.telegram.botToken": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Telegram bot token from [@BotFather](https://t.me/BotFather). See the [Telegram setup guide](https://github.com/len5ky/CursorRemote#telegram-setup)."
+          "markdownDescription": "Deprecated: your Telegram bot token is now stored in VS Code's encrypted SecretStorage and this setting is auto-migrated on activation. Leave blank. Set the token via the CursorRemote Setup panel."
         },
         "cursorRemote.telegram.allowedUsers": {
           "type": "string",

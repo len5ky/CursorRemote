@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
+import { TELEGRAM_BOT_TOKEN_SECRET_KEY } from './secrets.js';
 
 interface TelegramAuth {
   token: string;
@@ -29,7 +30,7 @@ export class SetupPanel {
   public static createOrShow(context: vscode.ExtensionContext): void {
     if (SetupPanel.currentPanel) {
       SetupPanel.currentPanel.panel.reveal(vscode.ViewColumn.One);
-      SetupPanel.currentPanel.updateWebview();
+      void SetupPanel.currentPanel.updateWebview();
       return;
     }
 
@@ -47,7 +48,7 @@ export class SetupPanel {
     this.panel = panel;
     this.context = context;
 
-    this.updateWebview();
+    void this.updateWebview();
 
     this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
 
@@ -73,7 +74,7 @@ export class SetupPanel {
         } else {
           await config.update('serverHost', '0.0.0.0', vscode.ConfigurationTarget.Global);
         }
-        this.updateWebview();
+        await this.updateWebview();
         break;
       }
       case 'copySettingsFilter': {
@@ -95,15 +96,15 @@ export class SetupPanel {
         vscode.window.showInformationMessage(
           newPw ? 'Password updated. Restart the server for changes to take effect.' : 'Password cleared.'
         );
-        this.updateWebview();
+        await this.updateWebview();
         break;
       }
       case 'saveTelegramToken': {
         const token = (msg.token as string).trim();
         if (token) {
-          await config.update('telegram.botToken', token, vscode.ConfigurationTarget.Global);
+          await this.context.secrets.store(TELEGRAM_BOT_TOKEN_SECRET_KEY, token);
           await config.update('telegram.enabled', true, vscode.ConfigurationTarget.Global);
-          this.updateWebview();
+          await this.updateWebview();
         }
         break;
       }
@@ -114,7 +115,7 @@ export class SetupPanel {
           vscode.window.showInformationMessage(
             `Telegram transport set to "${impl}". Restart the server for changes to take effect.`
           );
-          this.updateWebview();
+          await this.updateWebview();
         }
         break;
       }
@@ -128,21 +129,22 @@ export class SetupPanel {
         break;
       }
       case 'refresh': {
-        this.updateWebview();
+        await this.updateWebview();
         break;
       }
     }
   }
 
-  private updateWebview(): void {
+  private async updateWebview(): Promise<void> {
     const config = vscode.workspace.getConfiguration('cursorRemote');
     const telegramAuth = loadTelegramAuth(this.context);
+    const telegramBotToken = await this.context.secrets.get(TELEGRAM_BOT_TOKEN_SECRET_KEY);
     const state = {
       serverHost: config.get<string>('serverHost', '127.0.0.1'),
       serverPort: config.get<number>('serverPort', 3000),
       webappPassword: config.get<string>('webappPassword', ''),
       telegramEnabled: config.get<boolean>('telegram.enabled', false),
-      telegramBotToken: config.get<string>('telegram.botToken', ''),
+      telegramBotToken: telegramBotToken ?? '',
       telegramImpl: config.get<string>('telegram.impl', 'grammy'),
       telegramRegisterToken: telegramAuth?.token ?? '',
       telegramRegisteredUsers: telegramAuth?.registeredUsers ?? [],
