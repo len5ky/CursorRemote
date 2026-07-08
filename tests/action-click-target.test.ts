@@ -9,6 +9,10 @@ import {
 import type { CdpClient } from '../src/server/cdp-client.js';
 import type { SelectorConfig } from '../src/server/types.js';
 
+// Questionnaire extraction and row-kind mapping live inside the serialized
+// extractionFunction; keep them self-contained instead of restructuring
+// production code solely for test access.
+
 function documentFor(html: string): Document {
   return new JSDOM(html).window.document;
 }
@@ -36,6 +40,23 @@ describe('action click target resolution', () => {
     assert.equal(assertElement(result).id, 'continue');
   });
 
+  it('matches data-click-ready action labels from span.truncate when shortcut text is present', () => {
+    const document = documentFor(`
+      <main id="toolbar">
+        <div id="skip" data-click-ready="true">
+          <span>
+            <span class="truncate">Skip</span>
+            <span class="opacity-50 keybinding-font-settings">Esc</span>
+          </span>
+        </div>
+      </main>
+    `);
+
+    const result = resolveActionClickTarget(document, '#skip', 'Skip');
+
+    assert.equal(assertElement(result).id, 'skip');
+  });
+
   it('falls back to exactly one scoped text match when the selector label mismatches', () => {
     const document = documentFor(`
       <main id="toolbar">
@@ -52,6 +73,43 @@ describe('action click target resolution', () => {
     );
 
     assert.equal(assertElement(result).id, 'target');
+  });
+
+  it('finds a unique scoped data-click-ready action when the direct selector mismatches', () => {
+    const document = documentFor(`
+      <section class="composer-questionnaire-toolbar-actions">
+        <button id="stale">Not Skip</button>
+        <div id="skip" data-click-ready="true">
+          <span>
+            <span class="truncate">Skip</span>
+            <span class="opacity-50 keybinding-font-settings">Esc</span>
+          </span>
+        </div>
+      </section>
+      <div id="outside" data-click-ready="true">
+        <span><span class="truncate">Skip</span></span>
+      </div>
+    `);
+
+    const result = resolveActionClickTarget(
+      document,
+      '.composer-questionnaire-toolbar-actions > button#stale',
+      'Skip'
+    );
+
+    assert.equal(assertElement(result).id, 'skip');
+  });
+
+  it('continues to resolve legacy plain button actions', () => {
+    const document = documentFor(`
+      <main id="toolbar">
+        <button id="continue">Continue</button>
+      </main>
+    `);
+
+    const result = resolveActionClickTarget(document, '#toolbar > button#continue', 'Continue');
+
+    assert.equal(assertElement(result).id, 'continue');
   });
 
   it('does not choose a target when scoped text matches are missing or ambiguous', () => {

@@ -12,24 +12,82 @@ export interface UnifiedOutputChannel extends vscode.Disposable {
   warn(msg: string): void;
   error(msg: string): void;
   show(preserveFocus?: boolean): void;
+  reveal(headerLines: string[]): void;
   appendLine(msg: string): void;
 }
 
 export function createOutputChannel(): UnifiedOutputChannel {
   try {
     const ch = vscode.window.createOutputChannel(CHANNEL_NAME, { log: true });
-    return ch as UnifiedOutputChannel;
+    return createLogOutputChannelWrapper(ch);
   } catch {
     const ch = vscode.window.createOutputChannel(CHANNEL_NAME);
-    return {
-      info:  (m) => ch.appendLine(m),
-      warn:  (m) => ch.appendLine(`[WARN] ${m}`),
-      error: (m) => ch.appendLine(`[ERROR] ${m}`),
-      show:  (preserveFocus) => ch.show(preserveFocus),
-      appendLine: (m) => ch.appendLine(m),
-      dispose: () => ch.dispose(),
-    };
+    return createPlainOutputChannelWrapper(ch);
   }
+}
+
+function createLogOutputChannelWrapper(ch: vscode.LogOutputChannel): UnifiedOutputChannel {
+  let hasContent = false;
+
+  const markContent = (): void => {
+    hasContent = true;
+  };
+
+  return {
+    info: (m) => {
+      markContent();
+      ch.info(m);
+    },
+    warn: (m) => {
+      markContent();
+      ch.warn(m);
+    },
+    error: (m) => {
+      markContent();
+      ch.error(m);
+    },
+    show: (preserveFocus) => ch.show(preserveFocus),
+    reveal: (headerLines) => {
+      if (!hasContent) {
+        for (const line of headerLines) {
+          ch.appendLine(line);
+        }
+        hasContent = headerLines.length > 0;
+      }
+      ch.show(true);
+    },
+    appendLine: (m) => {
+      markContent();
+      ch.appendLine(m);
+    },
+    dispose: () => ch.dispose(),
+  };
+}
+
+function createPlainOutputChannelWrapper(ch: vscode.OutputChannel): UnifiedOutputChannel {
+  let hasContent = false;
+
+  const appendLine = (line: string): void => {
+    hasContent = true;
+    ch.appendLine(line);
+  };
+
+  return {
+    info:  (m) => appendLine(m),
+    warn:  (m) => appendLine(`[WARN] ${m}`),
+    error: (m) => appendLine(`[ERROR] ${m}`),
+    show:  (preserveFocus) => ch.show(preserveFocus),
+    reveal: (headerLines) => {
+      if (!hasContent) {
+        for (const line of headerLines) {
+          appendLine(line);
+        }
+      }
+      ch.show(true);
+    },
+    appendLine,
+    dispose: () => ch.dispose(),
+  };
 }
 
 interface JsonLogLine {

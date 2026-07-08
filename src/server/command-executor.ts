@@ -176,13 +176,17 @@ export const MODEL_MENU_LOOKUP_JS = `
 
 export type ActionClickTargetResult = { element: Element } | { error: string };
 
-const ACTION_BUTTON_SELECTOR = 'button, [role="button"], [class*="ui-button"]';
+const ACTION_BUTTON_SELECTOR = 'button, [role="button"], [class*="ui-button"], [data-click-ready]';
 
 function normalizeActionLabel(value: string | null | undefined): string {
   return (value ?? '').trim().toLowerCase();
 }
 
 function elementLabelMatches(element: Element, expectedLabel: string): boolean {
+  const truncatedLabel = element.querySelector('span.truncate');
+  if (truncatedLabel) {
+    return normalizeActionLabel(truncatedLabel.textContent) === normalizeActionLabel(expectedLabel);
+  }
   return normalizeActionLabel(element.textContent) === normalizeActionLabel(expectedLabel);
 }
 
@@ -253,12 +257,17 @@ export function resolveActionClickTarget(
 // Keep in sync with resolveActionClickTarget() above. Inject as
 // `${ACTION_CLICK_RESOLVER_JS}` inside an evaluate().
 export const ACTION_CLICK_RESOLVER_JS = `
-  const ACTION_BUTTON_SELECTOR = 'button, [role="button"], [class*="ui-button"]';
+  const ACTION_BUTTON_SELECTOR = 'button, [role="button"], [class*="ui-button"], [data-click-ready]';
 
   const normalizeActionLabel = (value) => (value || '').trim().toLowerCase();
 
-  const elementLabelMatches = (element, expectedLabel) =>
-    normalizeActionLabel(element.textContent) === normalizeActionLabel(expectedLabel);
+  const elementLabelMatches = (element, expectedLabel) => {
+    const truncatedLabel = element.querySelector('span.truncate');
+    if (truncatedLabel) {
+      return normalizeActionLabel(truncatedLabel.textContent) === normalizeActionLabel(expectedLabel);
+    }
+    return normalizeActionLabel(element.textContent) === normalizeActionLabel(expectedLabel);
+  };
 
   const queryWithin = (root, selector) => {
     try {

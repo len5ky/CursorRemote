@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.50] - 2026-07-08
+
+### Fixed
+- **Questionnaire Skip/Continue buttons stopped working on Cursor 3.8+**: Cursor dropped the `composer-skip-button` / `composer-run-button` classes, so the action buttons are now `div[data-click-ready]` children of the still-intact `.composer-questionnaire-toolbar-actions`, with the clean label in a `span.truncate` next to a keybinding-hint span. Extraction now falls back to those elements (legacy classes stay primary) and emits a stable anchored selector path, and the executor matches labels via `span.truncate` first so the keybinding hint no longer pollutes the match. Cursor 3.8+ tool rows (`data-find-row-key="tool-placeholder:…"` with an inner `data-react-transcript-row-kind="activity"`) are also now mapped to tool cards. Fixes [public#44](https://github.com/len5ky/CursorRemote/issues/44); driven by live-DOM probe data from @habruzzo.
+- **"Show logs" appeared to do nothing** (extension): the output channel could be empty when the server had never spawned, and a no-arg `show()` doesn't force the panel to reveal, so clicking the command looked like a no-op. It now forces reveal + focus and, when the channel is empty, prints a diagnostic header (extension version, server state, log path) so there's always something actionable to see. Fixes [public#47](https://github.com/len5ky/CursorRemote/issues/47).
+
 ## [0.1.49] - 2026-07-07
 
 ### Fixed

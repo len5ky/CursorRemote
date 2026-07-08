@@ -926,13 +926,24 @@ export function extractionFunction(
       const flatIndex = Number.isNaN(parsedFlatIndex) ? wrapperPosition : parsedFlatIndex;
 
       const msgEl = wrapper.querySelector('[data-message-role]') || wrapper;
-      const role = msgEl.getAttribute('data-message-role');
+      let role = msgEl.getAttribute('data-message-role');
       const rowKind = msgEl.getAttribute('data-react-transcript-row-kind');
+      let kind = msgEl.getAttribute('data-message-kind');
+      if (!kind && rowKind === 'assistantMarkdown') {
+        kind = 'assistant';
+      }
+      if (!kind && rowKind === 'activity') {
+        const rowKey = msgEl.closest('[data-find-row-key]')?.getAttribute('data-find-row-key') || '';
+        if (rowKey.startsWith('tool-placeholder:')) {
+          kind = 'tool';
+          if (!role) role = 'ai';
+        } else if (rowKey.startsWith('activity-group:') && rowKey.includes(':thinking')) {
+          // Thinking has no message-level kind; thoughts are modeled as element type "thought".
+          kind = null;
+        }
+      }
       // Observed but intentionally unmapped row-kind values: workGroup, turnActions,
-      // activityGroup, activity, tailStatus.
-      const kind =
-        msgEl.getAttribute('data-message-kind') ||
-        (rowKind === 'assistantMarkdown' ? 'assistant' : null);
+      // activityGroup, tailStatus, and activity rows that are not tool placeholders.
       const messageId = msgEl.getAttribute('data-message-id') || `fi-${flatIndex}`;
 
       const rawEl = {
@@ -1720,11 +1731,31 @@ export function extractionFunction(
       let continueDisabled = false;
       const actionsContainer = qToolbar.querySelector('.composer-questionnaire-toolbar-actions');
       if (actionsContainer) {
-        const skipBtn = actionsContainer.querySelector('.composer-skip-button');
-        if (skipBtn) skipPath = buildSelectorPath(skipBtn as Element);
-        const contBtn = actionsContainer.querySelector('.composer-run-button');
+        // Keep questionnaire action selectors in-extractor with the existing convention:
+        // prefer legacy button classes, then fall back to Cursor 3.8+ data-click-ready divs.
+        const findActionByLabel = (label: string): Element | null => {
+          const expected = label.trim().toLowerCase();
+          for (const child of Array.from(actionsContainer.querySelectorAll(':scope > div[data-click-ready]'))) {
+            const truncateText = (child.querySelector('span.truncate')?.textContent || '').trim().toLowerCase();
+            if (truncateText === expected) return child;
+          }
+          return null;
+        };
+        const stableClickReadyPath = (el: Element): string => {
+          const childIndex = el.parentElement ? Array.from(el.parentElement.children).indexOf(el) + 1 : 1;
+          return `.composer-questionnaire-toolbar-actions > div[data-click-ready]:nth-child(${childIndex})`;
+        };
+        const skipLegacy = actionsContainer.querySelector('.composer-skip-button');
+        if (skipLegacy) {
+          skipPath = buildSelectorPath(skipLegacy);
+        } else {
+          const skipFallback = findActionByLabel('Skip');
+          if (skipFallback) skipPath = stableClickReadyPath(skipFallback);
+        }
+        const contLegacy = actionsContainer.querySelector('.composer-run-button');
+        const contBtn = contLegacy || findActionByLabel('Continue');
         if (contBtn) {
-          continuePath = buildSelectorPath(contBtn as Element);
+          continuePath = contLegacy ? buildSelectorPath(contLegacy) : stableClickReadyPath(contBtn);
           continueDisabled = contBtn.getAttribute('data-disabled') === 'true';
         }
       }

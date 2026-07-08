@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { randomBytes } from 'crypto';
+import { join } from 'path';
 import { createOutputChannel, type UnifiedOutputChannel } from './output-channel.js';
 import { createStatusBar } from './status-bar.js';
 import { ServerManager } from './server-manager.js';
@@ -78,6 +79,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const extensionVersion = context.extension.packageJSON?.version ?? 'unknown';
   const treeView = new StatusTreeView(serverManager, licenseManager, extensionVersion);
+  const serverLogPath = join(context.extensionPath, 'temp', 'server.log');
 
   context.subscriptions.push(
     outputChannel,
@@ -86,7 +88,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('cursorRemote.stop', () => serverManager!.stop(true)),
     vscode.commands.registerCommand('cursorRemote.restart', () => serverManager!.restart()),
     vscode.commands.registerCommand('cursorRemote.openWebClient', () => serverManager!.openWebClient()),
-    vscode.commands.registerCommand('cursorRemote.showLogs', () => outputChannel.show()),
+    vscode.commands.registerCommand('cursorRemote.showLogs', () => outputChannel.reveal([
+      'CursorRemote - no server output captured yet.',
+      `Extension version: ${extensionVersion}`,
+      `Server state: ${serverManager?.serverState ?? 'unknown'}`,
+      `Server log file: ${serverLogPath}`,
+      'Logs appear here once the server starts.',
+    ])),
     vscode.commands.registerCommand('cursorRemote.enterLicenseKey', async () => {
       await licenseManager.promptForKey();
       treeView.refresh();
