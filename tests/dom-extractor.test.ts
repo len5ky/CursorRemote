@@ -98,6 +98,47 @@ describe('extractionFunction', () => {
     assert.equal(state.questionnaire.continueDisabled, true);
   });
 
+  it('emits anchored option-row selector paths for questionnaire options (public#50)', () => {
+    const state = withDom(`
+      <main id="root"></main>
+      <div id="composer-toolbar-section">
+        <div class="composer-questionnaire-toolbar">
+          <div class="composer-questionnaire-toolbar-stepper-label">1 of 1</div>
+          <div class="composer-questionnaire-toolbar-questions">
+            <div class="composer-questionnaire-toolbar-question composer-questionnaire-toolbar-question-active">
+              <div class="composer-questionnaire-toolbar-question-number">1.</div>
+              <div class="composer-questionnaire-toolbar-options">
+                <div class="composer-questionnaire-toolbar-option" role="button">
+                  <button class="composer-questionnaire-toolbar-option-letter" type="button">A</button>
+                  <span class="composer-questionnaire-toolbar-option-label">Explore the codebase</span>
+                </div>
+                <div class="composer-questionnaire-toolbar-option composer-questionnaire-toolbar-option-freeform" role="button">
+                  <button class="composer-questionnaire-toolbar-option-letter" type="button">B</button>
+                  <textarea class="composer-questionnaire-toolbar-freeform-input"></textarea>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+
+    assert.ok(state.questionnaire);
+    const [question] = state.questionnaire.questions;
+    assert.equal(question.options.length, 2);
+    assert.equal(question.options[0].label, 'Explore the codebase');
+    assert.equal(
+      question.options[0].selectorPath,
+      '.composer-questionnaire-toolbar-question:nth-of-type(1) .composer-questionnaire-toolbar-option:nth-of-type(1)'
+    );
+    assert.equal(question.options[1].label, 'Other');
+    assert.equal(question.options[1].isFreeform, true);
+    assert.equal(
+      question.options[1].selectorPath,
+      '.composer-questionnaire-toolbar-question:nth-of-type(1) .composer-questionnaire-toolbar-option:nth-of-type(2)'
+    );
+  });
+
   it('keeps buildSelectorPath selectors for legacy questionnaire actions', () => {
     const state = withDom(`
       <main id="root"></main>

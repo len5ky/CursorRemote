@@ -183,6 +183,17 @@ function normalizeActionLabel(value: string | null | undefined): string {
 }
 
 function elementLabelMatches(element: Element, expectedLabel: string): boolean {
+  // Questionnaire option rows render letter + label ("A" + "Explore…"), so
+  // whole-text equality can never pass; compare the dedicated label span.
+  // Freeform ("Other") rows have a textarea instead of a label span — the
+  // client-facing label for them is always "Other".
+  const optionLabel = element.querySelector('.composer-questionnaire-toolbar-option-label');
+  if (optionLabel) {
+    return normalizeActionLabel(optionLabel.textContent) === normalizeActionLabel(expectedLabel);
+  }
+  if (element.classList.contains('composer-questionnaire-toolbar-option-freeform')) {
+    return normalizeActionLabel(expectedLabel) === 'other';
+  }
   const truncatedLabel = element.querySelector('span.truncate');
   if (truncatedLabel) {
     return normalizeActionLabel(truncatedLabel.textContent) === normalizeActionLabel(expectedLabel);
@@ -262,6 +273,13 @@ export const ACTION_CLICK_RESOLVER_JS = `
   const normalizeActionLabel = (value) => (value || '').trim().toLowerCase();
 
   const elementLabelMatches = (element, expectedLabel) => {
+    const optionLabel = element.querySelector('.composer-questionnaire-toolbar-option-label');
+    if (optionLabel) {
+      return normalizeActionLabel(optionLabel.textContent) === normalizeActionLabel(expectedLabel);
+    }
+    if (element.classList.contains('composer-questionnaire-toolbar-option-freeform')) {
+      return normalizeActionLabel(expectedLabel) === 'other';
+    }
     const truncatedLabel = element.querySelector('span.truncate');
     if (truncatedLabel) {
       return normalizeActionLabel(truncatedLabel.textContent) === normalizeActionLabel(expectedLabel);

@@ -22,6 +22,7 @@ export class ServerManager extends EventEmitter {
   private _isOwner = false;
   private _takingOver = false;
   private _reactingToFlag = false;
+  private _starting = false;
   private getLicenseKey: () => Promise<string | undefined>;
   private readonly windowName: string;
   private readonly manualStopPath: string;
@@ -125,6 +126,20 @@ export class ServerManager extends EventEmitter {
   }
 
   async start(): Promise<void> {
+    // Re-entrancy guard: deleting the manual-stop flag below re-triggers the
+    // dir watcher asynchronously (after _reactingToFlag is already reset),
+    // which called start() again while this call was still awaiting the
+    // health probe — spawning two servers that race for the port.
+    if (this._starting) return;
+    this._starting = true;
+    try {
+      await this.doStart();
+    } finally {
+      this._starting = false;
+    }
+  }
+
+  private async doStart(): Promise<void> {
     this._reactingToFlag = true;
     this.setManualStop(false);
     this._reactingToFlag = false;
