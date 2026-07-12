@@ -1706,6 +1706,17 @@ export function extractionFunction(
       const questionEls = Array.from(qToolbar.querySelectorAll('.composer-questionnaire-toolbar-question'));
       const questions: QQuestion[] = [];
       let activeIdx = 0;
+      // Anchored class-based paths, like the Skip/Continue actions below.
+      // buildSelectorPath's body-down tag chains go stale between poll and
+      // click, and they target the letter <button> whose text can never pass
+      // the resolver's label check (public#50). Target the option ROW instead:
+      // it carries role="button" and clicking it selects the option.
+      const nthOfType = (el: Element): number => {
+        const parent = el.parentElement;
+        if (!parent) return 1;
+        const sameTag = Array.from(parent.children).filter((c) => c.tagName === el.tagName);
+        return sameTag.indexOf(el) + 1;
+      };
       for (let qi = 0; qi < questionEls.length; qi++) {
         const qEl = questionEls[qi];
         const isActive = qEl.classList.contains('composer-questionnaire-toolbar-question-active');
@@ -1720,8 +1731,10 @@ export function extractionFunction(
           const letter = (letterBtn?.textContent || '').trim();
           const isFreeform = optEl.classList.contains('composer-questionnaire-toolbar-option-freeform');
           const label = isFreeform ? 'Other' : (optEl.querySelector('.composer-questionnaire-toolbar-option-label')?.textContent || '').trim();
-          const clickTarget = letterBtn || optEl;
-          options.push({ letter, label, isFreeform, selectorPath: buildSelectorPath(clickTarget as Element) });
+          const selectorPath =
+            `.composer-questionnaire-toolbar-question:nth-of-type(${nthOfType(qEl)})` +
+            ` .composer-questionnaire-toolbar-option:nth-of-type(${nthOfType(optEl)})`;
+          options.push({ letter, label, isFreeform, selectorPath });
         }
         questions.push({ number: num, text, options, isActive });
       }

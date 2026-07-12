@@ -88,13 +88,33 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('cursorRemote.stop', () => serverManager!.stop(true)),
     vscode.commands.registerCommand('cursorRemote.restart', () => serverManager!.restart()),
     vscode.commands.registerCommand('cursorRemote.openWebClient', () => serverManager!.openWebClient()),
-    vscode.commands.registerCommand('cursorRemote.showLogs', () => outputChannel.reveal([
-      'CursorRemote - no server output captured yet.',
-      `Extension version: ${extensionVersion}`,
-      `Server state: ${serverManager?.serverState ?? 'unknown'}`,
-      `Server log file: ${serverLogPath}`,
-      'Logs appear here once the server starts.',
-    ])),
+    vscode.commands.registerCommand('cursorRemote.showLogs', async () => {
+      outputChannel.reveal([
+        'CursorRemote - no server output captured yet.',
+        `Extension version: ${extensionVersion}`,
+        `Server state: ${serverManager?.serverState ?? 'unknown'}`,
+        `Server log file: ${serverLogPath}`,
+        'Logs appear here once the server starts.',
+      ]);
+      // Cursor's output service silently ignores OutputChannel.show() — the
+      // panel never opens or switches channel (public#47). Open the channel's
+      // backing log file too; the editor works on every build.
+      try {
+        const logFile = vscode.Uri.joinPath(context.logUri, 'CursorRemote.log');
+        await vscode.workspace.fs.stat(logFile);
+        const doc = await vscode.workspace.openTextDocument(logFile);
+        const end = doc.lineCount > 0
+          ? doc.lineAt(doc.lineCount - 1).range.end
+          : new vscode.Position(0, 0);
+        await vscode.window.showTextDocument(doc, {
+          preview: true,
+          selection: new vscode.Range(end, end),
+        });
+      } catch {
+        // No backing file (plain, non-log output channel) — reveal() above
+        // already appended a diagnostic header in that case.
+      }
+    }),
     vscode.commands.registerCommand('cursorRemote.enterLicenseKey', async () => {
       await licenseManager.promptForKey();
       treeView.refresh();

@@ -154,6 +154,67 @@ describe('action click target resolution', () => {
     assert.equal(assertElement(descendant).id, 'descendant');
   });
 
+  // Live Cursor 3.8.23 questionnaire option row structure (public#50):
+  // the row concatenates letter + label, so whole-text matching cannot work.
+  const questionnaireHtml = `
+    <div class="composer-questionnaire-toolbar">
+      <div class="composer-questionnaire-toolbar-questions">
+        <div class="composer-questionnaire-toolbar-question composer-questionnaire-toolbar-question-active">
+          <div class="composer-questionnaire-toolbar-options">
+            <div id="row-a" class="composer-questionnaire-toolbar-option" role="button">
+              <button class="composer-questionnaire-toolbar-option-letter" type="button">A</button>
+              <span class="composer-questionnaire-toolbar-option-label">Explore the codebase architecture</span>
+            </div>
+            <div id="row-b" class="composer-questionnaire-toolbar-option" role="button">
+              <button class="composer-questionnaire-toolbar-option-letter" type="button">B</button>
+              <span class="composer-questionnaire-toolbar-option-label">Work on a new feature</span>
+            </div>
+            <div id="row-f" class="composer-questionnaire-toolbar-option composer-questionnaire-toolbar-option-freeform" role="button">
+              <button class="composer-questionnaire-toolbar-option-letter" type="button">C</button>
+              <textarea class="composer-questionnaire-toolbar-freeform-input"></textarea>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  it('resolves a questionnaire option row by its label span despite the letter prefix', () => {
+    const document = documentFor(questionnaireHtml);
+
+    const result = resolveActionClickTarget(
+      document,
+      '.composer-questionnaire-toolbar-question:nth-of-type(1) .composer-questionnaire-toolbar-option:nth-of-type(2)',
+      'Work on a new feature'
+    );
+
+    assert.equal(assertElement(result).id, 'row-b');
+  });
+
+  it('resolves a freeform questionnaire option for the synthetic "Other" label', () => {
+    const document = documentFor(questionnaireHtml);
+
+    const result = resolveActionClickTarget(
+      document,
+      '.composer-questionnaire-toolbar-question:nth-of-type(1) .composer-questionnaire-toolbar-option:nth-of-type(3)',
+      'Other'
+    );
+
+    assert.equal(assertElement(result).id, 'row-f');
+  });
+
+  it('falls back to the unique option row matching the label when the path is stale', () => {
+    const document = documentFor(questionnaireHtml);
+
+    const result = resolveActionClickTarget(
+      document,
+      '.composer-questionnaire-toolbar-question:nth-of-type(9) .composer-questionnaire-toolbar-option:nth-of-type(9)',
+      'Explore the codebase architecture'
+    );
+
+    assert.equal(assertElement(result).id, 'row-a');
+  });
+
   it('keeps clickAction legacy behavior when no expected label is provided', async () => {
     const clickedSelectors: string[] = [];
     let evaluateCalled = false;

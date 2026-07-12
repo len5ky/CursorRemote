@@ -6,6 +6,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.52] - 2026-07-12
+
+### Fixed
+- **Answering questionnaire options failed with "action target not found"**: since v0.1.49's label verification, tapping an option in the web client never worked on any Cursor version — the stored selector pointed at the letter button (whose text is just "A"), while the option row concatenates letter + label, so nothing ever matched the expected label exactly. Options now emit a stable anchored path to the option row (same convention Skip/Continue got in v0.1.50), and the executor matches labels against the dedicated `.composer-questionnaire-toolbar-option-label` span, accepting the freeform row for "Other". Click-verified against a live Cursor 3.8.23 questionnaire over CDP. Fixes [public#50](https://github.com/len5ky/CursorRemote/issues/50) (thanks @ChrisjanWust); completes [public#44](https://github.com/len5ky/CursorRemote/issues/44) (issue 2).
+- **"Show logs" still did nothing** (extension): Cursor's output service silently ignores `OutputChannel.show()` — the Output panel neither opens nor switches channel, even when the channel exists and has content — so the v0.1.50 reveal fix couldn't help. The command now also opens the channel's backing on-disk log file (`<exthost logs>/CursorRemote.log`) in an editor tab with the cursor at the end, which works on every build. Fixes [public#47](https://github.com/len5ky/CursorRemote/issues/47) (thanks @agsola).
+- **Server spawned twice on activation** (extension): `start()` clears the manual-stop flag, and the data-dir watcher reacted to that deletion by calling `start()` again while the first call was still probing for an existing server — two processes raced for the relay port and every log line was doubled. `start()` is now re-entrancy guarded.
+
 ## [0.1.50] - 2026-07-08
 
 ### Fixed
