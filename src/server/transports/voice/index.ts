@@ -208,10 +208,10 @@ export class VoiceTransport implements Transport {
   }
 
   async terminate(sessionId: string, epoch: number, reason = 'client_request', owner?: string): Promise<VoiceTerminationStatus> {
-    this.assertOwner(owner);
     const key = `${sessionId}:${epoch}`;
     const completed = this.completedTerminations.get(key);
     if (completed) return completed;
+    this.assertOwner(owner);
     if (this.terminating) return this.terminating;
 
     const context = this.sessions.currentContext();

@@ -162,4 +162,61 @@ describe('voice account ownership boundary', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('returns the cached termination to its owner after the session releases ownership', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cursor-remote-voice-own3-'));
+    try {
+      const baseConfig: VoiceConfig = {
+        enabled: true,
+        openaiApiKey: 'sk-test-fake-do-not-use',
+        model: 'gpt-4o-realtime-preview',
+        miniModel: '',
+        voice: 'marin',
+        openrouterApiKey: 'sk-or-test-fake',
+        digestModel: 'test-model',
+        ttsModel: 'test-tts',
+        sttModel: 'test-stt',
+        proactiveMinIntervalMs: 15000,
+        usagePriceVersion: 'test-v1',
+        usageUnitPriceCentsPerMinute: 1,
+        dailyCapCents: 100,
+        perSessionCapCents: 10,
+        absoluteSessionMs: 10 * 60_000,
+        idleMs: 60_000,
+        idleGraceMs: 5_000,
+        leaseMs: 30_000,
+        targetMaxAgeMs: 5000,
+      };
+      const mm = new EventEmitter() as any;
+      const sm = Object.assign(new EventEmitter(), {
+        getCurrentState: () => ({
+          connected: false, extractorStatus: 'idle', lastExtractionAt: null,
+          consecutiveExtractionFailures: 0, lastExtractionError: null,
+          agentStatus: 'idle' as const, agentActivityText: null, agentActivityLive: false,
+          agentActivitySource: 'none' as const, messages: [], pendingApprovals: [],
+          inputAvailable: false, chatTabs: [], activeComposerId: '',
+          mode: { current: '', available: [] }, model: { current: '', currentId: '' },
+          windows: [], activeWindowId: '', composerQueue: { items: [] }, questionnaire: null,
+        }),
+        generation: 0,
+        on: (() => {}) as any,
+        off: (() => {}) as any,
+      });
+      const ce = {} as any;
+      const cb = {} as any;
+      const transport = new VoiceTransport(baseConfig, dir, mm, sm, ce, cb);
+      const sessions = (transport as unknown as { sessions: VoiceSessionController }).sessions;
+      const admitted = sessions.admit('account-a');
+      assert.equal(admitted.ok, true);
+      const context = admitted.context!;
+      assert.equal(sessions.activate(context), true);
+
+      const first = await transport.terminate(context.sessionId, context.epoch, 'client_request', 'account-a');
+      const repeat = await transport.terminate(context.sessionId, context.epoch, 'client_request', 'account-a');
+
+      assert.deepEqual(repeat, first);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

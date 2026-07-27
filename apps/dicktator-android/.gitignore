@@ -1,0 +1,4 @@
+/.gradle/
+/app/build/
+/voice-api/build/
+/local.properties
