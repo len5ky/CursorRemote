@@ -47,6 +47,8 @@ export function buildSessionConfig(config: VoiceConfig): Record<string, unknown>
       },
       tools: VOICE_TOOL_SCHEMAS,
       tool_choice: 'auto',
+      // Keep latency low for conversational driving use.
+      reasoning: { effort: 'low' },
     },
   };
 }
