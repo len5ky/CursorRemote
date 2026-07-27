@@ -296,10 +296,26 @@ export class Relay {
       res.type('html').send(LOGIN_PAGE_HTML);
     });
 
-    // Open WebUI and other prior :3000 owners redirected failures to /error.
-    // After reclaiming the port, authenticated hits would otherwise 404 as
-    // "Cannot GET /error". Send them home.
-    this.app.get('/error', (_req, res) => res.redirect(302, '/'));
+    // Open WebUI and other prior :3000 owners redirected failures to /error
+    // and browsers cache that SvelteKit "500: Internal Error" document.
+    // Serve a no-store HTML bounce so a reload of /error overwrites the cache.
+    this.app.get('/error', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+      res.setHeader('Clear-Site-Data', '"cache"');
+      res.status(200).type('html').send(`<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-store">
+<meta http-equiv="refresh" content="0;url=/">
+<title>CursorRemote</title>
+</head><body style="font-family:system-ui;background:#1e1e1e;color:#ccc;padding:2rem">
+<p>CursorRemote — redirecting…</p>
+<p><a href="/" style="color:#3794ff">Open CursorRemote</a></p>
+<script>location.replace('/');</script>
+</body></html>`);
+    });
 
     this.app.post('/api/login', (req, res) => {
       if (!this.authEnabled) return res.json({ token: 'no-auth' });
