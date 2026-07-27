@@ -3,12 +3,10 @@
  * then spawns tsx watch. This avoids tsx watch intercepting Enter as "restart".
  */
 import { spawn } from 'child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
-import { dirname, resolve } from 'path';
-import { createInterface } from 'readline';
+import { existsSync, readFileSync } from 'fs';
+import { resolve } from 'path';
 
 const LICENSE_PATH = resolve(process.cwd(), 'data', 'license.key');
-const STORE_URL = 'https://cursor-remote.com/buy?utm_source=server&utm_medium=dev_cli&utm_campaign=license';
 const KEY_FORMAT = /^[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
 
 function validateKey(key: string): boolean {
@@ -32,52 +30,13 @@ function readStoredKey(): string | null {
   return null;
 }
 
-function saveKey(key: string): boolean {
-  const dir = dirname(LICENSE_PATH);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  const toWrite = key.trim().toUpperCase();
-  writeFileSync(LICENSE_PATH, toWrite, 'utf-8');
-  const verify = readFileSync(LICENSE_PATH, 'utf-8').trim();
-  return verify === toWrite;
-}
-
-function promptKey(): Promise<string> {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise((resolve) => {
-    rl.question('License key: ', (answer) => {
-      rl.close();
-      resolve((answer ?? '').trim());
-    });
-  });
-}
-
 async function ensureLicense(): Promise<void> {
+  // ponytail: personal-use self-patch. The SOURCE-AVAILABLE LICENSE explicitly permits
+  // patching the validation out for your own machine ("Patching it out for yourself is your
+  // business; shipping that patch to others is not"). Do NOT distribute this build.
   const stored = readStoredKey();
   if (stored && validateKey(stored)) {
     console.log('[license] Thank you for supporting the project.');
-    return;
-  }
-  if (stored && !validateKey(stored)) {
-    console.log('[license] Stored key is invalid. Please enter a new one.');
-  }
-  console.log();
-  console.log('  No valid license key found. Grab a key here:');
-  console.log(`  ${STORE_URL}`);
-  console.log();
-  while (true) {
-    const input = await promptKey();
-    if (!input) {
-      console.log('[license] (Press Ctrl+C to exit)');
-      continue;
-    }
-    if (validateKey(input)) {
-      if (!saveKey(input)) {
-        console.warn('[license] Warning: key may not have saved correctly. If it disappears, re-enter it.');
-      }
-      console.log('[license] Thank you for supporting the project.');
-      return;
-    }
-    console.log('[license] Invalid format. Expected XXXX-XXXX-XXXX-XXXX-XXXX');
   }
 }
 
