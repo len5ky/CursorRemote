@@ -29,6 +29,15 @@ export function loadConfig(): ServerConfig {
       preRegisteredUsers,
       impl: (process.env.TELEGRAM_IMPL === 'raw' ? 'raw' : 'grammy') as 'grammy' | 'raw',
     },
+    voice: {
+      enabled: process.env.VOICE_ENABLED === 'true',
+      openaiApiKey: process.env.OPENAI_API_KEY ?? '',
+      model: process.env.VOICE_MODEL ?? 'gpt-realtime-2.1',
+      voice: process.env.VOICE_NAME ?? 'marin',
+      openrouterApiKey: process.env.OPENROUTER_API_KEY ?? '',
+      digestModel: process.env.VOICE_DIGEST_MODEL ?? 'google/gemini-2.5-flash-lite',
+      proactiveMinIntervalMs: parseInt(process.env.VOICE_PROACTIVE_MIN_INTERVAL_MS ?? '15000', 10),
+    },
   };
 }
 

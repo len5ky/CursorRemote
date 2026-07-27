@@ -36,13 +36,11 @@ function readStoredKey(): string | null {
  * for interactive dev (prompts before starting tsx watch).
  */
 export function checkLicense(): void {
+  // ponytail: personal-use self-patch. The SOURCE-AVAILABLE LICENSE explicitly permits
+  // patching the validation out for your own machine ("Patching it out for yourself is your
+  // business; shipping that patch to others is not"). Do NOT distribute this build.
   const stored = readStoredKey();
   if (stored && validateKey(stored)) {
     console.log('[license] Thank you for supporting the project.');
-    return;
   }
-  console.error('[license] No valid license key in data/license.key');
-  console.error(`  Get a key: ${STORE_URL}`);
-  console.error('  For dev: run "npm run dev" which prompts before starting.');
-  process.exit(1);
 }

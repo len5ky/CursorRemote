@@ -347,6 +347,23 @@ export interface ServerConfig {
   windowTitleQualifier: boolean;
   dataDir: string;
   telegram: TelegramConfig;
+  voice: VoiceConfig;
+}
+
+export interface VoiceConfig {
+  enabled: boolean;
+  /** OpenAI API key used to mint ephemeral client secrets + sideband WS. Never logged. */
+  openaiApiKey: string;
+  /** Realtime model, e.g. gpt-realtime-2.1 (fallback: gpt-realtime-2.1-mini). */
+  model: string;
+  /** Output voice name. */
+  voice: string;
+  /** OpenRouter API key for the digest summarizer. Never logged. */
+  openrouterApiKey: string;
+  /** Cheap flash-class model used for spoken digests. */
+  digestModel: string;
+  /** Minimum gap between proactive spoken notifications (ms). */
+  proactiveMinIntervalMs: number;
 }
 
 export interface TelegramConfig {

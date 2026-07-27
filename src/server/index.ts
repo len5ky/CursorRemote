@@ -10,6 +10,7 @@ import { Relay } from './relay.js';
 import type { Transport } from './transports/types.js';
 import { TelegramTransport } from './transports/telegram/index.js';
 import { RawTelegramTransport } from './transports/telegram-raw/index.js';
+import { VoiceTransport } from './transports/voice/index.js';
 
 const logStream = createWriteStream('./temp/server.log', { flags: 'a' });
 const origLog = console.log;
@@ -150,6 +151,25 @@ async function main(): Promise<void> {
       console.error(`[telegram] Failed to start: ${err instanceof Error ? err.message : String(err)}`);
     });
     transports.push(telegram);
+  }
+
+  if (config.voice.enabled) {
+    if (!config.voice.openaiApiKey) {
+      console.warn('[voice] VOICE_ENABLED but OPENAI_API_KEY is missing — voice transport disabled');
+    } else {
+      const voice = new VoiceTransport(
+        config.voice,
+        windowMonitor,
+        stateManager,
+        commandExecutor,
+        cdpBridge
+      );
+      relay.setVoiceTransport(voice);
+      voice.start().catch(err => {
+        console.error(`[voice] Failed to start: ${err instanceof Error ? err.message : String(err)}`);
+      });
+      transports.push(voice);
+    }
   }
 
   windowMonitor.start();

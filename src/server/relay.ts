@@ -16,6 +16,7 @@ import {
   parseSessionCookie,
   type WebappSessionStore,
 } from './webapp-sessions.js';
+import type { VoiceTransport } from './transports/voice/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -118,6 +119,7 @@ export class Relay {
 
   private sessionStore: WebappSessionStore;
   private loginAttempts = new Map<string, RateLimitEntry>();
+  private voiceTransport: VoiceTransport | null = null;
 
   /** Max-Age for session cookie (30 days), aligned with typical “stay signed in” expectation. */
   private static readonly SESSION_COOKIE_MAX_AGE_SEC = 30 * 24 * 60 * 60;
@@ -227,10 +229,66 @@ export class Relay {
     return undefined;
   }
 
+  /** Attach the voice transport after construction (started later in main). */
+  setVoiceTransport(transport: VoiceTransport): void {
+    this.voiceTransport = transport;
+  }
+
   private setupRoutes(): void {
     const clientDir = join(__dirname, '..', 'client');
 
     this.app.use(express.json());
+
+    // --- Voice ("car mode") endpoints. Auth-checked explicitly because they
+    // are registered before the trailing auth middleware. ---
+    const voiceAuthOk = (req: express.Request, res: express.Response): boolean => {
+      if (this.authEnabled && this.resolveHttpSession(req) === undefined) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return false;
+      }
+      return true;
+    };
+
+    this.app.post('/api/voice/token', async (req, res) => {
+      if (!voiceAuthOk(req, res)) return;
+      if (!this.voiceTransport) return res.status(503).json({ error: 'Voice transport not enabled' });
+      try {
+        const secret = await this.voiceTransport.mintClientSecret();
+        res.json({ value: secret.value, expiresAt: secret.expiresAt ?? null });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[relay] Voice token mint failed: ${msg}`);
+        res.status(500).json({ error: 'Failed to mint voice token' });
+      }
+    });
+
+    this.app.post('/api/voice/call', async (req, res) => {
+      if (!voiceAuthOk(req, res)) return;
+      if (!this.voiceTransport) return res.status(503).json({ error: 'Voice transport not enabled' });
+      const callId = typeof req.body?.callId === 'string' ? req.body.callId : '';
+      if (!callId) return res.status(400).json({ error: 'callId required' });
+      try {
+        await this.voiceTransport.attachCall(callId);
+        res.json({ ok: true });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[relay] Voice sideband attach failed: ${msg}`);
+        res.status(500).json({ error: 'Failed to attach voice session' });
+      }
+    });
+
+    this.app.post('/api/voice/disconnect', (req, res) => {
+      if (!voiceAuthOk(req, res)) return;
+      this.voiceTransport?.detachCall();
+      res.json({ ok: true });
+    });
+
+    this.app.get('/api/voice/status', (req, res) => {
+      if (!voiceAuthOk(req, res)) return;
+      if (!this.voiceTransport) return res.json({ enabled: false });
+      const s = this.voiceTransport.status;
+      res.json({ enabled: true, connected: s.connected, target: s.target ?? null });
+    });
 
     this.app.get('/login', (_req, res) => {
       if (!this.authEnabled) return res.redirect('/');

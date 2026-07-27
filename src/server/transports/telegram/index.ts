@@ -76,11 +76,9 @@ export class TelegramTransport extends BaseTelegramTransport {
   ) {
     super(config, windowMonitor, stateManager, commandExecutor, cdpBridge);
 
-    const grammyFetch: typeof fetch = (input, init) => {
-      if (init?.signal) return fetch(input, init);
-      return fetch(input, { ...init, signal: AbortSignal.timeout(30000) });
-    };
-    this.bot = new Bot(config.botToken, { client: { fetch: grammyFetch } });
+    // Do not wrap Grammy's fetch with native fetch: Grammy passes Node-only
+    // options (agent, compress). Forwarding those into undici hang getMe forever.
+    this.bot = new Bot(config.botToken);
     this.bot.api.config.use(autoRetry({ maxRetryAttempts: 3, maxDelaySeconds: 10 }));
     this.api = grammyApiAdapter(this.bot);
     this.setupRouting();
