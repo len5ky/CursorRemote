@@ -28,6 +28,11 @@ data class VoiceStatus(
   val connected: Boolean,
   val state: String,
   val targetLabel: String,
+  val idleStatus: String?,
+  val budgetState: String?,
+  val estimatedSpendCents: Int?,
+  val reportedSpendCents: Int?,
+  val remainingBudgetCents: Int?,
 )
 
 class VoiceApiException(val statusCode: Int, message: String) : Exception(message)
@@ -97,6 +102,7 @@ class VoiceApiClient(context: Context) {
   fun status(): VoiceStatus {
     val response = request("GET", "/api/voice/status")
     val target = response.optJSONObject("target")
+    val budget = response.optJSONObject("budget")
     val targetLabel = target?.let {
       listOf(it.optString("windowId"), it.optString("composerId"))
         .filter(String::isNotBlank)
@@ -107,6 +113,11 @@ class VoiceApiClient(context: Context) {
       connected = response.optBoolean("connected"),
       state = response.optString("state", "idle"),
       targetLabel = targetLabel,
+      idleStatus = response.optStringOrNull("idleStatus"),
+      budgetState = budget?.optStringOrNull("state"),
+      estimatedSpendCents = response.optIntOrNull("estimatedSpendCents") ?: budget?.optIntOrNull("estimatedCents"),
+      reportedSpendCents = response.optIntOrNull("reportedSpendCents") ?: budget?.optIntOrNull("reportedCents"),
+      remainingBudgetCents = response.optIntOrNull("remainingBudgetCents") ?: budget?.optIntOrNull("remainingCents"),
     )
   }
 
@@ -193,6 +204,12 @@ class VoiceApiClient(context: Context) {
 
   private fun JSONObject.optLongOrNull(name: String): Long? =
     if (isNull(name) || !has(name)) null else optLong(name)
+
+  private fun JSONObject.optIntOrNull(name: String): Int? =
+    if (isNull(name) || !has(name)) null else optInt(name)
+
+  private fun JSONObject.optStringOrNull(name: String): String? =
+    optString(name).takeIf(String::isNotBlank)
 
   private companion object {
     const val PREFERENCES = "dicktator_voice"

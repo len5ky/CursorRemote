@@ -1,12 +1,12 @@
 package com.cursorremote.dicktator
 
 import android.Manifest
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -30,42 +30,53 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.cursorremote.dicktator.api.VoiceApiClient
-import com.cursorremote.dicktator.api.VoiceSession
 import com.cursorremote.dicktator.api.VoiceStatus
 
 class MainActivity : ComponentActivity() {
+  private var onMicrophoneDenied: (() -> Unit)? = null
+  private val microphonePermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+    if (granted) VoiceSessionService.connect(this) else onMicrophoneDenied?.invoke()
+  }
+
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
       requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
     }
-    setContent {
-      MaterialTheme {
-        DicktatorScreen(this@MainActivity, onStopNotification = {
-          stopService(Intent(this, VoiceSessionService::class.java))
-        })
-      }
+    setContent { MaterialTheme { DicktatorScreen(this@MainActivity) } }
+  }
+
+  fun connectVoice(onDenied: () -> Unit) {
+    onMicrophoneDenied = onDenied
+    if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+      VoiceSessionService.connect(this)
+    } else {
+      microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
     }
   }
 }
 
 @Composable
-private fun DicktatorScreen(activity: MainActivity, onStopNotification: () -> Unit) {
+private fun DicktatorScreen(activity: MainActivity) {
   val client = remember { VoiceApiClient(activity) }
   var baseUrl by remember { mutableStateOf(client.baseUrl()) }
   var bearerToken by remember { mutableStateOf(client.bearerToken()) }
   var password by remember { mutableStateOf("") }
   var status by remember { mutableStateOf("idle") }
-  var target by remember { mutableStateOf("no target") }
+  var voiceStatus by remember { mutableStateOf<VoiceStatus?>(null) }
   var busy by remember { mutableStateOf(false) }
+
+  fun applyStatus(value: VoiceStatus) {
+    voiceStatus = value
+    status = if (value.enabled) value.state else "voice disabled"
+  }
 
   fun refreshStatus() {
     busy = true
     Thread {
       val result = runCatching { client.status() }
       activity.runOnUiThread {
-        result.onSuccess { updateStatus(it, { value -> status = value }, { value -> target = value }) }
-          .onFailure { status = shortError(it) }
+        result.onSuccess(::applyStatus).onFailure { status = shortError(it) }
         busy = false
       }
     }.start()
@@ -77,18 +88,13 @@ private fun DicktatorScreen(activity: MainActivity, onStopNotification: () -> Un
     Thread {
       val result = runCatching {
         client.configure(baseUrl, bearerToken)
-        val token = if (client.bearerToken().isBlank() && password.isNotBlank()) client.login(password) else client.bearerToken()
-        val admission = client.mintClientSecret()
-        client.saveSession(VoiceSession(admission.sessionId, admission.epoch))
-        VoiceSessionService.show(activity)
-        client.status() to token
+        if (client.bearerToken().isBlank() && password.isNotBlank()) client.login(password) else client.bearerToken()
       }
       activity.runOnUiThread {
-        result.onSuccess { (voiceStatus, token) ->
-          updateStatus(voiceStatus, { value -> status = value }, { value -> target = value })
-          status = if (voiceStatus.connected) "live" else "admitted"
-          bearerToken = token
+        result.onSuccess {
+          bearerToken = it
           password = ""
+          activity.connectVoice { status = "microphone permission is required" }
         }.onFailure { status = shortError(it) }
         busy = false
       }
@@ -96,19 +102,8 @@ private fun DicktatorScreen(activity: MainActivity, onStopNotification: () -> Un
   }
 
   fun hangUp() {
-    busy = true
     status = "hanging up"
-    Thread {
-      val result = runCatching { client.terminateStoredSession("client_request") }
-      activity.runOnUiThread {
-        result.onSuccess {
-          client.clearSession()
-          onStopNotification()
-          status = it?.state ?: "off"
-        }.onFailure { status = "local off; retry notification" }
-        busy = false
-      }
-    }.start()
+    VoiceSessionService.hangUp(activity)
   }
 
   Column(
@@ -116,9 +111,15 @@ private fun DicktatorScreen(activity: MainActivity, onStopNotification: () -> Un
     verticalArrangement = Arrangement.spacedBy(12.dp),
   ) {
     Text("DICKTATOR", style = MaterialTheme.typography.headlineMedium)
-    Text("V2 relay-contract client", style = MaterialTheme.typography.bodyMedium)
+    Text("Native WebRTC voice client", style = MaterialTheme.typography.bodyMedium)
     AssistChip(onClick = {}, label = { Text(status) }, enabled = false)
-    Text("Target: $target", style = MaterialTheme.typography.bodyMedium)
+    Text("Target: ${voiceStatus?.targetLabel ?: "no target"}", style = MaterialTheme.typography.bodyMedium)
+    Text("Session: ${voiceStatus?.state ?: status}", style = MaterialTheme.typography.bodyMedium)
+    voiceStatus?.idleStatus?.let { Text("Idle: $it", style = MaterialTheme.typography.bodyMedium) }
+    voiceStatus?.budgetState?.let { budgetState ->
+      val remaining = voiceStatus?.remainingBudgetCents?.let { "${it}c remaining" } ?: "remaining budget unavailable"
+      Text("Budget: $budgetState, $remaining", style = MaterialTheme.typography.bodyMedium)
+    }
     OutlinedTextField(
       value = baseUrl,
       onValueChange = { baseUrl = it },
@@ -150,11 +151,6 @@ private fun DicktatorScreen(activity: MainActivity, onStopNotification: () -> Un
       OutlinedButton(onClick = ::refreshStatus, enabled = !busy) { Text("Refresh") }
     }
   }
-}
-
-private fun updateStatus(status: VoiceStatus, setStatus: (String) -> Unit, setTarget: (String) -> Unit) {
-  setStatus(if (status.enabled) status.state else "voice disabled")
-  setTarget(status.targetLabel)
 }
 
 private fun shortError(error: Throwable): String = error.message?.take(80) ?: "request failed"
