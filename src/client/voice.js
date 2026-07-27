@@ -48,10 +48,17 @@
       const tokenRes = await fetch('/api/voice/token', {
         method: 'POST', headers: authHeaders(), credentials: 'same-origin',
       });
-      if (!tokenRes.ok) throw new Error('token mint failed');
+      if (!tokenRes.ok) {
+        const t = await tokenRes.text().catch(() => '');
+        throw new Error('token mint failed (' + tokenRes.status + ') ' + t.slice(0, 120));
+      }
       const { value: ephemeralKey } = await tokenRes.json();
 
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (micErr) {
+        throw new Error('mic denied: ' + (micErr && micErr.message ? micErr.message : micErr));
+      }
 
       pc = new RTCPeerConnection();
       audioEl = document.createElement('audio');
@@ -67,12 +74,22 @@
         headers: { Authorization: 'Bearer ' + ephemeralKey, 'Content-Type': 'application/sdp' },
         body: offer.sdp,
       });
-      if (!sdpRes.ok) throw new Error('WebRTC offer rejected');
+      const answerBody = await sdpRes.text();
+      if (!sdpRes.ok) {
+        let detail = answerBody.slice(0, 200);
+        try {
+          const parsed = JSON.parse(answerBody);
+          detail = parsed?.error?.message || detail;
+        } catch (_) { /* keep raw */ }
+        if (sdpRes.status === 429 || /quota|billing/i.test(detail)) {
+          throw new Error('OpenAI Realtime quota/billing: ' + detail);
+        }
+        throw new Error('WebRTC offer rejected (' + sdpRes.status + '): ' + detail);
+      }
       const callId = sdpRes.headers.get('Location')
         ? sdpRes.headers.get('Location').split('/').pop()
         : null;
-      const answerSdp = await sdpRes.text();
-      await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+      await pc.setRemoteDescription({ type: 'answer', sdp: answerBody });
 
       if (!callId) throw new Error('no call id in response');
 
@@ -88,7 +105,13 @@
       statusTimer = setInterval(refreshStatus, 5000);
     } catch (err) {
       console.error('[dicktator]', err);
-      setChip('error', 'error');
+      const msg = err && err.message ? String(err.message) : 'error';
+      // Keep chip short; full message goes to title tooltip + console
+      if (/quota|billing/i.test(msg)) setChip('error', 'quota');
+      else if (/mic/i.test(msg)) setChip('error', 'mic');
+      else setChip('error', 'error');
+      chip.title = msg;
+      targetEl.textContent = msg.length > 80 ? msg.slice(0, 77) + '…' : msg;
       teardown(false);
     } finally {
       btnToggle.disabled = false;
