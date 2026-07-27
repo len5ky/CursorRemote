@@ -224,6 +224,31 @@ describe('confirmation flow', () => {
     assert.equal(calls.filter(c => c.name === 'sendMessage').length, 1);
   });
 
+  it('claims a pending token before an async mutation so concurrent confirms execute once', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let executions = 0;
+    const made = makeDeps(state);
+    const router = new VoiceToolRouter({
+      ...made.deps,
+      sendMessage: async () => {
+        executions++;
+        await gate;
+      },
+    });
+    await router.call('set_target', { window: 'my-project' });
+    const token = extractToken((await router.call('send_to_session', { text: 'mutate once' })).output);
+
+    const first = router.call('confirm_pending', { token });
+    const second = router.call('confirm_pending', { token });
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    assert.equal(executions, 1, 'only the caller that claims the token may mutate');
+    release();
+    const results = await Promise.all([first, second]);
+    assert.deepEqual(results.map(result => result.ok), [true, false]);
+  });
+
   it('consumes the token when the mutation succeeds but post-mutation validation fails', async () => {
     const made = makeDeps(state);
     let validations = 0;
@@ -324,7 +349,7 @@ describe('confirmation flow', () => {
     assert.equal(made.calls.filter(c => c.name === 'clickApproval').length, 1);
   });
 
-  it('keeps the token and does not mutate when health turns stale during activation', async () => {
+  it('consumes the claimed token when health turns stale during activation', async () => {
     const context = { sessionId: 'voice-1', epoch: 7, leaseId: 'lease-1' };
     const target = { windowId: 'w1', composerId: 'composer-1', revision: 'rev-1', ageMs: 10 };
     let targetHealthy = true;
@@ -348,10 +373,10 @@ describe('confirmation flow', () => {
 
     assert.equal(confirmed.ok, false);
     assert.equal(made.calls.filter(c => c.name === 'clickApproval').length, 0);
-    assert.notEqual(router.getPending(token), undefined);
+    assert.equal(router.getPending(token), undefined);
   });
 
-  it('keeps the token and does not mutate when identity changes during activation', async () => {
+  it('consumes the claimed token when identity changes during activation', async () => {
     const context = { sessionId: 'voice-1', epoch: 7, leaseId: 'lease-1' };
     const target = { windowId: 'w1', composerId: 'composer-1', revision: 'rev-1', ageMs: 10 };
     let accepted = true;
@@ -375,6 +400,6 @@ describe('confirmation flow', () => {
 
     assert.equal(confirmed.ok, false);
     assert.equal(made.calls.filter(c => c.name === 'clickApproval').length, 0);
-    assert.notEqual(router.getPending(token), undefined);
+    assert.equal(router.getPending(token), undefined);
   });
 });

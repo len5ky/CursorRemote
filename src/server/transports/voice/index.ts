@@ -12,6 +12,9 @@ import { RealtimeBridge, type ClientSecretResult } from './realtime-bridge.js';
 import { DigestClient } from './digest.js';
 import { VoiceSessionController, type VoiceSessionContext, type VoiceSessionStatus } from './session.js';
 
+const ORPHAN_HANGUP_ATTEMPTS = 2;
+const ORPHAN_HANGUP_RETRY_DELAY_MS = 100;
+
 export interface VoiceTerminationStatus {
   sessionId: string | null;
   epoch: number | null;
@@ -45,6 +48,7 @@ export class VoiceTransport implements Transport {
   private onHangup: ((status: VoiceTerminationStatus) => void) | null = null;
   private terminating: Promise<VoiceTerminationStatus> | null = null;
   private readonly completedTerminations = new Map<string, VoiceTerminationStatus>();
+  private readonly orphanHangups = new Map<string, ReturnType<typeof setTimeout>>();
 
   private lastAnnounceAt = 0;
   private announcedApprovalIds = new Set<string>();
@@ -234,6 +238,7 @@ export class VoiceTransport implements Transport {
       this.completedTerminations.set(key, result);
       if (this.completedTerminations.size > 16) this.completedTerminations.delete(this.completedTerminations.keys().next().value!);
       this.onHangup?.(result);
+      if (callId && !providerConfirmed) this.reapOrphanHangup(callId, result);
       return result;
     })();
     try {
@@ -357,6 +362,34 @@ export class VoiceTransport implements Transport {
       return { ok: false, reason: 'Pinned Cursor target changed. Stage the action again.' };
     }
     return { ok: true };
+  }
+
+  private reapOrphanHangup(callId: string, result: VoiceTerminationStatus): void {
+    if (this.orphanHangups.has(callId)) return;
+    let attempts = 0;
+    const retry = async (): Promise<void> => {
+      attempts++;
+      const confirmed = await this.bridge.hangup(callId).catch(() => false);
+      if (confirmed) {
+        this.orphanHangups.delete(callId);
+        result.providerConfirmed = true;
+        this.onHangup?.(result);
+        return;
+      }
+      if (attempts >= ORPHAN_HANGUP_ATTEMPTS) {
+        this.orphanHangups.delete(callId);
+        console.warn('[dicktator] Orphan call hangup gave up after bounded retries');
+        return;
+      }
+      schedule();
+    };
+    const schedule = (): void => {
+      // ponytail: bounded in-memory cleanup; persist jobs only if restart recovery becomes required.
+      const timer = setTimeout(() => { void retry(); }, ORPHAN_HANGUP_RETRY_DELAY_MS);
+      timer.unref();
+      this.orphanHangups.set(callId, timer);
+    };
+    schedule();
   }
 
   // --- Transport lifecycle ---

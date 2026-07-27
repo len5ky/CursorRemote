@@ -21,6 +21,8 @@ import type { VoiceSessionContext } from './session.js';
 
 const OPENAI_BASE = 'https://api.openai.com/v1/realtime';
 const OPENAI_WS_BASE = 'wss://api.openai.com/v1/realtime';
+const HANGUP_ATTEMPTS = 3;
+const HANGUP_RETRY_DELAY_MS = 100;
 
 export const VOICE_INSTRUCTIONS =
   'You are the voice controller for Cursor coding agent sessions ("car mode"). ' +
@@ -203,16 +205,22 @@ export class RealtimeBridge {
 
   async hangup(callId: string): Promise<boolean> {
     if (!this.config.openaiApiKey) return false;
-    try {
-      const response = await fetch(`${OPENAI_BASE}/calls/${encodeURIComponent(callId)}/hangup`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${this.config.openaiApiKey}` },
-        signal: AbortSignal.timeout(5_000),
-      });
-      return response.ok;
-    } catch {
-      return false;
+    for (let attempt = 0; attempt < HANGUP_ATTEMPTS; attempt++) {
+      try {
+        const response = await fetch(`${OPENAI_BASE}/calls/${encodeURIComponent(callId)}/hangup`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${this.config.openaiApiKey}` },
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (response.ok) return true;
+      } catch {
+        // Retry transient network and timeout failures.
+      }
+      if (attempt + 1 < HANGUP_ATTEMPTS) {
+        await new Promise(resolve => setTimeout(resolve, HANGUP_RETRY_DELAY_MS * (attempt + 1)));
+      }
     }
+    return false;
   }
 
   private send(event: Record<string, unknown>, context?: VoiceSessionContext): void {

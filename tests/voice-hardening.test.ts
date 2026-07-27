@@ -14,7 +14,7 @@ import {
   type VoiceSessionOptions,
 } from '../src/server/transports/voice/session.js';
 import { VoiceTransport } from '../src/server/transports/voice/index.js';
-import { parseUsageFromDone } from '../src/server/transports/voice/realtime-bridge.js';
+import { RealtimeBridge, parseUsageFromDone } from '../src/server/transports/voice/realtime-bridge.js';
 import { CommandExecutor } from '../src/server/command-executor.js';
 import type { CdpClient } from '../src/server/cdp-client.js';
 import type { SelectorConfig, VoiceConfig } from '../src/server/types.js';
@@ -29,8 +29,8 @@ function baseVoiceConfig(): VoiceConfig {
     digestModel: 'test-model', ttsModel: 'test-tts', sttModel: 'test-stt',
     proactiveMinIntervalMs: 15000,
     usagePriceVersion: 'test-v1', usageUnitPriceCentsPerMinute: 1,
-    dailyCapCents: 100, perSessionCapCents: 10,
-    absoluteSessionMs: 10 * 60_000, idleMs: 60_000, idleGraceMs: 5_000, leaseMs: 30_000,
+    usageDailyCapCents: 100, usagePerSessionCapCents: 10,
+    sessionAbsoluteMs: 10 * 60_000, sessionIdleMs: 60_000, sessionIdleGraceMs: 5_000, sessionLeaseMs: 30_000,
     targetMaxAgeMs: 5000,
   };
 }
@@ -120,6 +120,59 @@ describe('voice hardening — TOCTOU confirmPending', () => {
     healthOk = true;
     const ok = await router.call('confirm_pending', { token }, context);
     assert.equal(ok.ok, true, `second confirm should succeed: ${ok.output}`);
+  });
+});
+
+describe('voice hardening — provider hangup recovery', () => {
+  it('retries a transient provider hangup failure', async () => {
+    const originalFetch = globalThis.fetch;
+    let attempts = 0;
+    globalThis.fetch = async () => ({ ok: ++attempts === 3 }) as Response;
+    try {
+      const bridge = new RealtimeBridge(baseVoiceConfig(), {} as VoiceToolRouter, {
+        accepts: () => true,
+        userTurn: () => {},
+        providerFailure: () => {},
+        reportSpend: () => false,
+      });
+
+      assert.equal(await bridge.hangup('call-1'), true);
+      assert.equal(attempts, 3);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('reaps a failed call in the background after authority is revoked', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cursor-remote-voice-orphan-'));
+    try {
+      const { mm, sm, ce, cb } = makeMockTransportDeps();
+      const transport = new VoiceTransport(baseVoiceConfig(), dir, mm, sm, ce, cb);
+      const sessions = (transport as unknown as { sessions: VoiceSessionController }).sessions;
+      const admitted = sessions.admit('account-a');
+      assert.equal(admitted.ok, true);
+      const context = admitted.context!;
+      assert.equal(sessions.activate(context), true);
+
+      const bridge = (transport as unknown as {
+        bridge: { detach: (context: VoiceSessionContext) => string | null; hangup: (callId: string) => Promise<boolean> };
+      }).bridge;
+      let attempts = 0;
+      bridge.detach = () => 'call-orphan';
+      bridge.hangup = async () => ++attempts > 1;
+
+      const result = await transport.terminate(context.sessionId, context.epoch, 'client_request');
+      assert.equal(result.providerConfirmed, false);
+      assert.equal(sessions.status().state, 'failed', 'local authority must be revoked before orphan retries');
+      assert.equal(sessions.currentOwner(), null, 'a failed provider hangup must not retain voice authority');
+      for (let i = 0; i < 50 && attempts < 2; i++) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      assert.equal(attempts, 2, 'the bounded orphan reaper should retry the retained call ID');
+      assert.equal(result.providerConfirmed, true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -409,9 +462,9 @@ describe('voice hardening — mid-flight target revalidation', () => {
     assert.equal(failed.ok, false, 'confirm should fail when target changes');
     assert.match(failed.output, /target changed/i);
 
-    // Token should survive for retry
+    // Claimed confirmations fail closed after activation begins.
     const pendingAfterFail = router.getPending(token);
-    assert.notEqual(pendingAfterFail, undefined, 'token should survive target change failure');
+    assert.equal(pendingAfterFail, undefined, 'token should be consumed after a claimed failure');
   });
 
   it('executes successfully when target remains stable', async () => {
@@ -579,7 +632,7 @@ describe('voice hardening — pin threading', () => {
     assert.equal(confirmed.ok, false, 'confirm should fail when target changes mid-flight');
     assert.ok(confirmed.output.toLowerCase().includes('target changed'), 'error message should mention target change');
     assert.equal(mutationCalled, false, 'mutation should NOT be called');
-    assert.notEqual(router.getPending(token), undefined, 'token should survive for retry');
+    assert.equal(router.getPending(token), undefined, 'token should be consumed after a claimed failure');
   });
 
   it('consumes token when post-mutation revalidation fails after side effect', async () => {

@@ -472,16 +472,14 @@ export class VoiceToolRouter {
       if (!health.ok) return { ok: false, output: health.reason ?? 'Pinned target is no longer healthy. Stage the action again.' };
     }
 
+    // Claim before the first await. A claimed token is never reinstated: after
+    // activation starts, we cannot prove that no Cursor side effect occurred.
+    this.pending.delete(token);
+
     await this.ensureTargetActive();
 
-    // Activation awaits; revalidate the staged authority immediately before executing.
-    const current = this.pending.get(token);
-    if (!current || canonicalArgsDigest(current.args) !== current.argsDigest) {
-      return { ok: false, output: 'Confirmation is no longer valid. Stage the action again.' };
-    }
-    if (current.sessionId && (!context || current.sessionId !== context.sessionId || current.epoch !== context.epoch || current.leaseId !== context.leaseId)) {
-      return { ok: false, output: 'Confirmation belongs to a different or expired voice session. Stage the action again.' };
-    }
+    // Revalidate the claimed confirmation immediately before executing.
+    const current = pending;
     if (this.authority) {
       if (!context || !current.target || !this.authority.accepts(context)) {
         return { ok: false, output: 'Voice authority is no longer live. Stage the action again.' };
@@ -505,11 +503,9 @@ export class VoiceToolRouter {
       }
     };
 
-    // Token remains retryable until a mutation succeeds; consume it before
-    // post-mutation validation so a successful side effect cannot be replayed.
+    // The token is already consumed. Only successful mutations refresh session activity.
     const target = current.target;
-    const consume = (): void => {
-      this.pending.delete(token);
+    const commit = (): void => {
       if (context) this.authority?.committed(context);
     };
 
@@ -519,7 +515,7 @@ export class VoiceToolRouter {
         case 'send_to_session':
           ensureTargetValid();
           await this.deps.sendMessage(current.args.text as string, target!);
-          consume();
+          commit();
           ensureTargetValidAfter();
           return { ok: true, output: 'Message sent.' };
         case 'approve':
@@ -527,34 +523,33 @@ export class VoiceToolRouter {
         case 'cancel':
           ensureTargetValid();
           await this.deps.clickApproval(current.args.selectorPath as string, target!);
-          consume();
+          commit();
           ensureTargetValidAfter();
           return { ok: true, output: `Done: ${current.summary}.` };
         case 'run_action':
         case 'skip_action':
           ensureTargetValid();
           await this.deps.clickAction(current.args.selectorPath as string, current.args.label as string | undefined, target!);
-          consume();
+          commit();
           ensureTargetValidAfter();
           return { ok: true, output: `Done: ${current.summary}.` };
         case 'set_mode':
           ensureTargetValid();
           await this.deps.setMode(current.args.mode as string, target!);
-          consume();
+          commit();
           ensureTargetValidAfter();
           return { ok: true, output: `Mode switched to ${current.args.mode}.` };
         case 'set_model':
           ensureTargetValid();
           await this.deps.setModel(current.args.model as string, target!);
-          consume();
+          commit();
           ensureTargetValidAfter();
           return { ok: true, output: `Model switched to ${current.args.model}.` };
         default:
           return { ok: false, output: `Cannot execute unknown staged tool: ${current.tool}` };
       }
     } catch (err) {
-      // Pre-mutation failures leave the token for retry. Post-mutation failures
-      // already called consume() so the side effect cannot be replayed.
+      // Claimed tokens fail closed. The caller must stage the action again.
       return { ok: false, output: err instanceof Error ? err.message : String(err) };
     }
   }
