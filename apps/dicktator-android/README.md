@@ -6,7 +6,7 @@ Thin Android client for the proven CursorRemote V1 voice HTTP contracts. It has 
 
 1. Open `apps/dicktator-android` in Android Studio.
 2. Use JDK 17 and let Android Studio sync the Gradle project.
-3. Run the `app` configuration on an Android 8.0+ device, or assemble it with a locally installed Gradle 8.9+:
+3. Run the `app` configuration on an Android 8.0+ device, or assemble it with a locally installed Gradle 8.7+:
 
 ```bash
 gradle :app:assembleDebug
