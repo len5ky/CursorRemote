@@ -198,6 +198,9 @@
 
   socket.on('connect', () => renderAll());
   socket.on('disconnect', () => renderAll());
+  socket.on('voice:hangup', (status) => {
+    window.dispatchEvent(new CustomEvent('voice:hangup', { detail: status }));
+  });
 
   let connectFailCount = 0;
   socket.on('connect_error', (err) => {

@@ -2,6 +2,7 @@ import WebSocket from 'ws';
 import type { VoiceConfig } from '../../types.js';
 import type { VoiceToolRouter } from './tools.js';
 import { VOICE_TOOL_SCHEMAS } from './tools.js';
+import type { VoiceSessionContext } from './session.js';
 
 /**
  * DICKTATOR Realtime bridge — OpenAI Realtime API (GA interface) session management.
@@ -35,6 +36,32 @@ export interface ClientSecretResult {
   expiresAt?: number;
 }
 
+export interface RealtimeBridgeAuthority {
+  accepts(context: VoiceSessionContext): boolean;
+  userTurn(context: VoiceSessionContext): void;
+  providerFailure(context: VoiceSessionContext, reason: string): void;
+  reportSpend(context: VoiceSessionContext, cents: number, source: 'estimated' | 'reported'): boolean;
+}
+
+export function parseUsageFromDone(raw: string): { reportedCents?: number; audioDurationMs?: number } | null {
+  let event: { type?: string; response?: { usage?: { cost_cents?: number; total_cost_cents?: number; cost?: { cents?: number }; output_tokens?: { audio_duration_ms?: number; text_duration_ms?: number } } } };
+  try {
+    event = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (event.type !== 'response.done') return null;
+  const usage = event.response?.usage;
+  if (!usage) return null;
+  const audioDurationMs = usage.output_tokens?.audio_duration_ms;
+  const cents = usage.cost_cents ?? usage.total_cost_cents ?? usage.cost?.cents;
+  const result: { reportedCents?: number; audioDurationMs?: number } = {};
+  // Only provider-supplied cents are reported; duration priced locally remains an estimate.
+  if (typeof cents === 'number' && Number.isFinite(cents) && cents >= 0) result.reportedCents = cents;
+  if (typeof audioDurationMs === 'number' && Number.isFinite(audioDurationMs) && audioDurationMs > 0) result.audioDurationMs = audioDurationMs;
+  return result.reportedCents === undefined && result.audioDurationMs === undefined ? null : result;
+}
+
 export function buildSessionConfig(config: VoiceConfig): Record<string, unknown> {
   return {
     session: {
@@ -56,17 +83,24 @@ export function buildSessionConfig(config: VoiceConfig): Record<string, unknown>
 export class RealtimeBridge {
   private config: VoiceConfig;
   private router: VoiceToolRouter;
+  private authority: RealtimeBridgeAuthority;
   private ws: WebSocket | null = null;
   private callId: string | null = null;
-  private closedByUs = false;
+  private context: VoiceSessionContext | null = null;
+  private readonly closedByUs = new WeakSet<WebSocket>();
 
-  constructor(config: VoiceConfig, router: VoiceToolRouter) {
+  constructor(config: VoiceConfig, router: VoiceToolRouter, authority: RealtimeBridgeAuthority) {
     this.config = config;
     this.router = router;
+    this.authority = authority;
   }
 
   get connected(): boolean {
     return this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  connectedFor(context: VoiceSessionContext): boolean {
+    return this.connected && this.sameContext(context, this.context);
   }
 
   /** Mint an ephemeral client secret so the browser can connect via WebRTC. */
@@ -96,10 +130,10 @@ export class RealtimeBridge {
    * All function calls are handled here (server-authoritative), so the browser
    * client stays dumb.
    */
-  attachSideband(callId: string, ephemeralKey?: string): Promise<void> {
+  attachSideband(callId: string, ephemeralKey: string | undefined, context: VoiceSessionContext): Promise<void> {
     this.detach();
     this.callId = callId;
-    this.closedByUs = false;
+    this.context = context;
 
     // Sideband auth must use the same ephemeral client secret that opened the
     // WebRTC call. A project API key gets HTTP 404 (call_id_not_found).
@@ -109,47 +143,80 @@ export class RealtimeBridge {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(`${OPENAI_WS_BASE}?call_id=${encodeURIComponent(callId)}`, {
         headers: { Authorization: `Bearer ${authToken}` },
+        maxPayload: 16 * 1024,
       });
       this.ws = ws;
 
+      let settled = false;
       const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
         reject(new Error('Sideband WS connect timeout'));
+        this.authority.providerFailure(context, 'sideband_connect_timeout');
+        this.closedByUs.add(ws);
         try { ws.close(); } catch { /* ok */ }
       }, 15_000);
 
       ws.on('open', () => {
         clearTimeout(timer);
+        settled = true;
         console.log(`[dicktator] Sideband attached (call ${callId.substring(0, 12)}...)`);
         resolve();
       });
       ws.on('message', (raw) => {
-        this.onServerEvent(raw.toString()).catch(err =>
+        if (!this.authority.accepts(context)) return;
+        this.onServerEvent(raw.toString(), context).catch(err =>
           console.error(`[dicktator] Event handling error: ${err instanceof Error ? err.message : err}`)
         );
       });
       ws.on('error', (err) => {
         clearTimeout(timer);
         console.error(`[dicktator] Sideband WS error: ${err.message}`);
-        reject(err);
+        if (!settled) {
+          settled = true;
+          reject(err);
+        }
+        if (!this.closedByUs.has(ws)) this.authority.providerFailure(context, 'sideband_error');
       });
       ws.on('close', () => {
-        if (!this.closedByUs) console.log('[dicktator] Sideband WS closed');
+        if (!this.closedByUs.has(ws)) {
+          console.log('[dicktator] Sideband WS closed');
+          this.authority.providerFailure(context, 'sideband_closed');
+        }
         if (this.ws === ws) this.ws = null;
       });
     });
   }
 
-  detach(): void {
+  detach(context?: VoiceSessionContext): string | null {
+    if (context && !this.sameContext(context, this.context)) return null;
+    const callId = this.callId;
     if (this.ws) {
-      this.closedByUs = true;
+      this.closedByUs.add(this.ws);
       try { this.ws.close(); } catch { /* ok */ }
       this.ws = null;
     }
     this.callId = null;
+    this.context = null;
+    return callId;
   }
 
-  private send(event: Record<string, unknown>): void {
-    if (!this.connected) return;
+  async hangup(callId: string): Promise<boolean> {
+    if (!this.config.openaiApiKey) return false;
+    try {
+      const response = await fetch(`${OPENAI_BASE}/calls/${encodeURIComponent(callId)}/hangup`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${this.config.openaiApiKey}` },
+        signal: AbortSignal.timeout(5_000),
+      });
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  private send(event: Record<string, unknown>, context?: VoiceSessionContext): void {
+    if (context ? !this.connectedFor(context) : !this.connected) return;
     this.ws!.send(JSON.stringify(event));
   }
 
@@ -157,20 +224,21 @@ export class RealtimeBridge {
    * Push a proactive notification into the conversation and ask the model to
    * speak. Used for new pendingApprovals / blocked agents.
    */
-  announce(text: string): void {
-    if (!this.connected) return;
+  announce(text: string, context: VoiceSessionContext): void {
+    if (!this.connectedFor(context)) return;
     this.send({
       type: 'conversation.item.create',
       item: {
         type: 'message',
         role: 'system',
-        content: [{ type: 'input_text', text: `[proactive notification — briefly tell the user] ${text}` }],
+        content: [{ type: 'input_text', text: `[proactive notification — briefly tell the user] ${text.slice(0, 240)}` }],
       },
-    });
-    this.send({ type: 'response.create' });
+    }, context);
+    this.send({ type: 'response.create' }, context);
   }
 
-  private async onServerEvent(raw: string): Promise<void> {
+  private async onServerEvent(raw: string, context: VoiceSessionContext): Promise<void> {
+    if (!this.authority.accepts(context)) return;
     let event: { type?: string; [key: string]: unknown };
     try {
       event = JSON.parse(raw);
@@ -182,18 +250,26 @@ export class RealtimeBridge {
       case 'session.created': {
         // Re-assert tools/instructions on the sideband in case the ephemeral
         // session config was minimal.
-        this.send({ type: 'session.update', ...buildSessionConfig(this.config) });
+          this.send({ type: 'session.update', ...buildSessionConfig(this.config) }, context);
         break;
       }
       case 'response.function_call_arguments.done': {
         const name = String(event.name ?? '');
         const callId = String(event.call_id ?? '');
         let args: Record<string, unknown> = {};
+        const rawArgs = String(event.arguments ?? '{}');
+        if (rawArgs.length > 8_192) {
+          this.send({
+            type: 'conversation.item.create',
+            item: { type: 'function_call_output', call_id: callId, output: 'Tool arguments exceed the server safety limit.' },
+          }, context);
+          return;
+        }
         try {
-          args = JSON.parse(String(event.arguments ?? '{}'));
+          args = JSON.parse(rawArgs);
         } catch { /* keep {} */ }
         console.log(`[dicktator] Tool call: ${name}`);
-        const result = await this.router.call(name, args);
+        const result = await this.router.call(name, args, context);
         this.send({
           type: 'conversation.item.create',
           item: {
@@ -201,8 +277,21 @@ export class RealtimeBridge {
             call_id: callId,
             output: result.output,
           },
-        });
-        this.send({ type: 'response.create' });
+        }, context);
+        this.send({ type: 'response.create' }, context);
+        break;
+      }
+      case 'input_audio_buffer.committed':
+        this.authority.userTurn(context);
+        break;
+      case 'response.done': {
+        const usage = parseUsageFromDone(raw);
+        if (usage?.reportedCents !== undefined) {
+          this.authority.reportSpend(context, usage.reportedCents, 'reported');
+        } else if (usage?.audioDurationMs !== undefined && Number.isFinite(this.config.usageUnitPriceCentsPerMinute) && this.config.usageUnitPriceCentsPerMinute > 0) {
+          const cents = Math.ceil(usage.audioDurationMs * this.config.usageUnitPriceCentsPerMinute / 60_000);
+          if (cents > 0) this.authority.reportSpend(context, cents, 'estimated');
+        }
         break;
       }
       case 'error': {
@@ -213,5 +302,9 @@ export class RealtimeBridge {
       default:
         break;
     }
+  }
+
+  private sameContext(a: VoiceSessionContext | null, b: VoiceSessionContext | null): boolean {
+    return a?.sessionId === b?.sessionId && a?.epoch === b?.epoch && a?.leaseId === b?.leaseId;
   }
 }

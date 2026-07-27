@@ -4,8 +4,8 @@
 
 DICKTATOR is CursorRemote's voice transport ("car mode"): a hands-free layer for
 monitoring and driving live Cursor agent sessions by voice. It mirrors the
-Telegram transport's command vocabulary and safety semantics, delivered over an
-OpenAI Realtime speech-to-speech session.
+Telegram transport's command vocabulary over an OpenAI Realtime speech-to-speech
+session; voice-session safety is independently enforced by the relay.
 
 ## Architecture
 
@@ -21,9 +21,9 @@ Browser (web client)                Relay server                       OpenAI
 └─────────────────┘                           └──────────────────┘
                                                     │ tool calls only
                                               ┌─────▼──────────────┐
-                                              │ VoiceToolRouter     │→ CommandExecutor / StateManager
-                                              │ (closed tool set +  │  (CDP into live Cursor windows)
-                                              │  confirm tokens)    │
+                                               │ VoiceTransport      │→ CommandExecutor / StateManager
+                                               │ (FSM, budget, closed│  (CDP into live Cursor windows)
+                                               │  tools, confirms)   │
                                               └────────────────────┘
 ```
 
@@ -37,13 +37,21 @@ Key points:
 - **Closed tool set.** The Realtime model can only call:
   `list_sessions, set_target, get_status, get_all_status, read_recent,
   send_to_session, approve, reject, run_action, skip_action, set_mode,
-  set_model, cancel, confirm_pending`. No shell, no arbitrary commands.
-- **Server-enforced confirmation.** Informational tools run immediately.
-  Mutating tools return a single-use, 90-second confirmation token; nothing
-  executes until the model calls `confirm_pending(token)` after verbally
-  reading the action back to the user. Enforced in `tools.ts`, not by prompt.
-- **Sticky target.** `set_target` fuzzy-matches a window (and optional tab) and
-  pins it, like the Telegram TopicManager's active thread.
+  set_model, cancel, confirm_pending, disconnect_voice`. No shell or arbitrary
+  commands. `disconnect_voice` is transport control, never Cursor `cancel`.
+- **Server-enforced confirmation.** Mutations return a single-use 90-second token
+  bound to session/epoch/lease, target revision, canonical arguments, and tool.
+  The relay consumes and revalidates it before execution; termination or target
+  change invalidates it.
+- **Sticky target.** `set_target` resolves a title once, then pins the stable
+  Cursor window/composer identity and revision. Mutations fail closed when that
+  exact target is unavailable or stale.
+- **Session safety.** The server owns `idle → admitting → active → terminating
+  → terminated|failed`; stale session/epoch/lease events are ignored and
+  termination revokes authority before bounded provider cleanup.
+- **Budget and idle.** Admission reserves against an account-keyed daily ledger
+  using versioned known pricing. Unknown pricing, cap/idle/lease expiry, and the
+  absolute session cap deny or terminate safely.
 - **Spoken digests.** `digest.ts` converts transcript/state into 2–3 spoken
   sentences via a cheap OpenRouter model, stripping file paths, hashes, URLs,
   and code identifiers.
@@ -54,7 +62,7 @@ Key points:
 
 Source: `src/server/transports/voice/` (`realtime-bridge.ts`, `tools.ts`,
 `digest.ts`, `index.ts`) plus `src/client/voice.js` and relay endpoints
-`/api/voice/{token,call,disconnect,status}`.
+`/api/voice/{token,call,terminate,disconnect,status}`.
 
 ## Configuration
 
@@ -69,6 +77,12 @@ Source: `src/server/transports/voice/` (`realtime-bridge.ts`, `tools.ts`,
 | `VOICE_TTS_MODEL` | `x-ai/grok-voice-tts-1.0` | **Config-only — synthesis not wired yet.** Recommended (Jul 2026): Grok Voice TTS, $15/M chars, inline speech tags for pause/emphasis/speed. Fallback: `qwen/qwen-audio-3.0-tts-flash`. |
 | `VOICE_STT_MODEL` | `x-ai/grok-stt-1.0` | **Config-only — not wired yet.** For future batch audio ingestion; $0.10/hour. |
 | `VOICE_PROACTIVE_MIN_INTERVAL_MS` | `15000` | Rate limit for proactive spoken notifications. |
+| `VOICE_USAGE_PRICE_VERSION` | `openai-realtime-2026-01` | Required known price-table version for admission. |
+| `VOICE_USAGE_UNIT_PRICE_CENTS_PER_MINUTE` | `50` | Conservative ledger estimate. |
+| `VOICE_USAGE_DAILY_CAP_CENTS` | `500` | Account daily hard cap. |
+| `VOICE_USAGE_PER_SESSION_CAP_CENTS` | `100` | Session reservation and hard cap. |
+| `VOICE_SESSION_ABSOLUTE_MS` | `1800000` | Absolute wall-clock cap. |
+| `VOICE_SESSION_IDLE_MS` | `120000` | Idle termination bound. |
 
 Honest status: live speech in/out currently goes entirely through the OpenAI
 Realtime session. The OpenRouter TTS/STT models above are reserved config for
@@ -91,4 +105,21 @@ VOICE_ENABLED=true npm run dev        # Cursor must be running with --remote-deb
    message back and only execute after your explicit "yes"
    (`confirm_pending` is enforced server-side; a wrong or reused token fails).
 
-Tests: `npx tsx --test tests/voice-tools.test.ts tests/voice-digest.test.ts`.
+Tests: `npx tsx --test tests/voice-session.test.ts tests/voice-tools.test.ts tests/voice-digest.test.ts`.
+
+## Disconnect, health, and recovery
+
+**Hang Up** immediately tears down microphone, audio, timers, and peer connection,
+then makes a bounded `POST /api/voice/terminate` request carrying the session and
+epoch. The server revokes tools and confirmations, closes the sideband, asks OpenAI
+to hang up, and emits `voice:hangup`. A timeout is shown as local disconnect complete
+with server cleanup unconfirmed, never verified teardown.
+
+`/api/voice/status` reports separate voice, sideband, relay socket, CDP, and selected
+target health plus estimated versus provider-reported spend and remaining budget.
+Read-only status may be degraded; mutations require healthy signals and the exact
+pinned target revision.
+
+V1 has no automatic model routing, model-switch reconnect, Android/Auto client, or
+capability packs. `gpt-realtime-2.1` remains the default; Mini is configuration-only
+until a separate adversarial tool-safety evaluation passes.

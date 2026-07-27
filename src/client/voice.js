@@ -16,6 +16,9 @@
   let audioEl = null;
   let connected = false;
   let statusTimer = null;
+  let heartbeatTimer = null;
+  let sessionId = null;
+  let epoch = null;
 
   function authHeaders() {
     const token = localStorage.getItem('cursor-remote-token');
@@ -36,8 +39,8 @@
       const data = await res.json();
       if (!data.enabled) return;
       btnVoice.classList.remove('hidden');
-      targetEl.textContent = data.target || 'no target';
-      if (connected) setChip(data.connected ? 'live' : 'connecting', data.connected ? 'live' : 'linking');
+       targetEl.textContent = data.target ? data.target.windowId + ' / ' + data.target.composerId : 'no target';
+       if (connected) setChip(data.connected ? 'live' : 'connecting', data.connected ? 'live' : 'linking');
     } catch (_) { /* relay unreachable */ }
   }
 
@@ -52,7 +55,11 @@
         const t = await tokenRes.text().catch(() => '');
         throw new Error('token mint failed (' + tokenRes.status + ') ' + t.slice(0, 120));
       }
-      const { value: ephemeralKey } = await tokenRes.json();
+      const token = await tokenRes.json();
+      const ephemeralKey = token.value;
+      if (!token.sessionId || !Number.isInteger(token.epoch)) throw new Error('voice admission response missing session identity');
+      sessionId = token.sessionId;
+      epoch = token.epoch;
 
       try {
         micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -95,7 +102,7 @@
 
       const attachRes = await fetch('/api/voice/call', {
         method: 'POST', headers: authHeaders(), credentials: 'same-origin',
-        body: JSON.stringify({ callId, ephemeralKey }),
+         body: JSON.stringify({ callId, ephemeralKey, sessionId, epoch }),
       });
       if (!attachRes.ok) throw new Error('sideband attach failed');
 
@@ -103,6 +110,7 @@
       setChip('live', 'live');
       btnToggle.textContent = 'Disconnect';
       statusTimer = setInterval(refreshStatus, 5000);
+      heartbeatTimer = setInterval(sendHeartbeat, 10_000);
     } catch (err) {
       console.error('[dicktator]', err);
       const msg = err && err.message ? String(err.message) : 'error';
@@ -112,34 +120,91 @@
       else setChip('error', 'error');
       chip.title = msg;
       targetEl.textContent = msg.length > 80 ? msg.slice(0, 77) + '…' : msg;
-      teardown(false);
+       stopLocal();
+       void requestTermination('connect_failed');
     } finally {
       btnToggle.disabled = false;
     }
   }
 
-  function teardown(notifyServer) {
+  function stopLocal() {
     if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
-    if (pc) { try { pc.close(); } catch (_) {} pc = null; }
+    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
     if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
-    audioEl = null;
+    if (audioEl) { audioEl.srcObject = null; audioEl = null; }
+    if (pc) {
+      try { pc.getSenders().forEach((sender) => { sender.replaceTrack(null).catch(() => {}); }); } catch (_) {}
+      try { pc.close(); } catch (_) {}
+      pc = null;
+    }
     connected = false;
     btnToggle.textContent = 'Connect';
-    if (notifyServer) {
-      fetch('/api/voice/disconnect', {
-        method: 'POST', headers: authHeaders(), credentials: 'same-origin',
-      }).catch(() => {});
+  }
+
+  async function requestTermination(reason) {
+    const terminatingSessionId = sessionId;
+    const terminatingEpoch = epoch;
+    if (!terminatingSessionId || !Number.isInteger(terminatingEpoch)) return { confirmed: true };
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4_000);
+    try {
+      const res = await fetch('/api/voice/terminate', {
+        method: 'POST', headers: authHeaders(), credentials: 'same-origin', signal: controller.signal,
+        body: JSON.stringify({ sessionId: terminatingSessionId, epoch: terminatingEpoch, reason }),
+      });
+      if (!res.ok) throw new Error('termination failed');
+      return { confirmed: true };
+    } catch (_) {
+      return { confirmed: false };
+    } finally {
+      clearTimeout(timeout);
+      if (sessionId === terminatingSessionId && epoch === terminatingEpoch) {
+        sessionId = null;
+        epoch = null;
+      }
     }
   }
 
-  function disconnect() {
-    teardown(true);
-    setChip('idle', 'off');
+  async function sendHeartbeat() {
+    if (!connected || !sessionId || !Number.isInteger(epoch)) return;
+    try {
+      await fetch('/api/voice/heartbeat', {
+        method: 'POST', headers: authHeaders(), credentials: 'same-origin',
+        body: JSON.stringify({ sessionId, epoch }),
+      });
+    } catch (_) { /* the server reaper remains authoritative */ }
+  }
+
+  async function disconnect(reason) {
+    btnToggle.disabled = true;
+    stopLocal();
+    const result = await requestTermination(reason || 'client_request');
+    if (result.confirmed) {
+      setChip('idle', 'off');
+      targetEl.textContent = 'local disconnect complete';
+    } else {
+      setChip('error', 'local off');
+      targetEl.textContent = 'local disconnect complete; server cleanup unconfirmed';
+    }
+    btnToggle.disabled = false;
   }
 
   btnVoice.addEventListener('click', () => panel.classList.toggle('hidden'));
-  btnToggle.addEventListener('click', () => (connected ? disconnect() : connect()));
-  window.addEventListener('beforeunload', () => { if (connected) teardown(true); });
+  btnToggle.addEventListener('click', () => { void (connected ? disconnect() : connect()); });
+  window.addEventListener('beforeunload', () => {
+    if (!connected) return;
+    stopLocal();
+    void requestTermination('browser_unload');
+  });
+  window.addEventListener('voice:hangup', (event) => {
+    const hangup = event.detail || {};
+    if (hangup.sessionId !== sessionId || hangup.epoch !== epoch) return;
+    stopLocal();
+    sessionId = null;
+    epoch = null;
+    setChip('idle', 'off');
+    targetEl.textContent = hangup.state === 'terminated' ? 'server disconnected' : 'server cleanup unconfirmed';
+  });
 
   refreshStatus();
 })();

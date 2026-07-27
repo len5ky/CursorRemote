@@ -6,6 +6,7 @@ import {
   VOICE_TOOL_SCHEMAS,
   type VoiceToolDeps,
   type SessionSummary,
+  type VoiceToolAuthority,
 } from '../src/server/transports/voice/tools.js';
 import type { CursorState, ChatElement } from '../src/server/types.js';
 
@@ -46,6 +47,9 @@ function makeDeps(state: CursorState, sessions?: SessionSummary[]): { deps: Voic
     calls.push({ name, args });
     return Promise.resolve();
   };
+  const target: { windowId: string; composerId: string; revision: string; ageMs: number } = {
+    windowId: 'w1', composerId: 'composer-1', revision: 'rev-1', ageMs: 10
+  };
   const deps: VoiceToolDeps = {
     getState: () => state,
     listSessions: () => sessions ?? [
@@ -58,6 +62,12 @@ function makeDeps(state: CursorState, sessions?: SessionSummary[]): { deps: Voic
     setMode: log('setMode'),
     setModel: log('setModel'),
     digest: async () => 'digest text',
+    getPinnedTarget: () => target,
+    revalidateTarget: (expected) => {
+      return expected.windowId === target.windowId
+        && expected.composerId === target.composerId
+        && expected.revision === target.revision;
+    },
   };
   return { deps, calls };
 }
@@ -109,6 +119,21 @@ describe('informational tools', () => {
     await router.call('get_all_status', {});
     // no mutating deps invoked
     assert.equal(calls.length, 0);
+  });
+
+  it('disconnect_voice invokes only the dedicated termination control', async () => {
+    const { deps, calls } = makeDeps(baseState());
+    const router = new VoiceToolRouter({
+      ...deps,
+      terminateVoice: async () => {
+        calls.push({ name: 'terminateVoice', args: [] });
+        return { state: 'terminated' };
+      },
+    });
+    const result = await router.call('disconnect_voice', {});
+    assert.equal(result.ok, true);
+    assert.equal(calls.filter(c => c.name === 'terminateVoice').length, 1);
+    assert.equal(calls.filter(c => c.name === 'clickApproval' || c.name === 'clickAction').length, 0);
   });
 });
 
@@ -199,6 +224,24 @@ describe('confirmation flow', () => {
     assert.equal(calls.filter(c => c.name === 'sendMessage').length, 1);
   });
 
+  it('consumes the token when the mutation succeeds but post-mutation validation fails', async () => {
+    const made = makeDeps(state);
+    let validations = 0;
+    const router = new VoiceToolRouter({
+      ...made.deps,
+      // Pre-mutation revalidate passes once; post-mutation revalidate fails.
+      revalidateTarget: () => ++validations < 2,
+    });
+    await router.call('set_target', { window: 'my-project' });
+    const token = extractToken((await router.call('approve', {})).output);
+    assert.ok(router.getPending(token)?.target, 'pending must pin a target for post-check to run');
+    const failed = await router.call('confirm_pending', { token });
+    assert.equal(failed.ok, false);
+    assert.match(failed.output, /during mutation execution/i);
+    assert.equal(made.calls.filter(c => c.name === 'clickApproval').length, 1);
+    assert.equal(router.getPending(token), undefined);
+  });
+
   it('reject stages the reject selector', async () => {
     const staged = await router.call('reject', {});
     const token = extractToken(staged.output);
@@ -230,6 +273,7 @@ describe('confirmation flow', () => {
     await router.call('confirm_pending', { token });
     const clickCall = calls.find(c => c.name === 'clickAction');
     assert.equal(clickCall!.args[0], '.run-btn');
+    assert.equal(clickCall!.args[1], 'Run');
   });
 
   it('set_mode + confirm routes to setMode with target activation', async () => {
@@ -245,5 +289,92 @@ describe('confirmation flow', () => {
   it('send_to_session requires non-empty text', async () => {
     const r = await router.call('send_to_session', { text: '   ' });
     assert.equal(r.ok, false);
+  });
+
+  it('survives a stale authority rejection and can retry', async () => {
+    const context = { sessionId: 'voice-1', epoch: 7, leaseId: 'lease-1' };
+    const target = { windowId: 'w1', composerId: 'composer-1', revision: 'rev-1', ageMs: 10 };
+    let targetHealthy = true;
+    const authority: VoiceToolAuthority = {
+      accepts: (candidate) => candidate.sessionId === context.sessionId && candidate.epoch === context.epoch && candidate.leaseId === context.leaseId,
+      live: () => true,
+      mutationHealth: () => targetHealthy ? { ok: true } : { ok: false, reason: 'Pinned Cursor target changed.' },
+      committed: () => {},
+    };
+    const made = makeDeps(state);
+    const router = new VoiceToolRouter({ ...made.deps, getPinnedTarget: () => target }, authority);
+    await router.call('set_target', { window: 'my-project' }, context);
+    const staged = await router.call('approve', {}, context);
+    const token = extractToken(staged.output);
+    const pending = router.getPending(token);
+    assert.equal(pending?.sessionId, context.sessionId);
+    assert.equal(pending?.target?.revision, 'rev-1');
+    assert.match(pending?.argsDigest ?? '', /^[a-f0-9]{64}$/);
+
+    targetHealthy = false;
+    const confirmed = await router.call('confirm_pending', { token }, context);
+    assert.equal(confirmed.ok, false);
+    assert.equal(made.calls.filter(c => c.name === 'clickApproval').length, 0);
+    // Token survives a stale-authority rejection (TOCTOU fix)
+    assert.notEqual(router.getPending(token), undefined);
+
+    targetHealthy = true;
+    const retry = await router.call('confirm_pending', { token }, context);
+    assert.equal(retry.ok, true);
+    assert.equal(made.calls.filter(c => c.name === 'clickApproval').length, 1);
+  });
+
+  it('keeps the token and does not mutate when health turns stale during activation', async () => {
+    const context = { sessionId: 'voice-1', epoch: 7, leaseId: 'lease-1' };
+    const target = { windowId: 'w1', composerId: 'composer-1', revision: 'rev-1', ageMs: 10 };
+    let targetHealthy = true;
+    const authority: VoiceToolAuthority = {
+      accepts: () => true,
+      live: () => true,
+      mutationHealth: () => targetHealthy ? { ok: true } : { ok: false, reason: 'Pinned Cursor target changed.' },
+      committed: () => {},
+    };
+    const made = makeDeps(state);
+    let activations = 0;
+    const router = new VoiceToolRouter({
+      ...made.deps,
+      getPinnedTarget: () => target,
+      activateTarget: async () => { if (++activations > 1) targetHealthy = false; },
+    }, authority);
+    await router.call('set_target', { window: 'my-project' }, context);
+    const token = extractToken((await router.call('approve', {}, context)).output);
+
+    const confirmed = await router.call('confirm_pending', { token }, context);
+
+    assert.equal(confirmed.ok, false);
+    assert.equal(made.calls.filter(c => c.name === 'clickApproval').length, 0);
+    assert.notEqual(router.getPending(token), undefined);
+  });
+
+  it('keeps the token and does not mutate when identity changes during activation', async () => {
+    const context = { sessionId: 'voice-1', epoch: 7, leaseId: 'lease-1' };
+    const target = { windowId: 'w1', composerId: 'composer-1', revision: 'rev-1', ageMs: 10 };
+    let accepted = true;
+    const authority: VoiceToolAuthority = {
+      accepts: () => accepted,
+      live: () => true,
+      mutationHealth: () => ({ ok: true }),
+      committed: () => {},
+    };
+    const made = makeDeps(state);
+    let activations = 0;
+    const router = new VoiceToolRouter({
+      ...made.deps,
+      getPinnedTarget: () => target,
+      activateTarget: async () => { if (++activations > 1) accepted = false; },
+    }, authority);
+    await router.call('set_target', { window: 'my-project' }, context);
+    const token = extractToken((await router.call('approve', {}, context)).output);
+
+    const confirmed = await router.call('confirm_pending', { token }, context);
+
+    assert.equal(confirmed.ok, false);
+    assert.equal(made.calls.filter(c => c.name === 'clickApproval').length, 0);
+    assert.notEqual(router.getPending(token), undefined);
   });
 });

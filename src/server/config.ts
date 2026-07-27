@@ -33,6 +33,7 @@ export function loadConfig(): ServerConfig {
       enabled: process.env.VOICE_ENABLED === 'true',
       openaiApiKey: process.env.OPENAI_API_KEY ?? '',
       model: process.env.VOICE_MODEL ?? 'gpt-realtime-2.1',
+      miniModel: process.env.VOICE_MINI_MODEL ?? '',
       voice: process.env.VOICE_NAME ?? 'marin',
       openrouterApiKey: process.env.OPENROUTER_API_KEY ?? '',
       digestModel: process.env.VOICE_DIGEST_MODEL ?? 'google/gemini-2.5-flash-lite',
@@ -40,6 +41,16 @@ export function loadConfig(): ServerConfig {
       ttsModel: process.env.VOICE_TTS_MODEL ?? 'x-ai/grok-voice-tts-1.0',
       sttModel: process.env.VOICE_STT_MODEL ?? 'x-ai/grok-stt-1.0',
       proactiveMinIntervalMs: parseInt(process.env.VOICE_PROACTIVE_MIN_INTERVAL_MS ?? '15000', 10),
+      // Conservative V1 defaults. Operators can only admit when this versioned price is known.
+      usagePriceVersion: process.env.VOICE_USAGE_PRICE_VERSION ?? 'openai-realtime-2026-01',
+      usageUnitPriceCentsPerMinute: parseInt(process.env.VOICE_USAGE_UNIT_PRICE_CENTS_PER_MINUTE ?? '50', 10),
+      usageDailyCapCents: parseInt(process.env.VOICE_USAGE_DAILY_CAP_CENTS ?? '500', 10),
+      usagePerSessionCapCents: parseInt(process.env.VOICE_USAGE_PER_SESSION_CAP_CENTS ?? '100', 10),
+      sessionAbsoluteMs: parseInt(process.env.VOICE_SESSION_ABSOLUTE_MS ?? '1800000', 10),
+      sessionIdleMs: parseInt(process.env.VOICE_SESSION_IDLE_MS ?? '120000', 10),
+      sessionIdleGraceMs: parseInt(process.env.VOICE_SESSION_IDLE_GRACE_MS ?? '60000', 10),
+      sessionLeaseMs: parseInt(process.env.VOICE_SESSION_LEASE_MS ?? '30000', 10),
+      targetMaxAgeMs: parseInt(process.env.VOICE_TARGET_MAX_AGE_MS ?? '5000', 10),
     },
   };
 }

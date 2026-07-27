@@ -1,5 +1,6 @@
-import { randomBytes } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import type { CursorState, ChatElement } from '../../types.js';
+import type { VoiceSessionContext } from './session.js';
 
 /**
  * DICKTATOR tool surface — the closed tool set exposed to the Realtime model. Mirrors the Telegram
@@ -13,6 +14,15 @@ export interface VoiceSession {
   windowId?: string;
   /** tab title of the sticky current target. */
   tabTitle?: string;
+  /** Stable Cursor target, never derived from a display title at execution time. */
+  target?: PinnedVoiceTarget;
+}
+
+export interface PinnedVoiceTarget {
+  windowId: string;
+  composerId: string;
+  revision: string;
+  ageMs: number;
 }
 
 export interface PendingConfirmation {
@@ -21,6 +31,12 @@ export interface PendingConfirmation {
   args: Record<string, unknown>;
   summary: string;
   createdAt: number;
+  expiresAt: number;
+  sessionId?: string;
+  epoch?: number;
+  leaseId?: string;
+  target?: PinnedVoiceTarget;
+  argsDigest: string;
 }
 
 export interface SessionSummary {
@@ -35,13 +51,27 @@ export interface VoiceToolDeps {
   listSessions(): SessionSummary[];
   /** Ensure the given window (and optionally tab) is active in Cursor. */
   activateTarget(windowId: string, tabTitle?: string): Promise<void>;
-  sendMessage(text: string): Promise<void>;
-  clickApproval(selectorPath: string): Promise<void>;
-  clickAction(selectorPath: string, label?: string): Promise<void>;
-  setMode(modeId: string): Promise<void>;
-  setModel(modelId: string): Promise<void>;
+  sendMessage(text: string, target: PinnedVoiceTarget): Promise<void>;
+  clickApproval(selectorPath: string, target: PinnedVoiceTarget): Promise<void>;
+  clickAction(selectorPath: string, label: string | undefined, target: PinnedVoiceTarget): Promise<void>;
+  setMode(modeId: string, target: PinnedVoiceTarget): Promise<void>;
+  setModel(modelId: string, target: PinnedVoiceTarget): Promise<void>;
   /** Spoken-form 2-3 sentence digest of recent transcript / state. */
   digest(messages: ChatElement[], state: CursorState): Promise<string>;
+  /** Exact current Cursor target from state, not window-monitor display data. */
+  getPinnedTarget?(): PinnedVoiceTarget | null;
+  /** Server-owned termination control; never aliases a Cursor mutation. */
+  terminateVoice?(context: VoiceSessionContext): Promise<{ state: string }>;
+  /** Re-validate the pinned target immediately before mutation execution. Returns true if target matches expected. */
+  revalidateTarget?(expected: PinnedVoiceTarget): boolean;
+}
+
+/** Server authority supplied by VoiceTransport. Absent only in isolated legacy unit tests. */
+export interface VoiceToolAuthority {
+  accepts(context: VoiceSessionContext): boolean;
+  live(context: VoiceSessionContext): boolean;
+  mutationHealth(context: VoiceSessionContext, target: PinnedVoiceTarget): { ok: boolean; reason?: string };
+  committed(context: VoiceSessionContext): void;
 }
 
 const CONFIRM_TTL_MS = 90_000;
@@ -174,6 +204,12 @@ export const VOICE_TOOL_SCHEMAS = [
       required: ['token'],
     },
   },
+  {
+    type: 'function',
+    name: 'disconnect_voice',
+    description: 'End this voice session immediately. This is a voice transport control, not a Cursor approval or rejection.',
+    parameters: { type: 'object', properties: {}, required: [] },
+  },
 ] as const;
 
 export interface ToolResult {
@@ -188,12 +224,23 @@ function fuzzyIncludes(haystack: string, needle: string): boolean {
   return haystack.toLowerCase().includes(needle.trim().toLowerCase());
 }
 
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`;
+}
+
+export function canonicalArgsDigest(args: Record<string, unknown>): string {
+  return createHash('sha256').update(canonicalJson(args)).digest('hex');
+}
+
 export class VoiceToolRouter {
   private deps: VoiceToolDeps;
   private session: VoiceSession = {};
   private pending = new Map<string, PendingConfirmation>();
 
-  constructor(deps: VoiceToolDeps) {
+  constructor(deps: VoiceToolDeps, private readonly authority?: VoiceToolAuthority) {
     this.deps = deps;
   }
 
@@ -207,17 +254,34 @@ export class VoiceToolRouter {
     return this.pending.get(token);
   }
 
+  revokeAuthority(): void {
+    this.pending.clear();
+  }
+
   private sweepExpired(): void {
     const now = Date.now();
     for (const [token, p] of this.pending) {
-      if (now - p.createdAt > CONFIRM_TTL_MS) this.pending.delete(token);
+      if (now >= p.expiresAt) this.pending.delete(token);
     }
   }
 
-  private createPending(tool: string, args: Record<string, unknown>, summary: string): ToolResult {
+  private createPending(tool: string, args: Record<string, unknown>, summary: string, context?: VoiceSessionContext): ToolResult {
     this.sweepExpired();
     const token = randomBytes(6).toString('hex');
-    this.pending.set(token, { token, tool, args, summary, createdAt: Date.now() });
+    const createdAt = Date.now();
+    this.pending.set(token, {
+      token,
+      tool,
+      args,
+      summary,
+      createdAt,
+      expiresAt: createdAt + CONFIRM_TTL_MS,
+      sessionId: context?.sessionId,
+      epoch: context?.epoch,
+      leaseId: context?.leaseId,
+      target: this.session.target,
+      argsDigest: canonicalArgsDigest(args),
+    });
     return {
       ok: true,
       pending: true,
@@ -237,17 +301,18 @@ export class VoiceToolRouter {
     await this.deps.activateTarget(winId, this.session.tabTitle);
   }
 
-  async call(name: string, args: Record<string, unknown>): Promise<ToolResult> {
+  async call(name: string, args: Record<string, unknown>, context?: VoiceSessionContext): Promise<ToolResult> {
     try {
       switch (name) {
         case 'list_sessions': return this.listSessions();
-        case 'set_target': return this.setTarget(args);
+        case 'set_target': return await this.setTarget(args);
         case 'get_status': return await this.getStatus();
         case 'get_all_status': return this.getAllStatus();
         case 'read_recent': return await this.readRecent(args);
-        case 'confirm_pending': return await this.confirmPending(args);
+        case 'confirm_pending': return await this.confirmPending(args, context);
+        case 'disconnect_voice': return await this.disconnectVoice(context);
         default:
-          if (isMutatingTool(name)) return this.stageMutation(name, args);
+          if (isMutatingTool(name)) return this.stageMutation(name, args, context);
           return { ok: false, output: `Unknown tool: ${name}` };
       }
     } catch (err) {
@@ -267,7 +332,7 @@ export class VoiceToolRouter {
     return { ok: true, output: lines.join('\n') };
   }
 
-  private setTarget(args: Record<string, unknown>): ToolResult {
+  private async setTarget(args: Record<string, unknown>): Promise<ToolResult> {
     const window = typeof args.window === 'string' ? args.window : '';
     const tab = typeof args.tab === 'string' ? args.tab : undefined;
     if (!window) return { ok: false, output: 'set_target requires a window name.' };
@@ -292,7 +357,13 @@ export class VoiceToolRouter {
       }
       tabTitle = tabMatches[0].title;
     }
-    this.session = { windowId: win.windowId, tabTitle };
+    await this.deps.activateTarget(win.windowId, tabTitle);
+    const target = this.deps.getPinnedTarget?.() ?? undefined;
+    if (this.deps.getPinnedTarget && (!target || target.windowId !== win.windowId)) {
+      return { ok: false, output: 'Target did not become healthy. Select a healthy Cursor session.' };
+    }
+    this.pending.clear();
+    this.session = { windowId: win.windowId, tabTitle, target };
     return { ok: true, output: `Target set to ${win.windowTitle}${tabTitle ? `, tab ${tabTitle}` : ''}.` };
   }
 
@@ -326,13 +397,16 @@ export class VoiceToolRouter {
 
   // --- mutating: stage + confirm ---
 
-  private stageMutation(name: string, args: Record<string, unknown>): ToolResult {
+  private stageMutation(name: string, args: Record<string, unknown>, context?: VoiceSessionContext): ToolResult {
+    const authorization = this.authorizeMutation(context);
+    if (authorization) return authorization;
     const state = this.deps.getState();
     switch (name) {
       case 'send_to_session': {
         const text = typeof args.text === 'string' ? args.text.trim() : '';
         if (!text) return { ok: false, output: 'send_to_session requires text.' };
-        return this.createPending(name, { text }, `send "${text}" to the current session`);
+        const bounded = text.slice(0, 4_000);
+        return this.createPending(name, { text: bounded }, `send "${bounded}" to the current session`, context);
       }
       case 'approve':
       case 'reject':
@@ -343,7 +417,7 @@ export class VoiceToolRouter {
         const action = approval.actions.find(a => a.type === wanted)
           ?? (wanted === 'approve' ? approval.actions.find(a => a.type === 'approve_all') : undefined);
         if (!action) return { ok: false, output: `No ${wanted} button available for the pending approval.` };
-        return this.createPending(name, { selectorPath: action.selectorPath }, `${wanted} the pending approval: ${approval.description.substring(0, 140)}`);
+        return this.createPending(name, { selectorPath: action.selectorPath }, `${wanted} the pending approval: ${approval.description.substring(0, 140)}`, context);
       }
       case 'run_action':
       case 'skip_action': {
@@ -357,56 +431,150 @@ export class VoiceToolRouter {
         return this.createPending(
           name,
           { selectorPath: act.selectorPath, label: act.label },
-          `${wanted} the pending command: ${runCmd.command || runCmd.description}`.substring(0, 180)
+          `${wanted} the pending command: ${runCmd.command || runCmd.description}`.substring(0, 180),
+          context
         );
       }
       case 'set_mode': {
         const mode = typeof args.mode === 'string' ? args.mode.trim() : '';
         if (!mode) return { ok: false, output: 'set_mode requires a mode.' };
-        return this.createPending(name, { mode }, `switch mode to ${mode}`);
+        return this.createPending(name, { mode }, `switch mode to ${mode}`, context);
       }
       case 'set_model': {
         const model = typeof args.model === 'string' ? args.model.trim() : '';
         if (!model) return { ok: false, output: 'set_model requires a model.' };
-        return this.createPending(name, { model }, `switch model to ${model}`);
+        return this.createPending(name, { model }, `switch model to ${model}`, context);
       }
       default:
         return { ok: false, output: `Unknown mutating tool: ${name}` };
     }
   }
 
-  private async confirmPending(args: Record<string, unknown>): Promise<ToolResult> {
+  private async confirmPending(args: Record<string, unknown>, context?: VoiceSessionContext): Promise<ToolResult> {
     const token = typeof args.token === 'string' ? args.token.trim() : '';
     this.sweepExpired();
     const pending = token ? this.pending.get(token) : undefined;
     if (!pending) {
       return { ok: false, output: 'No such pending confirmation (wrong token, already executed, or expired). Stage the action again.' };
     }
-    this.pending.delete(token); // single-use
+
+    if (canonicalArgsDigest(pending.args) !== pending.argsDigest) {
+      return { ok: false, output: 'Confirmation integrity check failed. Stage the action again.' };
+    }
+    if (pending.sessionId && (!context || pending.sessionId !== context.sessionId || pending.epoch !== context.epoch || pending.leaseId !== context.leaseId)) {
+      return { ok: false, output: 'Confirmation belongs to a different or expired voice session. Stage the action again.' };
+    }
+    if (this.authority) {
+      if (!context || !pending.target || !this.authority.accepts(context)) {
+        return { ok: false, output: 'Voice authority is no longer live. Stage the action again.' };
+      }
+      const health = this.authority.mutationHealth(context, pending.target);
+      if (!health.ok) return { ok: false, output: health.reason ?? 'Pinned target is no longer healthy. Stage the action again.' };
+    }
 
     await this.ensureTargetActive();
-    const a = pending.args;
-    switch (pending.tool) {
-      case 'send_to_session':
-        await this.deps.sendMessage(a.text as string);
-        return { ok: true, output: 'Message sent.' };
-      case 'approve':
-      case 'reject':
-      case 'cancel':
-        await this.deps.clickApproval(a.selectorPath as string);
-        return { ok: true, output: `Done: ${pending.summary}.` };
-      case 'run_action':
-      case 'skip_action':
-        await this.deps.clickAction(a.selectorPath as string, a.label as string | undefined);
-        return { ok: true, output: `Done: ${pending.summary}.` };
-      case 'set_mode':
-        await this.deps.setMode(a.mode as string);
-        return { ok: true, output: `Mode switched to ${a.mode}.` };
-      case 'set_model':
-        await this.deps.setModel(a.model as string);
-        return { ok: true, output: `Model switched to ${a.model}.` };
-      default:
-        return { ok: false, output: `Cannot execute unknown staged tool: ${pending.tool}` };
+
+    // Activation awaits; revalidate the staged authority immediately before executing.
+    const current = this.pending.get(token);
+    if (!current || canonicalArgsDigest(current.args) !== current.argsDigest) {
+      return { ok: false, output: 'Confirmation is no longer valid. Stage the action again.' };
     }
+    if (current.sessionId && (!context || current.sessionId !== context.sessionId || current.epoch !== context.epoch || current.leaseId !== context.leaseId)) {
+      return { ok: false, output: 'Confirmation belongs to a different or expired voice session. Stage the action again.' };
+    }
+    if (this.authority) {
+      if (!context || !current.target || !this.authority.accepts(context)) {
+        return { ok: false, output: 'Voice authority is no longer live. Stage the action again.' };
+      }
+      const health = this.authority.mutationHealth(context, current.target);
+      if (!health.ok) return { ok: false, output: health.reason ?? 'Pinned target is no longer healthy. Stage the action again.' };
+    }
+
+    // Helper to re-validate target immediately before each mutation await.
+    // This closes the TOCTOU race where CDP could switch windows/targets mid-flight.
+    const ensureTargetValid = (): void => {
+      if (current.target && this.deps.revalidateTarget && !this.deps.revalidateTarget(current.target)) {
+        throw new Error('Pinned target changed during activation. Stage the action again.');
+      }
+    };
+
+    // Helper to re-validate target after mutation await. Fail-closed if changed.
+    const ensureTargetValidAfter = (): void => {
+      if (current.target && this.deps.revalidateTarget && !this.deps.revalidateTarget(current.target)) {
+        throw new Error('Pinned target changed during mutation execution. Stage the action again.');
+      }
+    };
+
+    // Token remains retryable until a mutation succeeds; consume it before
+    // post-mutation validation so a successful side effect cannot be replayed.
+    const target = current.target;
+    const consume = (): void => {
+      this.pending.delete(token);
+      if (context) this.authority?.committed(context);
+    };
+
+    try {
+      let result: ToolResult;
+      switch (current.tool) {
+        case 'send_to_session':
+          ensureTargetValid();
+          await this.deps.sendMessage(current.args.text as string, target!);
+          consume();
+          ensureTargetValidAfter();
+          return { ok: true, output: 'Message sent.' };
+        case 'approve':
+        case 'reject':
+        case 'cancel':
+          ensureTargetValid();
+          await this.deps.clickApproval(current.args.selectorPath as string, target!);
+          consume();
+          ensureTargetValidAfter();
+          return { ok: true, output: `Done: ${current.summary}.` };
+        case 'run_action':
+        case 'skip_action':
+          ensureTargetValid();
+          await this.deps.clickAction(current.args.selectorPath as string, current.args.label as string | undefined, target!);
+          consume();
+          ensureTargetValidAfter();
+          return { ok: true, output: `Done: ${current.summary}.` };
+        case 'set_mode':
+          ensureTargetValid();
+          await this.deps.setMode(current.args.mode as string, target!);
+          consume();
+          ensureTargetValidAfter();
+          return { ok: true, output: `Mode switched to ${current.args.mode}.` };
+        case 'set_model':
+          ensureTargetValid();
+          await this.deps.setModel(current.args.model as string, target!);
+          consume();
+          ensureTargetValidAfter();
+          return { ok: true, output: `Model switched to ${current.args.model}.` };
+        default:
+          return { ok: false, output: `Cannot execute unknown staged tool: ${current.tool}` };
+      }
+    } catch (err) {
+      // Pre-mutation failures leave the token for retry. Post-mutation failures
+      // already called consume() so the side effect cannot be replayed.
+      return { ok: false, output: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  private authorizeMutation(context?: VoiceSessionContext): ToolResult | null {
+    if (!this.authority) return null;
+    if (!context || !this.session.target || !this.authority.accepts(context)) {
+      return { ok: false, output: 'Voice authority is not live. Mutations are unavailable.' };
+    }
+    const health = this.authority.mutationHealth(context, this.session.target);
+    return health.ok ? null : { ok: false, output: health.reason ?? 'Pinned target is not healthy. Mutations are unavailable.' };
+  }
+
+  private async disconnectVoice(context?: VoiceSessionContext): Promise<ToolResult> {
+    if (this.authority && (!context || !this.authority.live(context))) {
+      return { ok: false, output: 'Voice authority is not live.' };
+    }
+    if (!this.deps.terminateVoice) return { ok: false, output: 'Voice termination is unavailable.' };
+    this.pending.clear();
+    const status = await this.deps.terminateVoice(context as VoiceSessionContext);
+    return { ok: true, output: `Voice session ${status.state}.` };
   }
 }

@@ -120,6 +120,8 @@ export class Relay {
   private sessionStore: WebappSessionStore;
   private loginAttempts = new Map<string, RateLimitEntry>();
   private voiceTransport: VoiceTransport | null = null;
+  /** Authenticated session tokens with ≥ 1 connected socket.io client. */
+  private activeSockets = new Map<string, number>();
 
   /** Max-Age for session cookie (30 days), aligned with typical “stay signed in” expectation. */
   private static readonly SESSION_COOKIE_MAX_AGE_SEC = 30 * 24 * 60 * 60;
@@ -232,12 +234,19 @@ export class Relay {
   /** Attach the voice transport after construction (started later in main). */
   setVoiceTransport(transport: VoiceTransport): void {
     this.voiceTransport = transport;
+    transport.setSocketHealthProvider(() => {
+      if (!this.authEnabled) return this.io.engine.clientsCount > 0;
+      const owner = this.voiceTransport?.currentOwner;
+      if (!owner) return false;
+      return (this.activeSockets.get(owner) ?? 0) > 0;
+    });
+    transport.setHangupHandler((status) => this.io.emit('voice:hangup', status));
   }
 
   private setupRoutes(): void {
     const clientDir = join(__dirname, '..', 'client');
 
-    this.app.use(express.json());
+    this.app.use(express.json({ limit: '16kb' }));
 
     // --- Voice ("car mode") endpoints. Auth-checked explicitly because they
     // are registered before the trailing auth middleware. ---
@@ -253,8 +262,9 @@ export class Relay {
       if (!voiceAuthOk(req, res)) return;
       if (!this.voiceTransport) return res.status(503).json({ error: 'Voice transport not enabled' });
       try {
-        const secret = await this.voiceTransport.mintClientSecret();
-        res.json({ value: secret.value, expiresAt: secret.expiresAt ?? null });
+        const accountKey = this.resolveHttpSession(req) ?? 'local';
+        const secret = await this.voiceTransport.mintClientSecret(accountKey);
+        res.json({ value: secret.value, expiresAt: secret.expiresAt ?? null, sessionId: secret.sessionId, epoch: secret.epoch });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`[relay] Voice token mint failed: ${msg}`);
@@ -267,28 +277,79 @@ export class Relay {
       if (!this.voiceTransport) return res.status(503).json({ error: 'Voice transport not enabled' });
       const callId = typeof req.body?.callId === 'string' ? req.body.callId : '';
       const ephemeralKey = typeof req.body?.ephemeralKey === 'string' ? req.body.ephemeralKey : undefined;
-      if (!callId) return res.status(400).json({ error: 'callId required' });
+      const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId : '';
+      const epoch = Number.isSafeInteger(req.body?.epoch) ? req.body.epoch : -1;
+      if (!callId || !sessionId || epoch < 1 || (ephemeralKey?.length ?? 0) > 8_192) return res.status(400).json({ error: 'callId, sessionId, and epoch required' });
+      const owner = this.resolveHttpSession(req);
       try {
-        await this.voiceTransport.attachCall(callId, ephemeralKey);
+        await this.voiceTransport.attachCall(callId, ephemeralKey, sessionId, epoch, owner);
         res.json({ ok: true });
       } catch (err) {
+        const e = err as NodeJS.ErrnoException & { statusCode?: number };
+        if (e.statusCode === 403) {
+          res.status(403).json({ error: 'Unauthorized' });
+          return;
+        }
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`[relay] Voice sideband attach failed: ${msg}`);
         res.status(500).json({ error: 'Failed to attach voice session' });
       }
     });
 
-    this.app.post('/api/voice/disconnect', (req, res) => {
+    const terminateVoice = async (req: express.Request, res: express.Response): Promise<void> => {
       if (!voiceAuthOk(req, res)) return;
-      this.voiceTransport?.detachCall();
-      res.json({ ok: true });
+      if (!this.voiceTransport) {
+        res.status(503).json({ error: 'Voice transport not enabled' });
+        return;
+      }
+      const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId : '';
+      const epoch = Number.isSafeInteger(req.body?.epoch) ? req.body.epoch : -1;
+      const reason = typeof req.body?.reason === 'string' ? req.body.reason.slice(0, 120) : 'client_request';
+      if (!sessionId || epoch < 1) {
+        res.status(400).json({ error: 'sessionId and epoch required' });
+        return;
+      }
+      const owner = this.resolveHttpSession(req);
+      try {
+        res.json(await this.voiceTransport.terminate(sessionId, epoch, reason, owner));
+      } catch (err) {
+        const e = err as NodeJS.ErrnoException & { statusCode?: number };
+        if (e.statusCode === 403) {
+          res.status(403).json({ error: 'Unauthorized' });
+          return;
+        }
+        throw err;
+      }
+    };
+
+    this.app.post('/api/voice/terminate', (req, res) => { void terminateVoice(req, res); });
+    this.app.post('/api/voice/disconnect', (req, res) => { void terminateVoice(req, res); });
+
+    this.app.post('/api/voice/heartbeat', (req, res) => {
+      if (!voiceAuthOk(req, res)) return;
+      if (!this.voiceTransport) return res.status(503).json({ error: 'Voice transport not enabled' });
+      const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId : '';
+      const epoch = Number.isSafeInteger(req.body?.epoch) ? req.body.epoch : -1;
+      const owner = this.resolveHttpSession(req);
+      if (!sessionId || epoch < 1 || !this.voiceTransport.heartbeat(sessionId, epoch, owner)) {
+        return res.status(409).json({ error: 'Voice lease is no longer live' });
+      }
+      return res.json({ ok: true });
     });
 
     this.app.get('/api/voice/status', (req, res) => {
       if (!voiceAuthOk(req, res)) return;
       if (!this.voiceTransport) return res.json({ enabled: false });
-      const s = this.voiceTransport.status;
-      res.json({ enabled: true, connected: s.connected, target: s.target ?? null });
+      const owner = this.resolveHttpSession(req);
+      const s = this.voiceTransport.statusFor(owner);
+      if (s === null) return res.status(403).json({ error: 'Unauthorized' });
+      res.json({
+        enabled: true,
+        ...s,
+        estimatedSpendCents: s.budget.estimatedCents,
+        reportedSpendCents: s.budget.reportedCents,
+        remainingBudgetCents: s.budget.remainingCents,
+      });
     });
 
     this.app.get('/login', (_req, res) => {
@@ -471,6 +532,12 @@ export class Relay {
 
     this.io.on('connection', (socket) => {
       console.log(`[relay] Client connected: ${socket.id}`);
+
+      // Track authenticated sessions for voice socket-health ownership
+      const socketSessionToken = this.resolveSocketSession(socket);
+      if (socketSessionToken) {
+        this.activeSockets.set(socketSessionToken, (this.activeSockets.get(socketSessionToken) ?? 0) + 1);
+      }
 
       socket.emit('state:full', this.stateManager.getCurrentState());
 
@@ -725,6 +792,11 @@ export class Relay {
 
       socket.on('disconnect', (reason) => {
         console.log(`[relay] Client disconnected: ${socket.id} (${reason})`);
+        if (socketSessionToken) {
+          const count = this.activeSockets.get(socketSessionToken) ?? 0;
+          if (count <= 1) this.activeSockets.delete(socketSessionToken);
+          else this.activeSockets.set(socketSessionToken, count - 1);
+        }
       });
     });
   }

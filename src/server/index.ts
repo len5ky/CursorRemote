@@ -159,6 +159,7 @@ async function main(): Promise<void> {
     } else {
       const voice = new VoiceTransport(
         config.voice,
+        config.dataDir,
         windowMonitor,
         stateManager,
         commandExecutor,

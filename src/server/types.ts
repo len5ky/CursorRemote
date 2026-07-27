@@ -354,8 +354,10 @@ export interface VoiceConfig {
   enabled: boolean;
   /** OpenAI API key used to mint ephemeral client secrets + sideband WS. Never logged. */
   openaiApiKey: string;
-  /** Realtime model, e.g. gpt-realtime-2.1 (fallback: gpt-realtime-2.1-mini). */
+  /** Realtime model. V1 never routes or reconnects to another model automatically. */
   model: string;
+  /** Optional operator-selected Mini model name; unused unless explicitly configured. */
+  miniModel: string;
   /** Output voice name. */
   voice: string;
   /** OpenRouter API key for the digest summarizer. Never logged. */
@@ -371,6 +373,18 @@ export interface VoiceConfig {
   sttModel: string;
   /** Minimum gap between proactive spoken notifications (ms). */
   proactiveMinIntervalMs: number;
+  /** Versioned, known realtime unit price required before admission. */
+  usagePriceVersion: string;
+  usageUnitPriceCentsPerMinute: number;
+  usageDailyCapCents: number;
+  usagePerSessionCapCents: number;
+  sessionAbsoluteMs: number;
+  sessionIdleMs: number;
+  /** Additional grace period after idleMs before the session is reaped.
+   *  During the grace window lastActivityAt is stale but the session is not yet terminated. */
+  sessionIdleGraceMs: number;
+  sessionLeaseMs: number;
+  targetMaxAgeMs: number;
 }
 
 export interface TelegramConfig {
