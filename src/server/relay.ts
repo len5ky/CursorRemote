@@ -295,6 +295,11 @@ export class Relay {
       res.type('html').send(LOGIN_PAGE_HTML);
     });
 
+    // Open WebUI and other prior :3000 owners redirected failures to /error.
+    // After reclaiming the port, authenticated hits would otherwise 404 as
+    // "Cannot GET /error". Send them home.
+    this.app.get('/error', (_req, res) => res.redirect(302, '/'));
+
     this.app.post('/api/login', (req, res) => {
       if (!this.authEnabled) return res.json({ token: 'no-auth' });
 
