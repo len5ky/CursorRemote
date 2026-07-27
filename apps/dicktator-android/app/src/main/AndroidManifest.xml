@@ -6,11 +6,21 @@
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
 
+  <uses-feature
+    android:name="android.hardware.type.automotive"
+    android:required="false" />
+  <uses-feature
+    android:name="android.software.car.templates_host"
+    android:required="false" />
+
   <application
     android:allowBackup="false"
     android:label="DICKTATOR"
     android:theme="@style/Theme.Dicktator"
     android:usesCleartextTraffic="true">
+    <meta-data
+      android:name="com.google.android.gms.car.application"
+      android:resource="@xml/automotive_app_desc" />
     <activity
       android:name=".MainActivity"
       android:exported="true">
@@ -23,5 +33,13 @@
       android:name=".VoiceSessionService"
       android:exported="false"
       android:foregroundServiceType="microphone|mediaPlayback" />
+    <service
+      android:name=".car.DicktatorCarAppService"
+      android:exported="true">
+      <intent-filter>
+        <action android:name="androidx.car.app.CarAppService" />
+        <category android:name="androidx.car.app.category.IOT" />
+      </intent-filter>
+    </service>
   </application>
 </manifest>

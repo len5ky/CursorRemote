@@ -254,6 +254,33 @@ export class VoiceToolRouter {
     return this.pending.get(token);
   }
 
+  /** Newest non-expired pending confirmation (Android Auto Approve / Later). */
+  latestPending(context?: VoiceSessionContext): PendingConfirmation | undefined {
+    this.sweepExpired();
+    let newest: PendingConfirmation | undefined;
+    for (const pending of this.pending.values()) {
+      if (context && (pending.sessionId !== context.sessionId || pending.epoch !== context.epoch || pending.leaseId !== context.leaseId)) {
+        continue;
+      }
+      if (!newest || pending.createdAt > newest.createdAt) newest = pending;
+    }
+    return newest;
+  }
+
+  /** Drop a pending confirmation without executing (Auto "Later"). */
+  deferPending(token: string, context?: VoiceSessionContext): { ok: boolean; output: string } {
+    this.sweepExpired();
+    const pending = this.pending.get(token);
+    if (!pending) {
+      return { ok: false, output: 'No such pending confirmation (wrong token, already executed, or expired).' };
+    }
+    if (pending.sessionId && (!context || pending.sessionId !== context.sessionId || pending.epoch !== context.epoch || pending.leaseId !== context.leaseId)) {
+      return { ok: false, output: 'Confirmation belongs to a different or expired voice session.' };
+    }
+    this.pending.delete(token);
+    return { ok: true, output: `Deferred: ${pending.summary}` };
+  }
+
   revokeAuthority(): void {
     this.pending.clear();
   }

@@ -62,9 +62,9 @@ Key points:
 
 Source: `src/server/transports/voice/` (`realtime-bridge.ts`, `tools.ts`,
 `digest.ts`, `index.ts`) plus `src/client/voice.js` and relay endpoints
-`/api/voice/{token,call,terminate,disconnect,status}`.
+`/api/voice/{token,call,terminate,disconnect,heartbeat,status,confirm,defer}`.
 
-## Android V2
+## Android V2 + Android Auto
 
 `apps/dicktator-android` mirrors the browser admission path with native WebRTC:
 it requests `RECORD_AUDIO`, mints `/api/voice/token`, sends SDP directly to
@@ -73,8 +73,13 @@ returned call ID via `/api/voice/call`, and heartbeats every 10 seconds. Its
 microphone/media-playback foreground service owns the tracks and peer connection.
 Both the notification and app Hang Up controls stop local media first and then
 call `/api/voice/terminate`. The Android UI displays the sticky target, state,
-idle and budget fields returned by `/api/voice/status`. See its README for the
-physical-device and Android SDK build requirements; Android Auto remains V3.
+idle and budget fields returned by `/api/voice/status`.
+
+Android Auto is provided by `DicktatorCarAppService` (Car App Library templates):
+**Talk** starts the same WebRTC service; **Approve** / **Later** hit
+`/api/voice/confirm` and `/api/voice/defer` for the latest staged confirmation
+(token never returned over status); **Hang Up** matches the phone terminate path.
+See `apps/dicktator-android/README.md` for DHU / device run steps.
 
 ## Configuration
 

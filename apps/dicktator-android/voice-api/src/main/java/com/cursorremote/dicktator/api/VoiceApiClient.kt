@@ -33,6 +33,12 @@ data class VoiceStatus(
   val estimatedSpendCents: Int?,
   val reportedSpendCents: Int?,
   val remainingBudgetCents: Int?,
+  val pendingSummary: String?,
+)
+
+data class VoiceActionResult(
+  val ok: Boolean,
+  val output: String,
 )
 
 class VoiceApiException(val statusCode: Int, message: String) : Exception(message)
@@ -99,10 +105,21 @@ class VoiceApiClient(context: Context) {
     post("/api/voice/heartbeat", JSONObject().put("sessionId", sessionId).put("epoch", epoch))
   }
 
+  fun confirmStoredSession(): VoiceActionResult? {
+    val session = currentSession() ?: return null
+    return parseAction(post("/api/voice/confirm", JSONObject().put("sessionId", session.sessionId).put("epoch", session.epoch)))
+  }
+
+  fun deferStoredSession(): VoiceActionResult? {
+    val session = currentSession() ?: return null
+    return parseAction(post("/api/voice/defer", JSONObject().put("sessionId", session.sessionId).put("epoch", session.epoch)))
+  }
+
   fun status(): VoiceStatus {
     val response = request("GET", "/api/voice/status")
     val target = response.optJSONObject("target")
     val budget = response.optJSONObject("budget")
+    val pending = response.optJSONObject("pendingConfirm")
     val targetLabel = target?.let {
       listOf(it.optString("windowId"), it.optString("composerId"))
         .filter(String::isNotBlank)
@@ -118,8 +135,14 @@ class VoiceApiClient(context: Context) {
       estimatedSpendCents = response.optIntOrNull("estimatedSpendCents") ?: budget?.optIntOrNull("estimatedCents"),
       reportedSpendCents = response.optIntOrNull("reportedSpendCents") ?: budget?.optIntOrNull("reportedCents"),
       remainingBudgetCents = response.optIntOrNull("remainingBudgetCents") ?: budget?.optIntOrNull("remainingCents"),
+      pendingSummary = pending?.optStringOrNull("summary"),
     )
   }
+
+  private fun parseAction(response: JSONObject): VoiceActionResult = VoiceActionResult(
+    ok = response.optBoolean("ok"),
+    output = response.optString("output"),
+  )
 
   fun saveSession(session: VoiceSession) {
     preferences.edit()

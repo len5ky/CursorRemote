@@ -402,4 +402,40 @@ describe('confirmation flow', () => {
     assert.equal(made.calls.filter(c => c.name === 'clickApproval').length, 0);
     assert.equal(router.getPending(token), undefined);
   });
+
+  it('exposes latest pending and defers it without executing (Android Auto Later)', async () => {
+    const state = baseState({
+      activeComposerId: 'composer-1',
+      pendingApprovals: [{
+        id: 'a1',
+        description: 'Apply migration',
+        actions: [
+          { label: 'Approve', type: 'approve', selectorPath: 'css=#approve' },
+          { label: 'Reject', type: 'reject', selectorPath: 'css=#reject' },
+        ],
+      }],
+    });
+    const context = { sessionId: 'voice-1', epoch: 1, leaseId: 'lease-1' };
+    const target = { windowId: 'w1', composerId: 'composer-1', revision: 'rev-1', ageMs: 0 };
+    const made = makeDeps(state);
+    const router = new VoiceToolRouter({
+      ...made.deps,
+      getPinnedTarget: () => target,
+    }, {
+      accepts: () => true,
+      live: () => true,
+      mutationHealth: () => ({ ok: true }),
+      committed: () => {},
+    });
+    await router.call('set_target', { window: 'my-project' }, context);
+    const staged = await router.call('approve', {}, context);
+    const token = extractToken(staged.output);
+    const latest = router.latestPending(context);
+    assert.ok(latest);
+    assert.equal(latest!.token, token);
+    const deferred = router.deferPending(token, context);
+    assert.equal(deferred.ok, true);
+    assert.equal(router.latestPending(context), undefined);
+    assert.equal(made.calls.filter(c => c.name === 'clickApproval').length, 0);
+  });
 });

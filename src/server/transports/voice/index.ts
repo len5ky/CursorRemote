@@ -270,9 +270,11 @@ export class VoiceTransport implements Transport {
     sessionId: string | null;
     epoch: number | null;
     state: VoiceSessionStatus['state'];
+    idleStatus: VoiceSessionStatus['idleStatus'];
     target: PinnedVoiceTarget | null;
     health: { voice: boolean; sideband: boolean; socket: boolean; cdp: boolean; target: boolean };
     budget: VoiceSessionStatus['budget'];
+    pendingConfirm: { summary: string; tool: string; expiresAt: number } | null;
   } | null {
     if (owner !== undefined) {
       const sessionOwner = this.sessions.currentOwner();
@@ -286,11 +288,40 @@ export class VoiceTransport implements Transport {
     sessionId: string | null;
     epoch: number | null;
     state: VoiceSessionStatus['state'];
+    idleStatus: VoiceSessionStatus['idleStatus'];
     target: PinnedVoiceTarget | null;
     health: { voice: boolean; sideband: boolean; socket: boolean; cdp: boolean; target: boolean };
     budget: VoiceSessionStatus['budget'];
+    pendingConfirm: { summary: string; tool: string; expiresAt: number } | null;
   } {
     return this._status();
+  }
+
+  /**
+   * Android Auto "Approve": confirm the latest staged voice mutation for this session.
+   * Same atomic claim path as spoken confirm_pending.
+   */
+  async confirmLatest(sessionId: string, epoch: number, owner?: string): Promise<{ ok: boolean; output: string }> {
+    this.assertOwner(owner);
+    const context = this.sessions.currentContext();
+    if (!context || context.sessionId !== sessionId || context.epoch !== epoch || !this.sessions.canUseTools(context)) {
+      return { ok: false, output: 'Voice session is not live for confirmation.' };
+    }
+    const pending = this.router.latestPending(context);
+    if (!pending) return { ok: false, output: 'There is no pending confirmation to approve.' };
+    return this.router.call('confirm_pending', { token: pending.token }, context);
+  }
+
+  /** Android Auto "Later": drop the latest pending confirmation without executing. */
+  deferLatest(sessionId: string, epoch: number, owner?: string): { ok: boolean; output: string } {
+    this.assertOwner(owner);
+    const context = this.sessions.currentContext();
+    if (!context || context.sessionId !== sessionId || context.epoch !== epoch) {
+      return { ok: false, output: 'Voice session is not live.' };
+    }
+    const pending = this.router.latestPending(context);
+    if (!pending) return { ok: false, output: 'There is no pending confirmation to defer.' };
+    return this.router.deferPending(pending.token, context);
   }
 
   private _status(): {
@@ -298,9 +329,11 @@ export class VoiceTransport implements Transport {
     sessionId: string | null;
     epoch: number | null;
     state: VoiceSessionStatus['state'];
+    idleStatus: VoiceSessionStatus['idleStatus'];
     target: PinnedVoiceTarget | null;
     health: { voice: boolean; sideband: boolean; socket: boolean; cdp: boolean; target: boolean };
     budget: VoiceSessionStatus['budget'];
+    pendingConfirm: { summary: string; tool: string; expiresAt: number } | null;
   } {
     const session = this.sessions.status();
     const context = this.sessions.currentContext();
@@ -308,11 +341,13 @@ export class VoiceTransport implements Transport {
     const current = this.currentPinnedTarget();
     const cdp = this.cdpHealthy();
     const exactTarget = !!target && !!current && target.windowId === current.windowId && target.composerId === current.composerId && target.revision === current.revision;
+    const pending = context ? this.router.latestPending(context) : undefined;
     return {
       connected: !!context && this.bridge.connectedFor(context),
       sessionId: session.sessionId,
       epoch: session.epoch,
       state: session.state,
+      idleStatus: session.idleStatus,
       target,
       health: {
         voice: !!context && this.sessions.canUseTools(context),
@@ -322,6 +357,10 @@ export class VoiceTransport implements Transport {
         target: exactTarget,
       },
       budget: session.budget,
+      // Never return the raw confirm token over status — Auto Approve uses /api/voice/confirm.
+      pendingConfirm: pending
+        ? { summary: pending.summary, tool: pending.tool, expiresAt: pending.expiresAt }
+        : null,
     };
   }
 

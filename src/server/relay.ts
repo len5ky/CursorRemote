@@ -352,6 +352,38 @@ export class Relay {
       });
     });
 
+    this.app.post('/api/voice/confirm', async (req, res) => {
+      if (!voiceAuthOk(req, res)) return;
+      if (!this.voiceTransport) return res.status(503).json({ error: 'Voice transport not enabled' });
+      const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId : '';
+      const epoch = Number.isSafeInteger(req.body?.epoch) ? req.body.epoch : -1;
+      if (!sessionId || epoch < 1) return res.status(400).json({ error: 'sessionId and epoch required' });
+      const owner = this.resolveHttpSession(req);
+      try {
+        res.json(await this.voiceTransport.confirmLatest(sessionId, epoch, owner));
+      } catch (err) {
+        const e = err as NodeJS.ErrnoException & { statusCode?: number };
+        if (e.statusCode === 403) return res.status(403).json({ error: 'Unauthorized' });
+        throw err;
+      }
+    });
+
+    this.app.post('/api/voice/defer', (req, res) => {
+      if (!voiceAuthOk(req, res)) return;
+      if (!this.voiceTransport) return res.status(503).json({ error: 'Voice transport not enabled' });
+      const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId : '';
+      const epoch = Number.isSafeInteger(req.body?.epoch) ? req.body.epoch : -1;
+      if (!sessionId || epoch < 1) return res.status(400).json({ error: 'sessionId and epoch required' });
+      const owner = this.resolveHttpSession(req);
+      try {
+        res.json(this.voiceTransport.deferLatest(sessionId, epoch, owner));
+      } catch (err) {
+        const e = err as NodeJS.ErrnoException & { statusCode?: number };
+        if (e.statusCode === 403) return res.status(403).json({ error: 'Unauthorized' });
+        throw err;
+      }
+    });
+
     this.app.get('/login', (_req, res) => {
       if (!this.authEnabled) return res.redirect('/');
       res.type('html').send(LOGIN_PAGE_HTML);
