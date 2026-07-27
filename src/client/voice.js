@@ -95,7 +95,7 @@
 
       const attachRes = await fetch('/api/voice/call', {
         method: 'POST', headers: authHeaders(), credentials: 'same-origin',
-        body: JSON.stringify({ callId }),
+        body: JSON.stringify({ callId, ephemeralKey }),
       });
       if (!attachRes.ok) throw new Error('sideband attach failed');
 

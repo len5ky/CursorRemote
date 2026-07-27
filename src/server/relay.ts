@@ -266,9 +266,10 @@ export class Relay {
       if (!voiceAuthOk(req, res)) return;
       if (!this.voiceTransport) return res.status(503).json({ error: 'Voice transport not enabled' });
       const callId = typeof req.body?.callId === 'string' ? req.body.callId : '';
+      const ephemeralKey = typeof req.body?.ephemeralKey === 'string' ? req.body.ephemeralKey : undefined;
       if (!callId) return res.status(400).json({ error: 'callId required' });
       try {
-        await this.voiceTransport.attachCall(callId);
+        await this.voiceTransport.attachCall(callId, ephemeralKey);
         res.json({ ok: true });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

@@ -117,8 +117,8 @@ export class VoiceTransport implements Transport {
     return this.bridge.mintClientSecret();
   }
 
-  attachCall(callId: string): Promise<void> {
-    return this.bridge.attachSideband(callId);
+  attachCall(callId: string, ephemeralKey?: string): Promise<void> {
+    return this.bridge.attachSideband(callId, ephemeralKey);
   }
 
   detachCall(): void {

@@ -11,9 +11,9 @@ import { VOICE_TOOL_SCHEMAS } from './tools.js';
  *     to /v1/realtime/client_secrets with the real API key (server-side only).
  *  2. Browser opens a WebRTC session directly to OpenAI at /v1/realtime/calls
  *     using the ephemeral token; audio never transits our server.
- *  3. Browser reports the resulting call_id back to the relay → attachSideband()
- *     opens a server-side WebSocket to wss://api.openai.com/v1/realtime?call_id=…
- *     which handles all tool calls and pushes proactive conversation items.
+ *  3. Browser reports call_id + the same ephemeral key back to the relay →
+ *     attachSideband() opens wss://api.openai.com/v1/realtime?call_id=… using
+ *     the ephemeral key (regular project keys return 404 on this sideband).
  *
  * The model only ever sees the closed tool set from tools.ts.
  */
@@ -96,14 +96,19 @@ export class RealtimeBridge {
    * All function calls are handled here (server-authoritative), so the browser
    * client stays dumb.
    */
-  attachSideband(callId: string): Promise<void> {
+  attachSideband(callId: string, ephemeralKey?: string): Promise<void> {
     this.detach();
     this.callId = callId;
     this.closedByUs = false;
 
+    // Sideband auth must use the same ephemeral client secret that opened the
+    // WebRTC call. A project API key gets HTTP 404 (call_id_not_found).
+    const authToken = ephemeralKey || this.config.openaiApiKey;
+    if (!authToken) throw new Error('No auth token for sideband attach');
+
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(`${OPENAI_WS_BASE}?call_id=${encodeURIComponent(callId)}`, {
-        headers: { Authorization: `Bearer ${this.config.openaiApiKey}` },
+        headers: { Authorization: `Bearer ${authToken}` },
       });
       this.ws = ws;
 
