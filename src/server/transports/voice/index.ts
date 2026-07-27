@@ -80,7 +80,7 @@ export class VoiceTransport implements Transport {
       model: config.digestModel,
     });
 
-const deps: VoiceToolDeps = {
+    const deps: VoiceToolDeps = {
       getState: () => stateManager.getCurrentState(),
       listSessions: (): SessionSummary[] => {
         const state = stateManager.getCurrentState();
@@ -113,53 +113,28 @@ const deps: VoiceToolDeps = {
         }
       },
       sendMessage: async (text, target) => {
-        const current = this.currentPinnedTarget();
-        if (target && current) {
-          if (target.windowId !== current.windowId || target.composerId !== current.composerId || target.revision !== current.revision) {
-            throw new Error('Pinned target changed. Stage the action again.');
-          }
-        }
-        const r = await commandExecutor.sendMessage(randomUUID(), text);
+        const expected = this.requireCurrentTarget(target);
+        const r = await commandExecutor.sendMessage(randomUUID(), text, expected.windowId);
         if (!r.ok) throw new Error(r.error ?? 'send failed');
       },
       clickApproval: async (selectorPath, target) => {
-        const current = this.currentPinnedTarget();
-        if (target && current) {
-          if (target.windowId !== current.windowId || target.composerId !== current.composerId || target.revision !== current.revision) {
-            throw new Error('Pinned target changed. Stage the action again.');
-          }
-        }
-        const r = await commandExecutor.clickApproval(randomUUID(), selectorPath);
+        const expected = this.requireCurrentTarget(target);
+        const r = await commandExecutor.clickApproval(randomUUID(), selectorPath, expected.windowId);
         if (!r.ok) throw new Error(r.error ?? 'approval click failed');
       },
       clickAction: async (selectorPath, label, target) => {
-        const current = this.currentPinnedTarget();
-        if (target && current) {
-          if (target.windowId !== current.windowId || target.composerId !== current.composerId || target.revision !== current.revision) {
-            throw new Error('Pinned target changed. Stage the action again.');
-          }
-        }
-        const r = await commandExecutor.clickAction(randomUUID(), selectorPath, label);
+        const expected = this.requireCurrentTarget(target);
+        const r = await commandExecutor.clickAction(randomUUID(), selectorPath, label, expected.windowId);
         if (!r.ok) throw new Error(r.error ?? 'action click failed');
       },
       setMode: async (modeId, target) => {
-        const current = this.currentPinnedTarget();
-        if (target && current) {
-          if (target.windowId !== current.windowId || target.composerId !== current.composerId || target.revision !== current.revision) {
-            throw new Error('Pinned target changed. Stage the action again.');
-          }
-        }
-        const r = await commandExecutor.setMode(randomUUID(), modeId);
+        const expected = this.requireCurrentTarget(target);
+        const r = await commandExecutor.setMode(randomUUID(), modeId, expected.windowId);
         if (!r.ok) throw new Error(r.error ?? 'set mode failed');
       },
       setModel: async (modelId, target) => {
-        const current = this.currentPinnedTarget();
-        if (target && current) {
-          if (target.windowId !== current.windowId || target.composerId !== current.composerId || target.revision !== current.revision) {
-            throw new Error('Pinned target changed. Stage the action again.');
-          }
-        }
-        const r = await commandExecutor.setModel(randomUUID(), modelId);
+        const expected = this.requireCurrentTarget(target);
+        const r = await commandExecutor.setModel(randomUUID(), modelId, expected.windowId);
         if (!r.ok) throw new Error(r.error ?? 'set model failed');
       },
       digest: (messages, state) => digestClient.digest(messages, state),
@@ -354,6 +329,17 @@ const deps: VoiceToolDeps = {
       revision: `${this.stateManager.generation}:${state.activeWindowId}:${state.activeComposerId}`,
       ageMs: Math.max(0, Date.now() - (state.lastExtractionAt ?? 0)),
     };
+  }
+
+  private requireCurrentTarget(target: PinnedVoiceTarget | undefined): PinnedVoiceTarget {
+    const current = this.currentPinnedTarget();
+    if (!target || !current
+      || target.windowId !== current.windowId
+      || target.composerId !== current.composerId
+      || target.revision !== current.revision) {
+      throw new Error('Pinned target changed. Stage the action again.');
+    }
+    return target;
   }
 
   private cdpHealthy(): boolean {

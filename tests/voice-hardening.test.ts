@@ -15,7 +15,9 @@ import {
 } from '../src/server/transports/voice/session.js';
 import { VoiceTransport } from '../src/server/transports/voice/index.js';
 import { parseUsageFromDone } from '../src/server/transports/voice/realtime-bridge.js';
-import type { VoiceConfig } from '../src/server/types.js';
+import { CommandExecutor } from '../src/server/command-executor.js';
+import type { CdpClient } from '../src/server/cdp-client.js';
+import type { SelectorConfig, VoiceConfig } from '../src/server/types.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -628,5 +630,49 @@ describe('voice hardening — pin threading', () => {
     assert.ok(confirmed.output.toLowerCase().includes('target changed'), 'error message should mention target change');
     assert.equal(mutationCalled, true, 'mutation side effect already ran');
     assert.equal(router.getPending(token), undefined, 'token must be consumed to prevent double-apply');
+  });
+});
+
+describe('voice hardening — executor target binding', () => {
+  it('blocks a click when the CDP target changed after voice validation', async () => {
+    let activeTargetId = 'w1';
+    let clicks = 0;
+    const client = {
+      isConnected: () => true,
+      click: async () => { clicks++; },
+    } as unknown as CdpClient;
+    const executor = new CommandExecutor({} as SelectorConfig, () => activeTargetId);
+    executor.setClient(client, 'w1');
+
+    assert.equal(activeTargetId, 'w1'); // voice-level entry validation
+    activeTargetId = 'w2';
+    const result = await executor.clickApproval('cmd-click', '.approve', 'w1');
+
+    assert.equal(result.ok, false);
+    assert.match(result.error ?? '', /target changed/i);
+    assert.equal(clicks, 0, 'wrong-target click must not be dispatched');
+  });
+
+  it('stops sendMessage before keyboard input when the target changes after focus', async () => {
+    let activeTargetId = 'w1';
+    let inputDispatches = 0;
+    const client = {
+      isConnected: () => true,
+      evaluate: async () => {
+        activeTargetId = 'w2';
+        return { ok: true, info: 'input' };
+      },
+      pressKey: async () => { inputDispatches++; },
+      typeText: async () => { inputDispatches++; },
+    } as unknown as CdpClient;
+    const selectors = { chatInput: { strategies: ['.composer'] } } as SelectorConfig;
+    const executor = new CommandExecutor(selectors, () => activeTargetId);
+    executor.setClient(client, 'w1');
+
+    const result = await executor.sendMessage('cmd-send', 'hello', 'w1');
+
+    assert.equal(result.ok, false);
+    assert.match(result.error ?? '', /target changed/i);
+    assert.equal(inputDispatches, 0, 'wrong-target keyboard input must not be dispatched');
   });
 });

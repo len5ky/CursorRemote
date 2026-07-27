@@ -5,6 +5,8 @@ const MAX_RETRIES = 2;
 const RETRY_DELAY_MS = 500;
 const FOCUS_DELAY_MS = 100;
 
+class TargetChangedError extends Error {}
+
 // Cursor 3.8+ uses data-message-index; older builds use data-flat-index.
 const MESSAGE_WRAPPER_SELECTOR = '[data-message-index], [data-flat-index]';
 
@@ -347,20 +349,26 @@ export const ACTION_CLICK_RESOLVER_JS = `
 export class CommandExecutor {
   private selectors: SelectorConfig;
   private client: CdpClient | null = null;
+  private clientTargetId = '';
 
-  constructor(selectors: SelectorConfig) {
+  constructor(
+    selectors: SelectorConfig,
+    private readonly getActiveTargetId?: () => string
+  ) {
     this.selectors = selectors;
   }
 
-  setClient(client: CdpClient | null): void {
+  setClient(client: CdpClient | null, targetId = ''): void {
     this.client = client;
+    this.clientTargetId = client ? targetId : '';
   }
 
-  async sendMessage(commandId: string, text: string): Promise<CommandResult> {
+  async sendMessage(commandId: string, text: string, expectedTargetId?: string): Promise<CommandResult> {
     return this.withRetry(commandId, async (client) => {
       const strategies = this.selectors.chatInput.strategies;
 
       // Step 1: Find and focus the input element (evaluate only for DOM query + focus)
+      this.assertExpectedTarget(expectedTargetId, client);
       const result = await client.evaluate(`
         (() => {
           const strategies = ${JSON.stringify(strategies)};
@@ -390,23 +398,28 @@ export class CommandExecutor {
       await sleep(FOCUS_DELAY_MS);
 
       // Step 2: Clear any existing text via Ctrl+A then Delete (CDP Input domain)
+      this.assertExpectedTarget(expectedTargetId, client);
       await client.pressKey('a', 'KeyA', 65, 2); // 2 = Ctrl modifier
       await sleep(50);
+      this.assertExpectedTarget(expectedTargetId, client);
       await client.pressKey('Backspace', 'Backspace', 8);
       await sleep(50);
 
       // Step 3: Insert text via CDP Input.insertText (native Chromium input pipeline)
+      this.assertExpectedTarget(expectedTargetId, client);
       await client.typeText(text);
       console.log(`[command-executor] Text inserted via Input.insertText (${text.length} chars)`);
       await sleep(150);
 
       // Step 4: Submit with Enter via CDP Input.dispatchKeyEvent
+      this.assertExpectedTarget(expectedTargetId, client);
       await client.pressKey('Enter', 'Enter', 13);
       console.log(`[command-executor] Enter pressed via CDP Input.dispatchKeyEvent`);
 
       const trimmedText = text.trim();
       if (trimmedText.length > 0) {
         await sleep(300);
+        this.assertExpectedTarget(expectedTargetId, client);
         const stillContainsTypedText = await client.evaluate(`
           (() => {
             const strategies = ${JSON.stringify(strategies)};
@@ -428,20 +441,23 @@ export class CommandExecutor {
 
         if (stillContainsTypedText) {
           const isMac = process.platform === 'darwin';
+          this.assertExpectedTarget(expectedTargetId, client);
           await client.pressKey('Enter', 'Enter', 13, isMac ? 4 : 2);
           console.log(`[command-executor] ${isMac ? 'Cmd' : 'Ctrl'}+Enter retry fired because composer still contained typed text`);
         }
       }
-    });
+    }, expectedTargetId);
   }
 
   async clickApproval(
     commandId: string,
-    selectorPath: string
+    selectorPath: string,
+    expectedTargetId?: string
   ): Promise<CommandResult> {
     return this.withRetry(commandId, async (client) => {
+      this.assertExpectedTarget(expectedTargetId, client);
       await client.click(selectorPath);
-    });
+    }, expectedTargetId);
   }
 
   async approveAll(commandId: string): Promise<CommandResult> {
@@ -607,11 +623,12 @@ export class CommandExecutor {
     });
   }
 
-  async setMode(commandId: string, modeId: string): Promise<CommandResult> {
+  async setMode(commandId: string, modeId: string, expectedTargetId?: string): Promise<CommandResult> {
     return this.withRetry(commandId, async (client) => {
       const strategies = this.selectors.modeDropdown?.strategies ?? [];
 
       // Click the dropdown trigger to open the menu
+      this.assertExpectedTarget(expectedTargetId, client);
       const opened = await client.evaluate(`
         (() => {
           const strategies = ${JSON.stringify(strategies)};
@@ -629,6 +646,7 @@ export class CommandExecutor {
       await sleep(250);
 
       // Click the mode item whose ID ends with the modeId
+      this.assertExpectedTarget(expectedTargetId, client);
       const selected = await client.evaluate(`
         (() => {
           const modeId = ${JSON.stringify(modeId)};
@@ -643,17 +661,19 @@ export class CommandExecutor {
       `) as boolean;
       if (!selected) throw new Error(`Mode "${modeId}" not found in dropdown`);
       console.log(`[command-executor] Mode set to: ${modeId}`);
-    });
+    }, expectedTargetId);
   }
 
-  async clickAction(commandId: string, selectorPath: string, expectedLabel?: string): Promise<CommandResult> {
+  async clickAction(commandId: string, selectorPath: string, expectedLabel?: string, expectedTargetId?: string): Promise<CommandResult> {
     return this.withRetry(commandId, async (client) => {
       if (expectedLabel === undefined) {
+        this.assertExpectedTarget(expectedTargetId, client);
         await client.click(selectorPath);
         console.log(`[command-executor] Clicked action: ${selectorPath.substring(0, 60)}`);
         return;
       }
 
+      this.assertExpectedTarget(expectedTargetId, client);
       const result = await client.evaluate(`
         (() => {
           ${ACTION_CLICK_RESOLVER_JS}
@@ -673,7 +693,7 @@ export class CommandExecutor {
         throw new Error(result?.error ?? `action target not found (label: ${expectedLabel})`);
       }
       console.log(`[command-executor] Clicked action: ${selectorPath.substring(0, 60)} (${expectedLabel})`);
-    });
+    }, expectedTargetId);
   }
 
   async extractToolContent(toolCallId: string): Promise<{ code: string; language?: string; filename?: string } | null> {
@@ -811,7 +831,7 @@ export class CommandExecutor {
     return result;
   }
 
-  async setModel(commandId: string, modelId: string): Promise<CommandResult> {
+  async setModel(commandId: string, modelId: string, expectedTargetId?: string): Promise<CommandResult> {
     return this.withRetry(commandId, async (client) => {
       const strategies = this.selectors.modelDropdown?.strategies ?? [];
 
@@ -819,6 +839,7 @@ export class CommandExecutor {
       // Skip any trigger whose id starts with `plan-exec-model` (those belong
       // to the plan-execution picker, not the composer's model picker) — same
       // filter as openModelMenuAndReadOptions.
+      this.assertExpectedTarget(expectedTargetId, client);
       const opened = await client.evaluate(`
         (() => {
           const strategies = ${JSON.stringify(strategies)};
@@ -841,6 +862,7 @@ export class CommandExecutor {
       await sleep(300);
 
       // Step 2: Verify menu opened
+      this.assertExpectedTarget(expectedTargetId, client);
       const menuVisible = await client.evaluate(`
         (() => {
           ${MODEL_MENU_LOOKUP_JS}
@@ -852,6 +874,7 @@ export class CommandExecutor {
       // Step 3: Find and click the model item via the shared helper so
       // setModel, setPlanModel, web client, and Telegram all resolve the
       // same way.
+      this.assertExpectedTarget(expectedTargetId, client);
       const selected = await client.evaluate(`
         (() => {
           ${MODEL_MENU_LOOKUP_JS}
@@ -864,6 +887,7 @@ export class CommandExecutor {
       await sleep(200);
 
       // Step 4: Verify dropdown closed (confirms selection was accepted)
+      this.assertExpectedTarget(expectedTargetId, client);
       const menuStillOpen = await client.evaluate(`
         (() => {
           ${MODEL_MENU_LOOKUP_JS}
@@ -872,12 +896,13 @@ export class CommandExecutor {
       `) as boolean;
       if (menuStillOpen) {
         console.warn(`[command-executor] Model dropdown still open — pressing Escape`);
+        this.assertExpectedTarget(expectedTargetId, client);
         await client.pressKey('Escape', 'Escape', 27);
         await sleep(100);
       }
 
       console.log(`[command-executor] Model set to: ${modelId} (menu closed: ${!menuStillOpen})`);
-    });
+    }, expectedTargetId);
   }
 
   async getModelOptions(commandId: string): Promise<CommandResult> {
@@ -925,7 +950,8 @@ export class CommandExecutor {
 
   private async withRetry(
     commandId: string,
-    action: (client: CdpClient) => Promise<void>
+    action: (client: CdpClient) => Promise<void>,
+    expectedTargetId?: string
   ): Promise<CommandResult> {
     if (!this.client || !this.client.isConnected()) {
       return { commandId, ok: false, error: 'Not connected to Cursor' };
@@ -934,13 +960,19 @@ export class CommandExecutor {
     let lastError: string | undefined;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        await action(this.client);
+        const client = this.client;
+        if (!client || !client.isConnected()) {
+          throw new Error('Not connected to Cursor');
+        }
+        this.assertExpectedTarget(expectedTargetId, client);
+        await action(client);
         return { commandId, ok: true };
       } catch (err) {
         lastError = err instanceof Error ? err.message : String(err);
         console.warn(
           `[command-executor] Attempt ${attempt + 1}/${MAX_RETRIES + 1} failed: ${lastError}`
         );
+        if (err instanceof TargetChangedError) break;
         if (attempt < MAX_RETRIES) {
           await sleep(RETRY_DELAY_MS);
         }
@@ -948,6 +980,16 @@ export class CommandExecutor {
     }
 
     return { commandId, ok: false, error: lastError };
+  }
+
+  private assertExpectedTarget(expectedTargetId: string | undefined, client: CdpClient): void {
+    if (expectedTargetId === undefined) return;
+    const activeTargetId = this.getActiveTargetId?.() ?? '';
+    if (this.client !== client || this.clientTargetId !== expectedTargetId || activeTargetId !== expectedTargetId) {
+      throw new TargetChangedError(
+        `Cursor target changed (expected ${expectedTargetId}, active ${activeTargetId || 'none'}). Stage the action again.`
+      );
+    }
   }
 
   private async withRetryValue<T>(

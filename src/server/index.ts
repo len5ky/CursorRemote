@@ -83,9 +83,8 @@ async function main(): Promise<void> {
   console.log();
 
   const stateManager = new StateManager(config.debounceMs);
-  const commandExecutor = new CommandExecutor(selectors);
-
   const cdpBridge = new CDPBridge(config);
+  const commandExecutor = new CommandExecutor(selectors, () => cdpBridge.activeTargetId);
 
   const extractor = new DOMExtractor(
     selectors,
@@ -102,7 +101,7 @@ async function main(): Promise<void> {
     const client = cdpBridge.getClient();
     stateManager.onConnectionChanged(true);
     stateManager.updateWindows(cdpBridge.windows, cdpBridge.activeTargetId);
-    commandExecutor.setClient(client);
+    commandExecutor.setClient(client, cdpBridge.activeTargetId);
     if (client) {
       extractor.start(client, config.pollIntervalMs);
     }
