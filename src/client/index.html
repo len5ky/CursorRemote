@@ -19,6 +19,11 @@
       <div class="header-right">
         <span id="agent-status-icon"></span>
         <span id="agent-status-text">Idle</span>
+        <button id="btn-voice" class="voice-btn hidden" aria-label="Voice mode">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+            <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/>
+          </svg>
+        </button>
       </div>
     </header>
 
@@ -122,9 +127,16 @@
     </div>
   </div>
 
-  <div id="toast-container"></div>
+    <div id="voice-panel" class="voice-panel hidden">
+      <span id="voice-status-chip" class="voice-chip idle">off</span>
+      <span id="voice-target" class="voice-target">no target</span>
+      <button id="btn-voice-toggle" class="btn voice-toggle">Connect</button>
+    </div>
+
+    <div id="toast-container"></div>
 
   <script src="vendor-socket.io.min.js"></script>
   <script src="app.js"></script>
+  <script src="voice.js"></script>
 </body>
 </html>
