@@ -4,7 +4,7 @@ import type { VoiceToolRouter } from './tools.js';
 import { VOICE_TOOL_SCHEMAS } from './tools.js';
 
 /**
- * OpenAI Realtime API (GA interface) session management.
+ * DICKTATOR Realtime bridge — OpenAI Realtime API (GA interface) session management.
  *
  * Flow (preferred, ephemeral-token pattern):
  *  1. Browser asks the relay for a client secret → mintClientSecret() POSTs
@@ -114,21 +114,21 @@ export class RealtimeBridge {
 
       ws.on('open', () => {
         clearTimeout(timer);
-        console.log(`[voice] Sideband attached (call ${callId.substring(0, 12)}...)`);
+        console.log(`[dicktator] Sideband attached (call ${callId.substring(0, 12)}...)`);
         resolve();
       });
       ws.on('message', (raw) => {
         this.onServerEvent(raw.toString()).catch(err =>
-          console.error(`[voice] Event handling error: ${err instanceof Error ? err.message : err}`)
+          console.error(`[dicktator] Event handling error: ${err instanceof Error ? err.message : err}`)
         );
       });
       ws.on('error', (err) => {
         clearTimeout(timer);
-        console.error(`[voice] Sideband WS error: ${err.message}`);
+        console.error(`[dicktator] Sideband WS error: ${err.message}`);
         reject(err);
       });
       ws.on('close', () => {
-        if (!this.closedByUs) console.log('[voice] Sideband WS closed');
+        if (!this.closedByUs) console.log('[dicktator] Sideband WS closed');
         if (this.ws === ws) this.ws = null;
       });
     });
@@ -187,7 +187,7 @@ export class RealtimeBridge {
         try {
           args = JSON.parse(String(event.arguments ?? '{}'));
         } catch { /* keep {} */ }
-        console.log(`[voice] Tool call: ${name}`);
+        console.log(`[dicktator] Tool call: ${name}`);
         const result = await this.router.call(name, args);
         this.send({
           type: 'conversation.item.create',
@@ -202,7 +202,7 @@ export class RealtimeBridge {
       }
       case 'error': {
         const err = event.error as { message?: string } | undefined;
-        console.warn(`[voice] Realtime error event: ${err?.message ?? raw.substring(0, 200)}`);
+        console.warn(`[dicktator] Realtime error event: ${err?.message ?? raw.substring(0, 200)}`);
         break;
       }
       default:

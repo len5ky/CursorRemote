@@ -362,6 +362,13 @@ export interface VoiceConfig {
   openrouterApiKey: string;
   /** Cheap flash-class model used for spoken digests. */
   digestModel: string;
+  /** OpenRouter TTS model for future digest synthesis (not wired yet).
+   *  Recommended: x-ai/grok-voice-tts-1.0 (inline speech tags for
+   *  pause/emphasis/speed); fallback qwen/qwen-audio-3.0-tts-flash. */
+  ttsModel: string;
+  /** OpenRouter STT model for future batch audio ingestion (not wired yet).
+   *  Recommended: x-ai/grok-stt-1.0. */
+  sttModel: string;
   /** Minimum gap between proactive spoken notifications (ms). */
   proactiveMinIntervalMs: number;
 }

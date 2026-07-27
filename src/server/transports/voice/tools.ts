@@ -2,7 +2,7 @@ import { randomBytes } from 'crypto';
 import type { CursorState, ChatElement } from '../../types.js';
 
 /**
- * Closed tool surface exposed to the Realtime model. Mirrors the Telegram
+ * DICKTATOR tool surface — the closed tool set exposed to the Realtime model. Mirrors the Telegram
  * command vocabulary. Informational tools execute immediately; mutating tools
  * return a pending-confirmation token that must be echoed back verbally to the
  * user and then confirmed via confirm_pending(token) — enforced server-side.

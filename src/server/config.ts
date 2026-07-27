@@ -36,6 +36,9 @@ export function loadConfig(): ServerConfig {
       voice: process.env.VOICE_NAME ?? 'marin',
       openrouterApiKey: process.env.OPENROUTER_API_KEY ?? '',
       digestModel: process.env.VOICE_DIGEST_MODEL ?? 'google/gemini-2.5-flash-lite',
+      // TTS/STT are config-only for now (synthesis not wired); see docs/dicktator.md.
+      ttsModel: process.env.VOICE_TTS_MODEL ?? 'x-ai/grok-voice-tts-1.0',
+      sttModel: process.env.VOICE_STT_MODEL ?? 'x-ai/grok-stt-1.0',
       proactiveMinIntervalMs: parseInt(process.env.VOICE_PROACTIVE_MIN_INTERVAL_MS ?? '15000', 10),
     },
   };

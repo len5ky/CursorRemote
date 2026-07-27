@@ -1,6 +1,7 @@
 import type { CursorState, ChatElement } from '../../types.js';
 
 /**
+ * DICKTATOR digest layer.
  * Converts ChatElement state / transcript tails into short spoken-form
  * summaries via a cheap OpenRouter model. Strips file paths, hashes, and code
  * identifiers so nothing awkward is read aloud.
@@ -148,7 +149,7 @@ export class DigestClient {
       if (!content) throw new Error('Empty digest response');
       return sanitizeForSpeech(content);
     } catch (err) {
-      console.warn(`[voice] Digest failed, using fallback: ${err instanceof Error ? err.message : err}`);
+      console.warn(`[dicktator] Digest failed, using fallback: ${err instanceof Error ? err.message : err}`);
       return fallbackDigest(messages, state);
     }
   }

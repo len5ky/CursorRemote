@@ -1,0 +1,507 @@
+{
+  "extension/esbuild.js": {
+    "mtime": 1784449884.347395,
+    "ast_hash": "1e0c861f9b856e3c38c854d28dbe0f2c",
+    "semantic_hash": ""
+  },
+  "extension/src/config-bridge.ts": {
+    "mtime": 1784449884.3477554,
+    "ast_hash": "0e1d268f39f1bc5e6ac96b68a0db1875",
+    "semantic_hash": ""
+  },
+  "extension/src/extension.ts": {
+    "mtime": 1784449884.3479428,
+    "ast_hash": "73b7c070d4707e88eba3607d5bba04c2",
+    "semantic_hash": ""
+  },
+  "extension/src/license-manager.ts": {
+    "mtime": 1784449884.3479428,
+    "ast_hash": "74f21e4c19607a504d97443b21397e81",
+    "semantic_hash": ""
+  },
+  "extension/src/output-channel.ts": {
+    "mtime": 1784449884.3479428,
+    "ast_hash": "ee3aa34bfdefbc5bdfc676b2c6b6904e",
+    "semantic_hash": ""
+  },
+  "extension/src/secrets.ts": {
+    "mtime": 1784449884.3479428,
+    "ast_hash": "530e6d3ca7c76cc4987901fc6562e0ae",
+    "semantic_hash": ""
+  },
+  "extension/src/server-manager.ts": {
+    "mtime": 1784449884.3479428,
+    "ast_hash": "5914243f3e0d86f288f81a238b1cff6d",
+    "semantic_hash": ""
+  },
+  "extension/src/setup-panel.ts": {
+    "mtime": 1784449884.3481853,
+    "ast_hash": "c1692e3c9e0a7ce0c1f8450d99c389b7",
+    "semantic_hash": ""
+  },
+  "extension/src/status-bar.ts": {
+    "mtime": 1784449884.3482413,
+    "ast_hash": "6dfb40a1198ab0dc4aa49d13d5b1dd29",
+    "semantic_hash": ""
+  },
+  "extension/src/tree-view.ts": {
+    "mtime": 1784449884.3482783,
+    "ast_hash": "c5c24a092470ab772a63f88ef2bb10b6",
+    "semantic_hash": ""
+  },
+  "extension/tsconfig.json": {
+    "mtime": 1784449884.3482783,
+    "ast_hash": "0b5d9ee095c09d0ea82a7d17e345d35d",
+    "semantic_hash": ""
+  },
+  "package.json": {
+    "mtime": 1784449884.3557868,
+    "ast_hash": "77c266c5ff36d69a4624e67b7115337b",
+    "semantic_hash": ""
+  },
+  "scripts/bump-build.ts": {
+    "mtime": 1784449884.3557868,
+    "ast_hash": "576bac66cf78dcb4617e054193d53e90",
+    "semantic_hash": ""
+  },
+  "scripts/dev-wrapper.ts": {
+    "mtime": 1784449884.3560255,
+    "ast_hash": "cdcf709df1ad8c4f272f26159cd40d62",
+    "semantic_hash": ""
+  },
+  "scripts/normalize-fixture.ts": {
+    "mtime": 1784449884.3561025,
+    "ast_hash": "31233bdd1e15236e96c3c34d37feac3d",
+    "semantic_hash": ""
+  },
+  "scripts/probe-cdp.ts": {
+    "mtime": 1784449884.3561583,
+    "ast_hash": "978701e1d65bd6f0c1162ba126967295",
+    "semantic_hash": ""
+  },
+  "scripts/probe-glass-sidebar.ts": {
+    "mtime": 1784449884.3561583,
+    "ast_hash": "6bc36f0002d383feab641debca29c688",
+    "semantic_hash": ""
+  },
+  "scripts/probe-model-picker.ts": {
+    "mtime": 1784449884.3562322,
+    "ast_hash": "de251429ab4eca24fb9d1055fedb8f89",
+    "semantic_hash": ""
+  },
+  "scripts/probe-tabs.ts": {
+    "mtime": 1784449884.3562684,
+    "ast_hash": "ae11618ee8e272db654a0ba9446fe852",
+    "semantic_hash": ""
+  },
+  "scripts/probe-tg-thread.ts": {
+    "mtime": 1784449884.3562684,
+    "ast_hash": "c92b5ab5e6828054fbc292017f8ad04a",
+    "semantic_hash": ""
+  },
+  "scripts/publish.ts": {
+    "mtime": 1784449884.356333,
+    "ast_hash": "fd4d5b8c17407b6603258056ddd9de43",
+    "semantic_hash": ""
+  },
+  "scripts/record-cdp.ts": {
+    "mtime": 1784449884.3563838,
+    "ast_hash": "5e5a21634ec7aa7a8f76057d809d21eb",
+    "semantic_hash": ""
+  },
+  "scripts/release.ts": {
+    "mtime": 1784449884.3563838,
+    "ast_hash": "ae077fa107db59a4238bf6148c2dabad",
+    "semantic_hash": ""
+  },
+  "scripts/replay-cdp.ts": {
+    "mtime": 1784449884.3563838,
+    "ast_hash": "2c5842f5db8dd2f90c2235f8b21ebe27",
+    "semantic_hash": ""
+  },
+  "scripts/update-vsix-install-docs.ts": {
+    "mtime": 1784449884.3563838,
+    "ast_hash": "b80e312be491984ee771ff037a536937",
+    "semantic_hash": ""
+  },
+  "scripts/verify-vsix.ts": {
+    "mtime": 1784449884.356503,
+    "ast_hash": "2e1294c94394bcf852994432ac4bf4a0",
+    "semantic_hash": ""
+  },
+  "scripts/wait-record.ts": {
+    "mtime": 1784449884.356503,
+    "ast_hash": "54442bf9ac3f2580835196524e5aadb6",
+    "semantic_hash": ""
+  },
+  "selectors.json": {
+    "mtime": 1784449884.356503,
+    "ast_hash": "b6132726da7afa28bb982d3a44a710fe",
+    "semantic_hash": ""
+  },
+  "src/client/app.js": {
+    "mtime": 1784449884.356935,
+    "ast_hash": "87d9d9c38ea3f786ba5dd8ee1daef5a1",
+    "semantic_hash": ""
+  },
+  "src/client/vendor-socket.io.min.js": {
+    "mtime": 1784449884.3573098,
+    "ast_hash": "18fe7fa6fee528971aadc9084c94b1f0",
+    "semantic_hash": ""
+  },
+  "src/discovery/capture-thinking.ts": {
+    "mtime": 1784449884.3575397,
+    "ast_hash": "dbf148d45bf5ad270c97171ec08e1c9a",
+    "semantic_hash": ""
+  },
+  "src/discovery/discover-dom.ts": {
+    "mtime": 1784449884.3576045,
+    "ast_hash": "160af16926d1c9b2766744e2b932156e",
+    "semantic_hash": ""
+  },
+  "src/server/activity-derive.ts": {
+    "mtime": 1784449884.3576045,
+    "ast_hash": "9bc0bb5c04f2544c00da5603cfab8691",
+    "semantic_hash": ""
+  },
+  "src/server/activity-stale.ts": {
+    "mtime": 1784449884.3578076,
+    "ast_hash": "6a6a37fdd28dea981d1a9e2fe9c607cb",
+    "semantic_hash": ""
+  },
+  "src/server/cdp-bridge.ts": {
+    "mtime": 1784449884.357862,
+    "ast_hash": "ad69b4077a37f48e73a3f5dfbf74dd1a",
+    "semantic_hash": ""
+  },
+  "src/server/cdp-client.ts": {
+    "mtime": 1784449884.3579147,
+    "ast_hash": "5b7f61e479a842b585def4824566a2bc",
+    "semantic_hash": ""
+  },
+  "src/server/command-executor.ts": {
+    "mtime": 1784449884.3580291,
+    "ast_hash": "479d4241420558b197a6d53638192cfb",
+    "semantic_hash": ""
+  },
+  "src/server/config.ts": {
+    "mtime": 1785110306.1914213,
+    "ast_hash": "54be64d76cff3566793f19536a3eefcb",
+    "semantic_hash": ""
+  },
+  "src/server/dom-extractor.ts": {
+    "mtime": 1784449884.3582747,
+    "ast_hash": "c305b8033a9ba0754926195b40b768c3",
+    "semantic_hash": ""
+  },
+  "src/server/index.ts": {
+    "mtime": 1785110516.699333,
+    "ast_hash": "f7e041e6a7c3d17e8da64b4c294b31e6",
+    "semantic_hash": ""
+  },
+  "src/server/license.ts": {
+    "mtime": 1784876335.8234413,
+    "ast_hash": "17b4cc63a2262297b00bcf783d27d482",
+    "semantic_hash": ""
+  },
+  "src/server/plan-files.ts": {
+    "mtime": 1784449884.3584034,
+    "ast_hash": "7161386a133872a09f11067a0d45ce84",
+    "semantic_hash": ""
+  },
+  "src/server/relay.ts": {
+    "mtime": 1785110502.214567,
+    "ast_hash": "ad804619dac840810d86b4dce1ba88f1",
+    "semantic_hash": ""
+  },
+  "src/server/state-manager.ts": {
+    "mtime": 1784449884.358538,
+    "ast_hash": "cf5bcaff7b2cd9f7f4b9ba6b19b7df18",
+    "semantic_hash": ""
+  },
+  "src/server/transports/message-tracker.ts": {
+    "mtime": 1784449884.358538,
+    "ast_hash": "d479f1c46578ca73aa118ef681e2bf7c",
+    "semantic_hash": ""
+  },
+  "src/server/transports/send-queue.ts": {
+    "mtime": 1784449884.3586934,
+    "ast_hash": "516ec0f1560e5268aedf9616f66d889f",
+    "semantic_hash": ""
+  },
+  "src/server/transports/telegram-raw/index.ts": {
+    "mtime": 1784449884.3586934,
+    "ast_hash": "09d1726cc583ac1b740c1ade4d35b673",
+    "semantic_hash": ""
+  },
+  "src/server/transports/telegram-raw/raw-api.ts": {
+    "mtime": 1784449884.3588672,
+    "ast_hash": "6ee0f7a4c399a2af77f2e35cf7167a2b",
+    "semantic_hash": ""
+  },
+  "src/server/transports/telegram/base.ts": {
+    "mtime": 1784449884.3588672,
+    "ast_hash": "af242dca211331eca1ab17ec583e4ced",
+    "semantic_hash": ""
+  },
+  "src/server/transports/telegram/commands.ts": {
+    "mtime": 1784449884.3591642,
+    "ast_hash": "c043ca9c27e0bff7864785d3a5dd93e5",
+    "semantic_hash": ""
+  },
+  "src/server/transports/telegram/formatter.ts": {
+    "mtime": 1784449884.3594277,
+    "ast_hash": "53ee558950563795ca5f47de9426801c",
+    "semantic_hash": ""
+  },
+  "src/server/transports/telegram/index.ts": {
+    "mtime": 1784851404.9935474,
+    "ast_hash": "051bde81e45595ad85632ede69c686f6",
+    "semantic_hash": ""
+  },
+  "src/server/transports/telegram/tg-types.ts": {
+    "mtime": 1784449884.359522,
+    "ast_hash": "cd096469ba0c10316c63c1c7fcc83a71",
+    "semantic_hash": ""
+  },
+  "src/server/transports/telegram/topic-manager.ts": {
+    "mtime": 1784449884.3595815,
+    "ast_hash": "6ea580971f671fb90619167b2050a20a",
+    "semantic_hash": ""
+  },
+  "src/server/transports/types.ts": {
+    "mtime": 1784449884.3595815,
+    "ast_hash": "684aa92d5a395fcfa198bbfd80d1c419",
+    "semantic_hash": ""
+  },
+  "src/server/types.ts": {
+    "mtime": 1785110294.9630215,
+    "ast_hash": "14c83a5a7935abf90bb6ab706a84eef9",
+    "semantic_hash": ""
+  },
+  "src/server/webapp-sessions.ts": {
+    "mtime": 1784449884.3596838,
+    "ast_hash": "9ec70dddb40c9ad82f500b16b6127777",
+    "semantic_hash": ""
+  },
+  "src/server/window-monitor.ts": {
+    "mtime": 1784449884.3597484,
+    "ast_hash": "826247d1ffc25b811d63ffad3580eae2",
+    "semantic_hash": ""
+  },
+  "tests/action-click-target.test.ts": {
+    "mtime": 1784449884.3597484,
+    "ast_hash": "f1aca35b0c49975ef48c43b71559a160",
+    "semantic_hash": ""
+  },
+  "tests/activity-derive.test.ts": {
+    "mtime": 1784449884.3599212,
+    "ast_hash": "f34bcfc575b4046f05238967842dc24b",
+    "semantic_hash": ""
+  },
+  "tests/dom-extractor.test.ts": {
+    "mtime": 1784449884.3599212,
+    "ast_hash": "2a673015c1f2b3f710d27446bb37ae99",
+    "semantic_hash": ""
+  },
+  "tests/message-wrapper-selection.test.ts": {
+    "mtime": 1784449884.3599212,
+    "ast_hash": "f3ec86d7c3057b198055eeb078cf9f34",
+    "semantic_hash": ""
+  },
+  "tests/model-picker-fallback.test.ts": {
+    "mtime": 1784449884.3600676,
+    "ast_hash": "f5740f3de6a80597c07948a968fb873e",
+    "semantic_hash": ""
+  },
+  "tests/telegram-action-selectors.test.ts": {
+    "mtime": 1784449884.3600676,
+    "ast_hash": "df6aed03fe52532f66099f41e1d11310",
+    "semantic_hash": ""
+  },
+  "tests/telegram-formatter.test.ts": {
+    "mtime": 1784449884.3601563,
+    "ast_hash": "18c77e9249cfd105e01b73c732297a3c",
+    "semantic_hash": ""
+  },
+  "tests/web-client.test.ts": {
+    "mtime": 1784449884.3602233,
+    "ast_hash": "1cab26aaa11054908861988670a2ad9a",
+    "semantic_hash": ""
+  },
+  "tests/window-monitor-questionnaire.test.ts": {
+    "mtime": 1784449884.3602233,
+    "ast_hash": "9213966019a697c1b071ef790a5fd291",
+    "semantic_hash": ""
+  },
+  "tsconfig.json": {
+    "mtime": 1784449884.3602233,
+    "ast_hash": "7875fe1f382851ec8e29dc00319d1e16",
+    "semantic_hash": ""
+  },
+  "CHANGELOG.md": {
+    "mtime": 1784449884.3460903,
+    "ast_hash": "1f9f22899502fceb159f66ddfefcd378",
+    "semantic_hash": ""
+  },
+  "CLAUDE.md": {
+    "mtime": 1784449884.3460903,
+    "ast_hash": "cce77f5f1e5f8ee46e5eca33bf863f51",
+    "semantic_hash": ""
+  },
+  "README.md": {
+    "mtime": 1784449884.346241,
+    "ast_hash": "64c36e606aaca994007eece7e7673875",
+    "semantic_hash": ""
+  },
+  "docs/architecture.md": {
+    "mtime": 1784449884.346241,
+    "ast_hash": "511c3e2cea53e5c3343e5912f82ca4de",
+    "semantic_hash": ""
+  },
+  "docs/cdp-record-replay.md": {
+    "mtime": 1784449884.3466032,
+    "ast_hash": "85d666c868c94cae7c840789d436fd9a",
+    "semantic_hash": ""
+  },
+  "docs/extension_prd.md": {
+    "mtime": 1784449884.3467126,
+    "ast_hash": "ee1aa7b28cd268daf3cce90ec6b192a2",
+    "semantic_hash": ""
+  },
+  "docs/initial_prd.md": {
+    "mtime": 1784449884.3467126,
+    "ast_hash": "e3e6b34936ab4df6b6f068e5c78f982f",
+    "semantic_hash": ""
+  },
+  "docs/prd.md": {
+    "mtime": 1784449884.3469846,
+    "ast_hash": "b8e135a215053b575c604a46d72128bf",
+    "semantic_hash": ""
+  },
+  "docs/setup-guide.md": {
+    "mtime": 1784449884.34706,
+    "ast_hash": "ff92c7c5b9a91e145f2cd2a1d4d5e6a4",
+    "semantic_hash": ""
+  },
+  "docs/smoke-checklist.md": {
+    "mtime": 1784449884.34706,
+    "ast_hash": "8a5171e595eaffe3ef71fc0304701460",
+    "semantic_hash": ""
+  },
+  "docs/tailscale-setup.md": {
+    "mtime": 1784449884.34706,
+    "ast_hash": "579d771a2f2c7bd96696c47e07cb736f",
+    "semantic_hash": ""
+  },
+  "docs/telegram-troubleshooting.md": {
+    "mtime": 1784449884.34706,
+    "ast_hash": "06fc8818e7887549c6df5822c40d68c4",
+    "semantic_hash": ""
+  },
+  "docs/telegram_architecture.md": {
+    "mtime": 1784449884.3472438,
+    "ast_hash": "a2a41bdcbdbc514aa577c6171f9ad80b",
+    "semantic_hash": ""
+  },
+  "docs/telegram_prd.md": {
+    "mtime": 1784449884.3473458,
+    "ast_hash": "ef84b6bf4880d713a02cad4c49fb9489",
+    "semantic_hash": ""
+  },
+  "docs/topic-routing-analysis.md": {
+    "mtime": 1784449884.347395,
+    "ast_hash": "c328724365700fbf366d7a5a5623f732",
+    "semantic_hash": ""
+  },
+  "extension/media/walkthrough/cdp.md": {
+    "mtime": 1784449884.3476195,
+    "ast_hash": "7932785f46afb27a22fb9954193e5877",
+    "semantic_hash": ""
+  },
+  "extension/media/walkthrough/done.md": {
+    "mtime": 1784449884.3477554,
+    "ast_hash": "a746f67612b5fc063567ff7805c048a8",
+    "semantic_hash": ""
+  },
+  "extension/media/walkthrough/license.md": {
+    "mtime": 1784449884.3477554,
+    "ast_hash": "b298f2d4520e6ef407ed922c47088238",
+    "semantic_hash": ""
+  },
+  "extension/media/walkthrough/networking.md": {
+    "mtime": 1784449884.3477554,
+    "ast_hash": "ba46e9620a2c8a5499306d8211599c75",
+    "semantic_hash": ""
+  },
+  "extension/media/walkthrough/telegram.md": {
+    "mtime": 1784449884.3477554,
+    "ast_hash": "9466a3adc02529ee56dfa554cca9e02d",
+    "semantic_hash": ""
+  },
+  "src/client/index.html": {
+    "mtime": 1785110573.7669005,
+    "ast_hash": "4e21c56efff5fa0c2b252549b90f6c6f",
+    "semantic_hash": ""
+  },
+  "media/extension_tab.png": {
+    "mtime": 1784449884.350116,
+    "ast_hash": "fc70798e6757cee354d256c2dd7a5851",
+    "semantic_hash": ""
+  },
+  "media/icon.png": {
+    "mtime": 1784449884.350218,
+    "ast_hash": "975cfc7acad0601a3c46463793b04d8b",
+    "semantic_hash": ""
+  },
+  "media/telegram.gif": {
+    "mtime": 1784449884.3530657,
+    "ast_hash": "59cd7b60c8151dda4e1e093a9554e629",
+    "semantic_hash": ""
+  },
+  "media/web-app.gif": {
+    "mtime": 1784449884.3551602,
+    "ast_hash": "b0f0a615cd84201159fed5fc688c946a",
+    "semantic_hash": ""
+  },
+  "src/client/favicon.png": {
+    "mtime": 1784449884.3569753,
+    "ast_hash": "975cfc7acad0601a3c46463793b04d8b",
+    "semantic_hash": ""
+  },
+  "src/client/voice.js": {
+    "mtime": 1785110596.137381,
+    "ast_hash": "966a94dd0ab5197bf45acbb87b4663e7",
+    "semantic_hash": ""
+  },
+  "src/server/transports/voice/digest.ts": {
+    "mtime": 1785110409.853264,
+    "ast_hash": "7aedcbd24309cf31b4b36baddb63f4e6",
+    "semantic_hash": ""
+  },
+  "src/server/transports/voice/index.ts": {
+    "mtime": 1785110478.3177671,
+    "ast_hash": "c81f0d70f36619c88d28a9bb7d5a4a73",
+    "semantic_hash": ""
+  },
+  "src/server/transports/voice/realtime-bridge.ts": {
+    "mtime": 1785110718.7680573,
+    "ast_hash": "99a6d20f1f0213a2f04f331a69c7aa5d",
+    "semantic_hash": ""
+  },
+  "src/server/transports/voice/tools.ts": {
+    "mtime": 1785110377.6425376,
+    "ast_hash": "e09ad51cc48da4f50edf0e23c1c43b22",
+    "semantic_hash": ""
+  },
+  "tests/voice-digest.test.ts": {
+    "mtime": 1785110683.1343985,
+    "ast_hash": "c209f325e7f7f538feb06f1be5d3521b",
+    "semantic_hash": ""
+  },
+  "tests/voice-tools.test.ts": {
+    "mtime": 1785110661.4119987,
+    "ast_hash": "f052ea502df73e5980b6f6ccc12f8a61",
+    "semantic_hash": ""
+  }
+}

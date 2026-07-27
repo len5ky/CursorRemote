@@ -11,7 +11,8 @@ import { RealtimeBridge, type ClientSecretResult } from './realtime-bridge.js';
 import { DigestClient } from './digest.js';
 
 /**
- * VoiceTransport — "car mode". Mirrors TelegramTransport's structure:
+ * VoiceTransport — DICKTATOR ("you dictate; they obey"), aka car mode.
+ * Mirrors TelegramTransport's structure:
  * subscribes to StateManager patches and pushes proactive events (new pending
  * approval, agent blocked) into the live Realtime session, rate-limited.
  *
@@ -142,7 +143,7 @@ export class VoiceTransport implements Transport {
     this.started = true;
     this.stateManager.on('state:patch', this.onStatePatch);
     this.windowMonitor.on('window:update', this.onWindowUpdate);
-    console.log(`[voice] Voice transport ready (model: ${this.config.model}, voice: ${this.config.voice})`);
+    console.log(`[dicktator] Voice transport ready (model: ${this.config.model}, voice: ${this.config.voice})`);
   }
 
   async stop(): Promise<void> {
@@ -150,7 +151,7 @@ export class VoiceTransport implements Transport {
     this.stateManager.off('state:patch', this.onStatePatch);
     this.windowMonitor.off('window:update', this.onWindowUpdate);
     this.bridge.detach();
-    console.log('[voice] Voice transport stopped');
+    console.log('[dicktator] Voice transport stopped');
   }
 
   // --- proactive events ---

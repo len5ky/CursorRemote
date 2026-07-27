@@ -1,4 +1,4 @@
-// Voice "car mode" client v0.
+// DICKTATOR — voice "car mode" client v0. You dictate; they obey.
 // Mints an ephemeral token from the relay, opens a WebRTC session directly to
 // OpenAI Realtime, then reports the call id back so the server can attach the
 // sideband channel that handles all tool calls. Audio never touches the relay.
@@ -87,7 +87,7 @@
       btnToggle.textContent = 'Disconnect';
       statusTimer = setInterval(refreshStatus, 5000);
     } catch (err) {
-      console.error('[voice]', err);
+      console.error('[dicktator]', err);
       setChip('error', 'error');
       teardown(false);
     } finally {

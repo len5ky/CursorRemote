@@ -1953,6 +1953,13 @@ header {
   box-shadow: 0 4px 16px rgba(0,0,0,0.4);
 }
 
+.voice-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: rgba(228,228,228,0.9);
+}
+
 .voice-chip {
   font-size: 11px;
   padding: 2px 8px;
