@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type WebSocket from 'ws';
 import {
@@ -10,11 +10,10 @@ import {
   safetyIdentifierForAccount,
   type RealtimeBridgeOptions,
 } from '../src/server/transports/voice/realtime-bridge.js';
-import { VoiceToolRouter } from '../src/server/transports/voice/tools.js';
-import { VOICE_REALTIME_MODEL } from '../src/server/transports/voice/constants.js';
+import { VOICE_REALTIME_MODEL, VOICE_TRANSCRIPTION_MODEL } from '../src/server/transports/voice/constants.js';
 import { assertPinnedVoiceModel } from '../src/server/config.js';
 import type { VoiceSessionContext } from '../src/server/transports/voice/session.js';
-import { FakeRealtimeSocket, testVoiceConfig } from './helpers/voice-fixtures.js';
+import { FakeHermesAgent, FakeRealtimeSocket, testVoiceConfig } from './helpers/voice-fixtures.js';
 
 const root = join(import.meta.dirname, '..');
 const authority = {
@@ -27,10 +26,10 @@ const authority = {
 describe('private voice provider contract', () => {
   it('mints a browser-only secret with a stable hashed safety identifier', async () => {
     let request: RequestInit | undefined;
-    const bridge = new RealtimeBridge(testVoiceConfig(), {} as VoiceToolRouter, authority, {
+    const bridge = new RealtimeBridge(testVoiceConfig(), new FakeHermesAgent(), authority, {
       fetchImpl: (async (_input, init) => {
         request = init;
-        return new Response(JSON.stringify({ value: 'ephemeral-browser-secret', expires_at: 123 }), { status: 200 });
+        return new Response(JSON.stringify({ value: 'ephemeral-browser-secret', expires_at: 123, model: 'gpt-realtime-2.1' }), { status: 200 });
       }) as typeof fetch,
     });
 
@@ -68,7 +67,7 @@ describe('private voice provider contract', () => {
         return socket as unknown as WebSocket;
       },
     };
-    const bridge = new RealtimeBridge(testVoiceConfig(), {} as VoiceToolRouter, authority, options);
+    const bridge = new RealtimeBridge(testVoiceConfig(), new FakeHermesAgent(), authority, options);
     const context: VoiceSessionContext = { sessionId: 's', epoch: 1, leaseId: 'l' };
 
     await bridge.attachSideband('provider-call-123', context);
@@ -79,10 +78,12 @@ describe('private voice provider contract', () => {
     assert.equal(extractCallId(new Headers({ location: 'https://api.openai.com/v1/realtime/calls/provider-call-123' })), 'provider-call-123');
     assert.equal(extractCallId(new Headers()), null);
 
-    const tools = (buildSessionConfig(testVoiceConfig()).session as { tools?: Array<{ name: string }> }).tools;
-    assert.deepEqual(tools?.map((tool) => tool.name), [
-      'list_sessions', 'get_status', 'get_all_status', 'read_recent', 'disconnect_voice',
-    ]);
+    // The provider is offered no tools at all: it is ears and mouth, and the
+    // only conversational authority is the private Hermes deployment reached
+    // server-to-server.
+    const session = buildSessionConfig(testVoiceConfig()).session as { tools?: unknown[]; tool_choice?: string };
+    assert.deepEqual(session.tools, []);
+    assert.equal(session.tool_choice, 'none');
   });
 });
 
@@ -100,13 +101,35 @@ describe('private voice exact model invariant', () => {
     assert.equal('miniModel' in testVoiceConfig(), false);
 
     // Every model identifier anywhere in the voice subsystem must be the pin.
-    for (const file of ['realtime-bridge.ts', 'index.ts', 'constants.ts', 'tools.ts', 'session.ts', 'context.ts']) {
+    for (const file of readdirSync(join(root, 'src/server/transports/voice'))) {
       const source = readFileSync(join(root, 'src/server/transports/voice', file), 'utf8');
       const modelLiterals = source.match(/gpt-[A-Za-z0-9._-]+/g) ?? [];
       for (const literal of modelLiterals) {
         assert.equal(literal, VOICE_REALTIME_MODEL, `${file} references a non-pinned model: ${literal}`);
       }
     }
+  });
+
+  it('pins the transcription model separately and never uses it to answer', () => {
+    // Input transcription needs an ASR model, and it is not the Realtime model.
+    // It is pinned in exactly one place, it is not a `gpt-*` conversational
+    // model, and it appears only in the transcription block of the session
+    // config — there is no path by which it could produce assistant content.
+    assert.equal(VOICE_TRANSCRIPTION_MODEL, 'whisper-1');
+    assert.notEqual(VOICE_TRANSCRIPTION_MODEL, VOICE_REALTIME_MODEL);
+
+    const session = buildSessionConfig(testVoiceConfig()).session as {
+      audio: { input: { transcription: { model: string } } };
+    };
+    assert.equal(session.audio.input.transcription.model, VOICE_TRANSCRIPTION_MODEL);
+
+    const bridge = readFileSync(join(root, 'src/server/transports/voice/realtime-bridge.ts'), 'utf8');
+    assert.equal(
+      (bridge.match(/VOICE_TRANSCRIPTION_MODEL/g) ?? []).length,
+      2,
+      'the ASR pin is imported once and used once, in the transcription config',
+    );
+    assert.match(bridge, /transcription:\s*\{\s*model:\s*VOICE_TRANSCRIPTION_MODEL\s*\}/);
   });
 
   it('refuses to start when an operator points VOICE_MODEL at another model', () => {

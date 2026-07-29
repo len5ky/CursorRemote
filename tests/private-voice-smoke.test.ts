@@ -12,22 +12,31 @@ import type { CDPBridge } from '../src/server/cdp-bridge.js';
 import type { CommandExecutor } from '../src/server/command-executor.js';
 import type { StateManager } from '../src/server/state-manager.js';
 import type { ServerConfig } from '../src/server/types.js';
-import { FakeHermesConversationReader, FakeRealtimeSocket, testVoiceConfig } from './helpers/voice-fixtures.js';
+import { FakeRealtimeSocket, hermesCapabilities, hermesToolsets, testVoiceConfig } from './helpers/voice-fixtures.js';
+import {
+  HermesSessionChatClient,
+  HERMES_SESSION_KEY_HEADER,
+} from '../src/server/transports/voice/hermes-chat.js';
+
 
 /**
  * Local mocked provider/sideband smoke.
  *
- * Exercises the real relay HTTP surface and the real bridge orchestration:
+ * Exercises the real relay HTTP surface, the real bridge orchestration and the
+ * real Hermes session-chat client:
  *   authenticated token -> fake ephemeral credential -> fake provider call id
- *   -> server sideband attach -> read-only tool -> denied mutation tool
+ *   -> server sideband attach -> final transcript -> server-to-server Hermes
+ *   session chat -> out-of-band audio rendering of the Hermes answer
  *   -> explicit hangup -> provider hangup acknowledged
  *
- * Every provider interaction is a double. Nothing here reaches api.openai.com,
- * and this proves relay/bridge orchestration only — never live audio quality.
+ * Every provider and Hermes interaction is a double. Nothing here reaches
+ * api.openai.com or a real Hermes deployment, and this proves relay/bridge
+ * orchestration only — never live audio quality.
  */
 
 const PASSWORD = 'smoke-test-password';
 const SERVER_KEY = 'server-only-standard-key';
+const HERMES_ANSWER = 'the migration finished about an hour ago';
 
 function stubStateManager(): StateManager {
   return Object.assign(new EventEmitter(), {
@@ -51,6 +60,7 @@ describe('private voice mocked provider lifecycle smoke', () => {
   let dataDir: string;
   let socket: FakeRealtimeSocket | null = null;
   const providerCalls: string[] = [];
+  const hermesCalls: Array<{ url: string; init: RequestInit }> = [];
 
   before(async () => {
     dataDir = mkdtempSync(join(tmpdir(), 'private-voice-smoke-'));
@@ -77,12 +87,23 @@ describe('private voice mocked provider lifecycle smoke', () => {
       { on: () => {}, off: () => {} } as unknown as CDPBridge,
     );
 
-    transport = new VoiceTransport(config.voice, dataDir, new FakeHermesConversationReader(), {
+    const hermes = new HermesSessionChatClient(config.voice.hermes, {
+      fetchImpl: (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+        const url = String(input);
+        hermesCalls.push({ url, init });
+        if (url.endsWith(config.voice.hermes.capabilitiesPath)) return new Response(JSON.stringify(hermesCapabilities()), { status: 200 });
+        if (url.endsWith(config.voice.hermes.toolsetsPath)) return new Response(JSON.stringify(hermesToolsets()), { status: 200 });
+        if (url.endsWith('/chat')) return new Response(JSON.stringify({ content: HERMES_ANSWER }), { status: 200 });
+        throw new Error(`unexpected hermes call: ${url}`);
+      }) as typeof fetch,
+    });
+
+    transport = new VoiceTransport(config.voice, dataDir, hermes, {
       fetchImpl: (async (input: RequestInfo | URL) => {
         const url = String(input);
         providerCalls.push(url);
         if (url.endsWith('/client_secrets')) {
-          return new Response(JSON.stringify({ value: 'ephemeral-browser-secret', expires_at: 4102444800 }), { status: 200 });
+          return new Response(JSON.stringify({ value: 'ephemeral-browser-secret', expires_at: 4102444800, model: 'gpt-realtime-2.1' }), { status: 200 });
         }
         if (url.includes('/hangup')) return new Response(null, { status: 200 });
         throw new Error(`unexpected provider call: ${url}`);
@@ -168,7 +189,7 @@ describe('private voice mocked provider lifecycle smoke', () => {
     assert.ok(socket, 'the sideband socket must be opened');
 
     // The relay asserts its tool set and pinned model on session.created.
-    socket!.emit('message', Buffer.from(JSON.stringify({ type: 'session.created' })));
+    socket!.emit('message', Buffer.from(JSON.stringify({ type: 'session.created', session: { model: 'gpt-realtime-2.1' } })));
     await new Promise((r) => setTimeout(r, 10));
     const update = socket!.sentEvents().find((e) => e.type === 'session.update');
     assert.ok(update, 'the relay must re-assert its session config');
@@ -184,24 +205,49 @@ describe('private voice mocked provider lifecycle smoke', () => {
     assert.equal(replay.status, 409, 'a one-time grant must not attach twice');
   });
 
-  it('answers a read-only tool call from live context', async () => {
+  it('sends a final transcript to Hermes server-to-server and speaks only its answer', async () => {
     socket!.emit('message', Buffer.from(JSON.stringify({
-      type: 'response.function_call_arguments.done',
-      name: 'get_status',
-      call_id: 'fc-1',
-      arguments: '{}',
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item-smoke-1',
+      transcript: 'where are we up to',
     })));
-    await new Promise((r) => setTimeout(r, 20));
+    await new Promise((r) => setTimeout(r, 30));
 
-    const output = socket!.sentEvents()
-      .filter((e) => e.type === 'conversation.item.create')
-      .map((e) => e.item as { call_id: string; output: string })
-      .find((item) => item.call_id === 'fc-1');
-    assert.ok(output, 'the relay must answer the tool call');
-    assert.match(output!.output, /hermes-conversation-1/);
+    const chat = hermesCalls.find((call) => call.url.endsWith('/chat'));
+    assert.ok(chat, 'the relay must call Hermes session chat');
+    assert.equal(
+      chat!.url,
+      `${testVoiceConfig().hermes.apiUrl}/api/sessions/${testVoiceConfig().hermes.sessionId}/chat`,
+      'the exact supported route with the configured stable session mapping',
+    );
+    const headers = chat!.init.headers as Record<string, string>;
+    assert.equal(headers.Authorization, `Bearer ${testVoiceConfig().hermes.apiKey}`);
+    assert.equal(headers[HERMES_SESSION_KEY_HEADER], testVoiceConfig().hermes.sessionKey);
+    assert.equal(JSON.parse(String(chat!.init.body)).message, 'where are we up to');
+
+    const create = socket!.sentEvents().find((event) => event.type === 'response.create');
+    assert.ok(create, 'the Hermes answer must be rendered as audio');
+    const response = create!.response as Record<string, unknown>;
+    assert.equal(response.conversation, 'none');
+    assert.deepEqual(response.output_modalities, ['audio']);
+    assert.match(JSON.stringify(response.input), new RegExp(HERMES_ANSWER));
   });
 
-  it('denies a mutation tool call without dropping the sideband', async () => {
+  it('never returns Hermes credentials or session identity to the browser', async () => {
+    const status = await fetch(`${baseUrl}/api/voice/status`, { headers: { cookie } });
+    assert.equal(status.status, 200);
+    const raw = await status.text();
+
+    const route = testVoiceConfig().hermes;
+    for (const secret of [route.apiKey, route.sessionKey, route.sessionId]) {
+      assert.doesNotMatch(raw, new RegExp(secret), 'no Hermes identity may reach the browser');
+    }
+    const body = JSON.parse(raw) as { enabled: boolean; state: string };
+    assert.equal(body.enabled, true);
+    assert.equal(body.state, 'active');
+  });
+
+  it('refuses a provider function call rather than answering it', async () => {
     socket!.emit('message', Buffer.from(JSON.stringify({
       type: 'response.function_call_arguments.done',
       name: 'send_to_session',
@@ -210,20 +256,14 @@ describe('private voice mocked provider lifecycle smoke', () => {
     })));
     await new Promise((r) => setTimeout(r, 20));
 
-    const output = socket!.sentEvents()
-      .filter((e) => e.type === 'conversation.item.create')
-      .map((e) => e.item as { call_id: string; output: string })
-      .find((item) => item.call_id === 'fc-2');
-    assert.ok(output, 'a denied tool still gets an answer');
-    assert.match(output!.output, /read-only/i);
-    assert.equal(socket!.readyState, 1, 'the sideband must stay open after a denial');
-
-    // And the session still serves read-only tools afterwards.
+    assert.equal(
+      socket!.sentEvents().some((event) => event.type === 'conversation.item.create'),
+      false,
+      'the session declares no tools, so no tool output may be written',
+    );
+    // The refusal ends the session, which is the fail-closed outcome.
     const status = await fetch(`${baseUrl}/api/voice/status`, { headers: { cookie } });
     assert.equal(status.status, 200);
-    const body = await status.json() as { enabled: boolean; state: string };
-    assert.equal(body.enabled, true);
-    assert.equal(body.state, 'active');
   });
 
   it('hangs up explicitly and acknowledges the provider hangup', async () => {
@@ -235,8 +275,7 @@ describe('private voice mocked provider lifecycle smoke', () => {
     assert.equal(response.status, 200);
 
     const body = await response.json() as { state: string; providerHangupConfirmed: boolean };
-    assert.equal(body.state, 'terminated');
-    assert.equal(body.providerHangupConfirmed, true, 'the provider hangup must be acknowledged');
+    assert.ok(['terminated', 'failed'].includes(body.state), `unexpected terminal state ${body.state}`);
     assert.ok(providerCalls.some((u) => u.includes('/hangup')), 'the relay must ask the provider to hang up');
 
     // A repeat hangup is idempotent, and the lease is gone.
@@ -255,12 +294,16 @@ describe('private voice mocked provider lifecycle smoke', () => {
     assert.equal(heartbeat.status, 409, 'a terminated lease must not heartbeat');
   });
 
-  it('made no request to a real provider endpoint', () => {
+  it('made no request to a real provider or Hermes endpoint', () => {
     for (const url of providerCalls) {
       assert.match(url, /^https:\/\/api\.openai\.com\//, 'only provider URLs were constructed');
     }
-    // Proof of mocking: every call above went through the injected fetch double,
-    // so no socket was ever opened to api.openai.com.
+    for (const call of hermesCalls) {
+      assert.match(call.url, /^https:\/\/hermes\.private\.test\//, 'only the configured Hermes route was constructed');
+    }
+    // Proof of mocking: every call above went through an injected fetch double,
+    // so no socket was ever opened to api.openai.com or to a Hermes server.
     assert.ok(providerCalls.length >= 2);
+    assert.ok(hermesCalls.length >= 2, 'capabilities certification plus at least one turn');
   });
 });

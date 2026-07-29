@@ -12,6 +12,11 @@ import {
   knownVoicePriceVersions,
 } from '../src/server/transports/voice/pricing.js';
 import { VoiceSessionController } from '../src/server/transports/voice/session.js';
+import {
+  HERMES_CAPABILITIES_PATH,
+  HERMES_TOOLSETS_PATH,
+  VOICE_HERMES_POLICY_TIMEOUT_MS,
+} from '../src/server/transports/voice/hermes-chat.js';
 import { startVoiceRelay, type VoiceRelayHarness } from './helpers/voice-relay-harness.js';
 
 /**
@@ -42,7 +47,21 @@ const MANAGED_ENV = [
   'VOICE_USAGE_DAILY_CAP_CENTS', 'VOICE_USAGE_PER_SESSION_CAP_CENTS',
   'VOICE_SESSION_ABSOLUTE_MS', 'VOICE_SESSION_IDLE_MS', 'VOICE_SESSION_IDLE_GRACE_MS',
   'VOICE_SESSION_LEASE_MS', 'VOICE_TARGET_MAX_AGE_MS', 'TAILSCALE_SERVE_IDENTITY',
+  'VOICE_HERMES_API_URL', 'VOICE_HERMES_API_KEY', 'VOICE_HERMES_SESSION_ID', 'VOICE_HERMES_SESSION_KEY',
+  'VOICE_HERMES_POLICY_TIMEOUT_MS',
 ] as const;
+
+/**
+ * A complete server-only Hermes route. Enabling voice without one is a startup
+ * failure, so every "voice enabled and valid" case has to supply it.
+ * These are fixture values for a host that does not exist.
+ */
+const HERMES_ENV = {
+  VOICE_HERMES_API_URL: 'https://hermes.private.test',
+  VOICE_HERMES_API_KEY: 'hermes-fixture-key',
+  VOICE_HERMES_SESSION_ID: 'hermes-fixture-session',
+  VOICE_HERMES_SESSION_KEY: 'hermes-fixture-session-key',
+} as const;
 
 function withEnv<T>(overrides: Record<string, string | undefined>, run: () => T): T {
   const saved = new Map<string, string | undefined>();
@@ -163,11 +182,33 @@ describe('numeric configuration — finite values inside declared ranges', () =>
     );
   });
 
+  it('wires the documented policy paths and validates the policy timeout', () => {
+    const defaults = withEnv({ WEBAPP_PASSWORD: 'x', VOICE_ENABLED: 'true', ...HERMES_ENV }, () => loadConfig());
+    assert.equal(defaults.voice.hermes.capabilitiesPath, HERMES_CAPABILITIES_PATH);
+    assert.equal(defaults.voice.hermes.toolsetsPath, HERMES_TOOLSETS_PATH);
+    assert.equal(defaults.voice.hermes.policyTimeoutMs, VOICE_HERMES_POLICY_TIMEOUT_MS);
+
+    const configured = withEnv({
+      WEBAPP_PASSWORD: 'x',
+      VOICE_ENABLED: 'true',
+      ...HERMES_ENV,
+      VOICE_HERMES_POLICY_TIMEOUT_MS: '1234',
+    }, () => loadConfig());
+    assert.equal(configured.voice.hermes.policyTimeoutMs, 1234);
+
+    for (const value of ['99', '120001', 'abc']) {
+      assert.throws(
+        () => withEnv({ WEBAPP_PASSWORD: 'x', VOICE_HERMES_POLICY_TIMEOUT_MS: value }, () => loadConfig()),
+        /VOICE_HERMES_POLICY_TIMEOUT_MS/,
+      );
+    }
+  });
+
   it('fails startup for an unknown voice price version when voice is enabled', () => {
     assert.throws(
       () => withEnv({
         WEBAPP_PASSWORD: 'x',
-        VOICE_ENABLED: 'true',
+        VOICE_ENABLED: 'true', ...HERMES_ENV,
         VOICE_USAGE_PRICE_VERSION: 'operator-invented-2099-99',
       }, () => loadConfig()),
       /VOICE_USAGE_PRICE_VERSION/,
@@ -179,7 +220,7 @@ describe('numeric configuration — finite values inside declared ranges', () =>
     assert.throws(
       () => withEnv({
         WEBAPP_PASSWORD: 'x',
-        VOICE_ENABLED: 'true',
+        VOICE_ENABLED: 'true', ...HERMES_ENV,
         VOICE_USAGE_PRICE_VERSION: KNOWN_VOICE_PRICE_VERSION,
         VOICE_USAGE_UNIT_PRICE_CENTS_PER_MINUTE: String(reference - 1),
       }, () => loadConfig()),
@@ -189,7 +230,7 @@ describe('numeric configuration — finite values inside declared ranges', () =>
 
     const atFloor = withEnv({
       WEBAPP_PASSWORD: 'x',
-      VOICE_ENABLED: 'true',
+      VOICE_ENABLED: 'true', ...HERMES_ENV,
       VOICE_USAGE_PRICE_VERSION: KNOWN_VOICE_PRICE_VERSION,
       VOICE_USAGE_UNIT_PRICE_CENTS_PER_MINUTE: String(reference),
     }, () => loadConfig());
@@ -197,7 +238,7 @@ describe('numeric configuration — finite values inside declared ranges', () =>
 
     const conservative = withEnv({
       WEBAPP_PASSWORD: 'x',
-      VOICE_ENABLED: 'true',
+      VOICE_ENABLED: 'true', ...HERMES_ENV,
       VOICE_USAGE_PRICE_VERSION: KNOWN_VOICE_PRICE_VERSION,
       VOICE_USAGE_UNIT_PRICE_CENTS_PER_MINUTE: String(reference + 1),
     }, () => loadConfig());
@@ -245,5 +286,65 @@ describe('context freshness — no unenforced knob is advertised', () => {
         `${path} must not advertise a freshness bound the code does not enforce`,
       );
     }
+  });
+});
+
+describe('voice hermes route — startup fails closed', () => {
+  it('refuses to start voice without a complete server-only Hermes route', () => {
+    // Voice speaks only what the private Hermes deployment answers. Enabling it
+    // without a route would leave a Realtime model with a live microphone and
+    // no authority behind it, which is the one thing this product must not be.
+    assert.throws(
+      () => withEnv({ WEBAPP_PASSWORD: 'x', VOICE_ENABLED: 'true' }, () => loadConfig()),
+      /VOICE_HERMES_API_URL/,
+    );
+
+    for (const missing of ['VOICE_HERMES_API_KEY', 'VOICE_HERMES_SESSION_ID', 'VOICE_HERMES_SESSION_KEY'] as const) {
+      assert.throws(
+        () => withEnv({
+          WEBAPP_PASSWORD: 'x',
+          VOICE_ENABLED: 'true',
+          ...HERMES_ENV,
+          [missing]: '',
+        }, () => loadConfig()),
+        new RegExp(missing),
+        `${missing} must be required`,
+      );
+    }
+  });
+
+  it('refuses a plaintext non-loopback Hermes URL', () => {
+    assert.throws(
+      () => withEnv({
+        WEBAPP_PASSWORD: 'x',
+        VOICE_ENABLED: 'true',
+        ...HERMES_ENV,
+        VOICE_HERMES_API_URL: 'http://hermes.public.test',
+      }, () => loadConfig()),
+      /VOICE_HERMES_API_URL must use HTTPS/,
+    );
+  });
+
+  it('keeps the resolved route server-side and out of the failure message', () => {
+    const config = withEnv({ WEBAPP_PASSWORD: 'x', VOICE_ENABLED: 'true', ...HERMES_ENV }, () => loadConfig());
+    assert.equal(config.voice.hermes.sessionId, HERMES_ENV.VOICE_HERMES_SESSION_ID);
+
+    try {
+      withEnv({
+        WEBAPP_PASSWORD: 'x',
+        VOICE_ENABLED: 'true',
+        ...HERMES_ENV,
+        VOICE_HERMES_SESSION_ID: '',
+      }, () => loadConfig());
+      assert.fail('expected a startup failure');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      assert.doesNotMatch(message, new RegExp(HERMES_ENV.VOICE_HERMES_API_KEY));
+      assert.doesNotMatch(message, new RegExp(HERMES_ENV.VOICE_HERMES_SESSION_KEY));
+    }
+  });
+
+  it('leaves voice configurable-but-off without any Hermes route', () => {
+    assert.doesNotThrow(() => withEnv({ WEBAPP_PASSWORD: 'x' }, () => loadConfig()));
   });
 });

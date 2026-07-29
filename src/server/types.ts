@@ -368,10 +368,30 @@ export interface VoiceConfig {
    * Empty means loopback development origins only.
    */
   publicOrigin: string;
-  /** Documented, read-only Hermes context endpoint. Empty means unavailable. */
-  hermesReadContextUrl: string;
-  /** Optional server-only bearer for the configured Hermes read endpoint. Never returned or logged. */
-  hermesReadContextToken: string;
+  /**
+   * Server-only route to the private Hermes deployment that is the sole
+   * conversational authority for voice.
+   *
+   * Every field is resolved from configuration at startup and held in server
+   * state. None of them is ever returned to a client, accepted from a request,
+   * embedded in a client asset, or logged.
+   */
+  hermes: {
+    /** VOICE_HERMES_API_URL — HTTPS, or HTTP on loopback. */
+    apiUrl: string;
+    /** VOICE_HERMES_API_KEY — server-only bearer credential. */
+    apiKey: string;
+    /** VOICE_HERMES_SESSION_ID — stable session mapping for the voice account. */
+    sessionId: string;
+    /** VOICE_HERMES_SESSION_KEY — stable session key header value. */
+    sessionKey: string;
+    /** Fixed `HERMES_CAPABILITIES_PATH` used to certify the deployment posture. */
+    capabilitiesPath: string;
+    /** Fixed documented `/v1/toolsets` path used to certify zero effective tools. */
+    toolsetsPath: string;
+    /** `VOICE_HERMES_POLICY_TIMEOUT_MS`, validated as a startup integer. */
+    policyTimeoutMs: number;
+  };
   /** Output voice name. */
   voice: string;
   /**

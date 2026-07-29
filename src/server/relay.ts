@@ -19,7 +19,7 @@ import {
 import type { VoiceTransport } from './transports/voice/index.js';
 import { createVoiceOriginPolicy, type VoiceOriginPolicy } from './transports/voice/origin-policy.js';
 import { FixedWindowRateLimiter } from './rate-limit.js';
-import { truncateUtf8 } from './transports/voice/tools.js';
+import { truncateUtf8 } from './transports/voice/text.js';
 import { resolveLoginIdentity } from './request-identity.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -485,7 +485,13 @@ export class Relay {
         // The provider's status/reason is operator diagnostics, not a response
         // body: it describes an upstream the caller has no business probing.
         console.error(`[voice] Client secret mint failed: ${errorDetail(err)}`);
-        res.status(500).json({ error: 'Failed to start a voice session.' });
+        // A refusal on a precondition the deployment has not met is 503 — the
+        // same code an unwired transport returns, because it is the same fact:
+        // this surface is unavailable, deliberately. Anything else is a 500.
+        const status = (err as { statusCode?: number }).statusCode === 503 ? 503 : 500;
+        res.status(status).json({
+          error: status === 503 ? 'Voice is unavailable.' : 'Failed to start a voice session.',
+        });
       }
     });
 

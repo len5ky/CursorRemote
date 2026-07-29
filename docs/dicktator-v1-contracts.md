@@ -4,6 +4,9 @@
 > mutation-capable voice surface. The shipping surface is read-only: staged
 > confirmation, the mutation tool set and the `CommandExecutor` dependency have
 > been removed, and the model is pinned to `gpt-realtime-2.1` with no fallback.
+> The shipping surface also has **no Realtime tools at all** — the provider is
+> ears and mouth, and a private Hermes deployment reached server-to-server is
+> the only conversational authority.
 > For the current contract see [`dicktator.md`](./dicktator.md) and
 > [`private-voice-pwa-deploy.md`](./private-voice-pwa-deploy.md). The session,
 > epoch, lease and idempotent-termination invariants below still hold.

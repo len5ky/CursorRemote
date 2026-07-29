@@ -1,8 +1,10 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { VoiceToolRouter } from '../src/server/transports/voice/tools.js';
+import type WebSocket from 'ws';
+import { RealtimeBridge } from '../src/server/transports/voice/realtime-bridge.js';
+import type { VoiceSessionContext } from '../src/server/transports/voice/session.js';
 import { startVoiceRelay } from './helpers/voice-relay-harness.js';
-import { FakeHermesConversationReader, testVoiceConfig } from './helpers/voice-fixtures.js';
+import { FakeHermesAgent, FakeRealtimeSocket, testVoiceConfig } from './helpers/voice-fixtures.js';
 
 /**
  * A failure the operator needs and the caller must not get.
@@ -35,7 +37,7 @@ async function captureServerLogs<T>(work: () => Promise<T>): Promise<{ result: T
 /** Infrastructure detail that must never reach a client, in any response. */
 const LEAKY = [
   /WEBAPP_PASSWORD/i,
-  /HERMES_READ_CONTEXT_URL/i,
+  /VOICE_HERMES_[A-Z_]+/i,
   /OPENAI_API_KEY/i,
   /VOICE_[A-Z_]+/,
   /not configured/i,
@@ -147,65 +149,95 @@ describe('voice failure opacity — provider and adapter failures', () => {
   });
 });
 
-describe('voice failure opacity — Hermes context adapter', () => {
-  const router = (reason: string) => new VoiceToolRouter(
-    {
-      contextReader: FakeHermesConversationReader.unavailable(reason),
-      terminateVoice: async () => ({ state: 'terminated' }),
-    },
-    { accepts: () => true, live: () => true },
-  );
+describe('voice failure opacity — Hermes turn failures', () => {
+  const CONTEXT: VoiceSessionContext = { sessionId: 'session-opacity', epoch: 1, leaseId: 'lease-opacity' };
 
-  const CONTEXT = { sessionId: 'session-opacity', epoch: 1, leaseId: 'lease-opacity' };
+  /**
+   * A Hermes turn that fails must produce silence, not an excuse.
+   *
+   * There is no safe way to explain the failure out loud: the reason names an
+   * endpoint, an env var or an upstream status, and anything the provider is
+   * handed it may read aloud to whoever is on the call. The operator still
+   * needs the reason, so it goes to the server log and nowhere else.
+   */
+  async function failingTurn(reason: string): Promise<{ socket: FakeRealtimeSocket; logs: string }> {
+    const sockets: FakeRealtimeSocket[] = [];
+    const hermes = new FakeHermesAgent({ reply: () => ({ kind: 'error', reason }) });
+    const bridge = new RealtimeBridge(testVoiceConfig(), hermes, {
+      accepts: () => true,
+      userTurn: () => {},
+      providerFailure: () => {},
+      reportSpend: () => true,
+    }, {
+      websocketFactory: () => {
+        const socket = new FakeRealtimeSocket();
+        sockets.push(socket);
+        return socket as unknown as WebSocket;
+      },
+    });
+    const { logs } = await captureServerLogs(async () => {
+      await bridge.attachSideband('call-opacity', CONTEXT);
+      sockets[0].sent.length = 0;
+      sockets[0].emit('message', JSON.stringify({
+        type: 'conversation.item.input_audio_transcription.completed',
+        item_id: 'item-opacity',
+        transcript: 'where are we up to',
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    return { socket: sockets[0], logs };
+  }
 
-  it('tells the model the context is unavailable without reciting the deployment reason', async () => {
-    const { result, logs } = await captureServerLogs(async () =>
-      router('HERMES_READ_CONTEXT_URL is not configured').call('read_recent', {}, CONTEXT));
+  it('says nothing at all when Hermes cannot answer, and logs why', async () => {
+    const { socket, logs } = await failingTurn('hermes_unreachable');
 
-    assert.equal(result.kind, 'context_unavailable');
-    assert.match(
-      result.output,
-      /unavailable/i,
-      'the honest "unavailable" signal must survive; only the infrastructure reason is dropped',
-    );
-    assertOpaque(result.output, 'read_recent unavailable output');
-
-    assert.match(
-      logs,
-      /HERMES_READ_CONTEXT_URL is not configured/,
-      'the operator needs the real reason the context could not be read',
-    );
+    assert.deepEqual(socket.sentEvents(), [], 'a failed turn produces no provider write');
+    assert.match(logs, /\[voice\]/, 'the operator must be told the turn failed');
+    assert.match(logs, /hermes_unreachable/, 'the log carries the real cause');
   });
 
-  it('keeps every unavailable reason out of what the model is told to say', async () => {
+  it('keeps every failure reason out of anything handed to the provider', async () => {
     const reasons = [
-      'HERMES_READ_CONTEXT_URL is not configured',
-      'Hermes read endpoint returned HTTP 503',
-      'Hermes read endpoint could not be reached',
-      'Hermes read response did not match the documented schema',
-      'Hermes read endpoint must use HTTPS or loopback HTTP',
+      'hermes_unreachable',
+      'hermes_http_503',
+      'hermes_response_content_invalid',
+      'hermes_capabilities_unreachable',
+      'hermes_turn_aborted',
     ];
 
     for (const reason of reasons) {
-      const { result } = await captureServerLogs(async () =>
-        router(reason).call('get_status', {}, CONTEXT));
-      assert.equal(result.kind, 'context_unavailable');
-      assertOpaque(result.output, `get_status with reason "${reason}"`);
-      assert.doesNotMatch(result.output, /Hermes read (endpoint|response)/, 'no adapter internals in spoken output');
+      const { socket } = await failingTurn(reason);
+      const written = JSON.stringify(socket.sentEvents());
+      assert.equal(written, '[]', `reason "${reason}" must not reach the provider at all`);
+      assertOpaque(written, `provider writes for "${reason}"`);
     }
   });
 
-  it('still reports genuine context when Hermes is available', async () => {
-    const available = new VoiceToolRouter(
-      {
-        contextReader: new FakeHermesConversationReader(),
-        terminateVoice: async () => ({ state: 'terminated' }),
+  it('speaks genuine Hermes content when the turn succeeds', async () => {
+    const sockets: FakeRealtimeSocket[] = [];
+    const hermes = new FakeHermesAgent({ reply: () => ({ kind: 'ok', assistantText: 'the migration is finished' }) });
+    const bridge = new RealtimeBridge(testVoiceConfig(), hermes, {
+      accepts: () => true,
+      userTurn: () => {},
+      providerFailure: () => {},
+      reportSpend: () => true,
+    }, {
+      websocketFactory: () => {
+        const socket = new FakeRealtimeSocket();
+        sockets.push(socket);
+        return socket as unknown as WebSocket;
       },
-      { accepts: () => true, live: () => true },
-    );
-    const result = await available.call('read_recent', {}, CONTEXT);
+    });
+    await bridge.attachSideband('call-opacity-ok', CONTEXT);
+    sockets[0].emit('message', JSON.stringify({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item-ok',
+      transcript: 'where are we up to',
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
 
-    assert.equal(result.kind, 'ok');
-    assert.match(result.output, /migration is finished/, 'real Hermes content must still reach the model');
+    const create = sockets[0].sentEvents().find((event) => event.type === 'response.create');
+    assert.ok(create, 'a successful turn must be spoken');
+    assert.match(JSON.stringify(create), /migration is finished/, 'real Hermes content must reach the operator');
   });
 });

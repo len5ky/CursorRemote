@@ -1,137 +1,140 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { HttpHermesConversationReader } from '../src/server/transports/voice/context.js';
-import { VoiceToolRouter } from '../src/server/transports/voice/tools.js';
-import { VOICE_MAX_TOOL_OUTPUT_BYTES } from '../src/server/transports/voice/constants.js';
-import { FakeHermesConversationReader } from './helpers/voice-fixtures.js';
+import type WebSocket from 'ws';
+import { RealtimeBridge } from '../src/server/transports/voice/realtime-bridge.js';
+import {
+  HermesSessionChatClient,
+  VOICE_HERMES_MAX_ASSISTANT_BYTES,
+  VOICE_HERMES_MAX_TRANSCRIPT_BYTES,
+} from '../src/server/transports/voice/hermes-chat.js';
+import type { VoiceSessionContext } from '../src/server/transports/voice/session.js';
+import { FakeHermesAgent, FakeRealtimeSocket, testVoiceConfig } from './helpers/voice-fixtures.js';
 
 /**
  * Byte budgets must be counted in bytes.
  *
  * `String.prototype.slice` counts UTF-16 code units, so a cap written as
- * `slice(0, N)` lets a reply of N non-ASCII characters weigh up to 3N (4N with
- * astral characters) bytes on the wire — the ceiling the provider and the
- * sideband are sized against is silently blown by any non-English context.
+ * `slice(0, N)` lets N non-ASCII characters weigh up to 3N bytes (4N with
+ * astral characters) on the wire — the ceiling the provider and the sideband
+ * are sized against is silently blown by any non-English content.
  *
- * `maxTurns: 0` also has to mean zero turns. `slice(-0)` is `slice(0)`, which
- * returns the whole array, so the status tools that ask for no conversation
- * body were pulling every turn the endpoint offered.
+ * The bounded content on this surface is no longer a context snapshot: it is
+ * the operator's transcript on the way to Hermes, and Hermes' answer on the way
+ * back. Neither may be truncated to fit. Half a question, or half an answer,
+ * spoken with full confidence, is a fabrication — so anything over the bound is
+ * refused and nothing is said.
  */
 
 const MULTIBYTE = 'ありがとうございました。'; // 12 chars, 34 UTF-8 bytes
+const CONTEXT: VoiceSessionContext = { sessionId: 'session-bounds', epoch: 1, leaseId: 'lease-bounds' };
+const ROUTE = testVoiceConfig().hermes;
 
-function readerReturning(body: unknown): HttpHermesConversationReader {
-  const fetchImpl = (async () =>
-    new Response(JSON.stringify(body), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    })) as unknown as typeof fetch;
-  return new HttpHermesConversationReader('https://hermes.example.test/context', '', fetchImpl);
+function clientReturning(body: unknown): HermesSessionChatClient {
+  const fetchImpl = (async () => new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  })) as unknown as typeof fetch;
+  return new HermesSessionChatClient(ROUTE, { fetchImpl });
 }
 
-function snapshotBody(turnCount: number, content = 'a short turn'): unknown {
-  return {
-    conversationId: 'conversation-1',
-    revision: 'rev-1',
-    observedAt: '2026-07-29T00:00:00.000Z',
-    agentStatus: 'idle',
-    sessions: [],
-    turns: Array.from({ length: turnCount }, (_unused, index) => ({
-      role: index % 2 === 0 ? 'user' : 'assistant',
-      content,
-    })),
-  };
+async function attach(hermes: FakeHermesAgent): Promise<FakeRealtimeSocket> {
+  const sockets: FakeRealtimeSocket[] = [];
+  const bridge = new RealtimeBridge(testVoiceConfig(), hermes, {
+    accepts: () => true,
+    userTurn: () => {},
+    providerFailure: () => {},
+    reportSpend: () => true,
+  }, {
+    websocketFactory: () => {
+      const socket = new FakeRealtimeSocket();
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    },
+  });
+  await bridge.attachSideband('call-bounds', CONTEXT);
+  sockets[0].sent.length = 0;
+  return sockets[0];
 }
 
-describe('hermes context bounds — maxTurns', () => {
-  it('returns no turns at all when the caller asks for zero', async () => {
-    const reader = readerReturning(snapshotBody(9));
-    const result = await reader.readConversation({ maxTurns: 0, maxBytes: 4_000 });
+function transcriptEvent(itemId: string, transcript: string): string {
+  return JSON.stringify({
+    type: 'conversation.item.input_audio_transcription.completed',
+    item_id: itemId,
+    transcript,
+  });
+}
 
-    assert.equal(result.kind, 'available');
-    assert.deepEqual(
-      result.kind === 'available' ? result.snapshot.turns : null,
-      [],
-      'maxTurns: 0 must mean zero turns, not the whole transcript',
-    );
+describe('hermes answer bounds — measured in UTF-8 bytes', () => {
+  it('accepts a multibyte answer that fits the byte bound', async () => {
+    // 34 bytes per repeat; comfortably inside the bound but far more code
+    // units than a byte-count-shaped-as-slice cap would have allowed.
+    const answer = MULTIBYTE.repeat(50);
+    assert.ok(Buffer.byteLength(answer, 'utf8') <= VOICE_HERMES_MAX_ASSISTANT_BYTES);
+
+    const result = await clientReturning({ content: answer })
+      .send('hi', { signal: new AbortController().signal });
+
+    assert.deepEqual(result, { kind: 'ok', assistantText: answer });
   });
 
-  it('honours a small positive turn budget', async () => {
-    const reader = readerReturning(snapshotBody(9));
-    const result = await reader.readConversation({ maxTurns: 2, maxBytes: 4_000 });
+  it('refuses a multibyte answer over the byte bound rather than truncating it', async () => {
+    const answer = MULTIBYTE.repeat(150); // ~5 KB of UTF-8, over the bound
+    assert.ok(Buffer.byteLength(answer, 'utf8') > VOICE_HERMES_MAX_ASSISTANT_BYTES);
+    assert.ok(answer.length < VOICE_HERMES_MAX_ASSISTANT_BYTES, 'and under it by UTF-16 code units');
 
-    assert.equal(result.kind, 'available');
-    assert.equal(result.kind === 'available' ? result.snapshot.turns.length : -1, 2);
-  });
+    const result = await clientReturning({ content: answer })
+      .send('hi', { signal: new AbortController().signal });
 
-  it('refuses a negative or non-integer turn budget instead of widening it', async () => {
-    const reader = readerReturning(snapshotBody(9));
-    const negative = await reader.readConversation({ maxTurns: -5, maxBytes: 4_000 });
-
-    assert.equal(negative.kind, 'available');
-    assert.equal(
-      negative.kind === 'available' ? negative.snapshot.turns.length : -1,
-      0,
-      'a negative turn budget must not be read as "everything"',
-    );
+    assert.equal(result.kind, 'error', 'half an answer must never be spoken as the whole answer');
   });
 });
 
-describe('hermes context bounds — UTF-8 byte budget', () => {
-  it('measures a long multibyte turn in bytes, not code units', async () => {
-    const longMultibyte = MULTIBYTE.repeat(600); // ~20 KB of UTF-8
-    const reader = readerReturning(snapshotBody(1, longMultibyte));
-    const result = await reader.readConversation({ maxTurns: 4, maxBytes: 2_000 });
+describe('transcript bounds — measured in UTF-8 bytes', () => {
+  it('refuses an over-bound multibyte transcript without calling Hermes or speaking', async () => {
+    const hermes = new FakeHermesAgent();
+    const socket = await attach(hermes);
+    const transcript = MULTIBYTE.repeat(150);
+    assert.ok(Buffer.byteLength(transcript, 'utf8') > VOICE_HERMES_MAX_TRANSCRIPT_BYTES);
+    assert.ok(transcript.length < VOICE_HERMES_MAX_TRANSCRIPT_BYTES, 'and under it by UTF-16 code units');
 
-    assert.equal(result.kind, 'available');
-    if (result.kind !== 'available') return;
-    const serialized = Buffer.byteLength(JSON.stringify(result.snapshot), 'utf8');
-    assert.ok(
-      serialized <= 4_000,
-      `a multibyte snapshot must respect its byte budget, saw ${serialized} bytes`,
-    );
-    for (const turn of result.snapshot.turns) {
-      assert.equal(
-        Buffer.from(turn.content, 'utf8').toString('utf8'),
-        turn.content,
-        'a truncated turn must still be valid UTF-8',
-      );
-    }
+    socket.emit('message', transcriptEvent('item-over', transcript));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    assert.deepEqual(hermes.sent, []);
+    assert.deepEqual(socket.sentEvents(), []);
+  });
+
+  it('submits a multibyte transcript that fits, byte for byte, unaltered', async () => {
+    const hermes = new FakeHermesAgent();
+    const socket = await attach(hermes);
+    const transcript = MULTIBYTE.repeat(50);
+
+    socket.emit('message', transcriptEvent('item-ok', transcript));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    assert.deepEqual(hermes.sent, [transcript], 'Hermes must receive exactly what was said');
   });
 });
 
-describe('voice tool output — UTF-8 byte cap', () => {
-  it('caps a multibyte tool reply by bytes and leaves it valid UTF-8', async () => {
-    // Far more multibyte content than the output cap allows.
-    const snapshot = FakeHermesConversationReader.snapshot({
-      turns: Array.from({ length: 8 }, () => ({
-        role: 'assistant' as const,
-        content: MULTIBYTE.repeat(80),
-      })),
-    });
-    const router = new VoiceToolRouter({
-      contextReader: new FakeHermesConversationReader({ kind: 'available', snapshot }),
-    });
+describe('rendered speech carries exactly the Hermes answer', () => {
+  it('passes a multibyte answer through to the rendering response undamaged', async () => {
+    const answer = MULTIBYTE.repeat(50);
+    const hermes = new FakeHermesAgent({ reply: () => ({ kind: 'ok', assistantText: answer }) });
+    const socket = await attach(hermes);
 
-    const result = await router.call('read_recent', { count: 8 });
-    const bytes = Buffer.byteLength(result.output, 'utf8');
+    socket.emit('message', transcriptEvent('item-1', 'hello'));
+    await new Promise((resolve) => setTimeout(resolve, 10));
 
-    assert.ok(
-      bytes <= VOICE_MAX_TOOL_OUTPUT_BYTES,
-      `tool output must be capped at ${VOICE_MAX_TOOL_OUTPUT_BYTES} UTF-8 bytes, saw ${bytes}`,
-    );
+    const create = socket.sentEvents().find((event) => event.type === 'response.create');
+    assert.ok(create, 'the answer must be rendered');
+    const input = (create!.response as { input: Array<{ content: Array<{ text: string }> }> }).input;
+    const spoken = input[0].content[0].text;
+
+    assert.equal(spoken, answer, 'the spoken text is the Hermes answer verbatim');
     assert.equal(
-      Buffer.from(result.output, 'utf8').toString('utf8'),
-      result.output,
-      'the cap must not split a multibyte character',
+      Buffer.from(spoken, 'utf8').toString('utf8'),
+      spoken,
+      'and it is still valid UTF-8',
     );
-  });
-
-  it('leaves a short ASCII reply untouched', async () => {
-    const router = new VoiceToolRouter({ contextReader: new FakeHermesConversationReader() });
-    const result = await router.call('read_recent', { count: 2 });
-
-    assert.equal(result.kind, 'ok');
-    assert.match(result.output, /the migration is finished/);
   });
 });

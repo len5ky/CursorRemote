@@ -240,7 +240,11 @@
         var payload;
         try { payload = JSON.parse(event.data); } catch (e) { return; }
         if (!payload || typeof payload.type !== 'string') return;
-        // Barge-in: the user speaking cancels the in-flight assistant response.
+        // Barge-in: speaking silences whatever is being read out right now.
+        // This is a local courtesy only — the relay owns turn semantics and
+        // cancels superseded responses by id server-side. This file never
+        // creates a response and never supplies response instructions; the only
+        // thing it may do is stop one.
         if (payload.type === 'input_audio_buffer.speech_started') {
           if (state === 'speaking') setState('live');
           try { channel.send(JSON.stringify({ type: 'response.cancel' })); } catch (e) { /* channel gone */ }

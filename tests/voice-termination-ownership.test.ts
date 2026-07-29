@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type WebSocket from 'ws';
 import { VoiceTransport, type VoiceTerminationStatus } from '../src/server/transports/voice/index.js';
-import { FakeHermesConversationReader, FakeRealtimeSocket, testVoiceConfig } from './helpers/voice-fixtures.js';
+import { FakeHermesAgent, FakeRealtimeSocket, testVoiceConfig } from './helpers/voice-fixtures.js';
 import type { VoiceConfig } from '../src/server/types.js';
 
 /**
@@ -56,12 +56,12 @@ function makeTransport(
   const transport = new VoiceTransport(
     testVoiceConfig(options.config),
     dir,
-    new FakeHermesConversationReader(),
+    new FakeHermesAgent(),
     {
       fetchImpl: (async (input: RequestInfo | URL) => {
         const url = String(input);
         if (url.endsWith('/client_secrets')) {
-          return new Response(JSON.stringify({ value: 'ephemeral-browser-secret', expires_at: 123 }), { status: 200 });
+          return new Response(JSON.stringify({ value: 'ephemeral-browser-secret', expires_at: 123, model: 'gpt-realtime-2.1' }), { status: 200 });
         }
         if (url.includes('/hangup')) {
           hangupCalls.push(url);

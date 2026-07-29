@@ -1,8 +1,10 @@
 # Private voice PWA — deployment and privacy guide
 
 Operator guide for the private read-only voice surface: a one-page installable
-web app that places a voice call to your own Hermes context and can only *read*
-it.
+web app that places a voice call to your own private Hermes deployment.
+
+The Realtime model is **ears and mouth only**. It transcribes what you say and
+reads back what Hermes answered. It never answers anything itself.
 
 This document contains **no credentials**. Every secret is referred to by
 environment-variable name only.
@@ -14,9 +16,12 @@ environment-variable name only.
 **Is:**
 
 - A single-user, private voice companion for one authenticated operator.
-- Read-only: it can describe sessions, status and recent conversation, and end
-  its own call. Nothing else.
+- Read-only: the conversational backend is a private Hermes deployment
+  configured with no usable tools, so a call can describe and discuss, and
+  nothing else.
 - Browser ⇄ OpenAI Realtime audio over WebRTC, pinned to `gpt-realtime-2.1`.
+- Every spoken answer is text the private Hermes deployment returned over
+  `POST /api/sessions/{session_id}/chat`, server-to-server.
 - **Browser PWA only.** The supported surface is the installable page at
   `/voice`, served by this relay and opened in Safari (iOS) or Chrome
   (Android/desktop). There is no supported native client: the archived Android
@@ -33,6 +38,8 @@ environment-variable name only.
 - No offline calling, background sync, or push notifications.
 - No audio recording or transcript archive.
 - No alternate, preview, mini or fallback Realtime model.
+- No Realtime tools, and no provider function-call path of any kind.
+- No local, canned or synthesised answer when Hermes cannot answer. Silence.
 
 ---
 
@@ -44,19 +51,75 @@ Phone PWA ──HTTPS (Tailscale)──> relay        POST /api/voice/token
    │                               │            + sessionId, epoch, one-time attachToken
    │
    ├──WebRTC audio──────────────> OpenAI Realtime (gpt-realtime-2.1)
-   │                               ▲
-   └──HTTPS──> relay ──sideband WS─┘   server-held standard key, tool calls only
+   │                               ▲   ears: input transcription
+   └──HTTPS──> relay ──sideband WS─┘   mouth: out-of-band audio rendering
+                  │                    server-held standard key; NO tools
                   │
-                  └─> HermesConversationReader (read-only, bounded, redacted)
+                  │  on `conversation.item.input_audio_transcription.completed`:
+                  ▼
+   private Hermes ◀── POST {VOICE_HERMES_API_URL}/api/sessions/{session_id}/chat
+      deployment      Authorization: Bearer VOICE_HERMES_API_KEY
+        │             X-Hermes-Session-Key: VOICE_HERMES_SESSION_KEY
+        │             { "message": "<the actual transcript>" }
+        │
+        └─ assistant text ─> relay ─> Realtime `response.create`
+                                       conversation: 'none'
+                                       output_modalities: ['audio']
+                                       input: [the Hermes text, verbatim]
 ```
 
+The call path, stated plainly:
+
+1. Phone captures audio and sends it straight to OpenAI over WebRTC.
+2. OpenAI transcribes the operator's speech. The **final** transcript
+   (`conversation.item.input_audio_transcription.completed`) is the single
+   trigger — never an audio commit, never speech-start.
+3. The relay validates that transcript and sends it, verbatim, to the private
+   Hermes deployment over the one supported route, server-to-server.
+4. Hermes' assistant text is the **only** conversational content in the system.
+5. The relay buffers the complete answer and injects it into an out-of-band
+   Realtime response whose sole input is that text, with instructions to read
+   only it. The generated audio is a rendering, not an answer.
+
 Be clear with yourself about what this means:
+
+### Turn semantics, barge-in, and what cancellation can and cannot do
+
+The relay owns the turn. Not the browser, and not the provider.
+
+- Turn ids are **monotonic** and never reused. Each rendering response carries
+  `metadata: { source: 'hermes', turn_id }` — provenance only; the provider is
+  never told which Hermes session answered.
+- Server VAD runs with `create_response: false` and `interrupt_response: false`,
+  so the provider will neither answer on its own nor interrupt itself.
+- **Barge-in is server-side.** When the provider reports
+  `input_audio_buffer.speech_started`, the relay aborts the outstanding Hermes
+  fetch, locally invalidates that turn, and cancels any Hermes rendering being
+  spoken **by response id**. A late answer to an abandoned question is dropped,
+  never voiced.
+- The browser also sends `response.cancel` when it hears you talk over the
+  assistant. That is a courtesy for responsiveness, not the boundary: it cannot
+  see or stop a Hermes fetch, so it is never relied on.
+- Starting a new question does the same thing: the previous turn is superseded
+  before the new one begins.
+
+**Limitation, stated plainly.** Aborting the relay's fetch cancels *the relay's
+request*. It does **not** cancel a run the Hermes deployment has already
+started: Hermes may keep working, may finish, and may bill for that work. What
+the relay guarantees is narrower, and is the part you can hear — a superseded
+answer is never spoken. There is no upstream cancellation call in the supported
+session-chat interface, so this is a real limit of the design, not an
+implementation gap that a later patch will quietly close.
+
+A turn that produces nothing — barged in, aborted, failed, refused by
+validation — is silent. Nothing is invented to fill it.
 
 - **Your audio goes to OpenAI.** "Private relay" means the relay is not exposed
   to the internet — it does **not** mean the conversation avoids OpenAI.
 - The relay never receives or records audio. Audio is browser ⇄ OpenAI only.
-- Bounded, redacted Hermes text context and tool responses **are** sent to
-  OpenAI through the Realtime session.
+- Your transcribed speech, and the Hermes answers read back to you, **are** sent
+  to OpenAI through the Realtime session. Nothing else is: the provider is never
+  given Hermes credentials, the Hermes session id, or any tool.
 - Nothing persists audio, SDP, provider event bodies, ephemeral credentials or
   transcripts. Only coarse lifecycle metadata and the cost/session ledger are
   written to disk.
@@ -244,12 +307,76 @@ Names only. Never commit values; keep them in your secret store.
 | --- | --- | --- |
 | `TAILSCALE_SERVE_IDENTITY` | `false` | Declares that this relay is published *only* through Tailscale Serve, letting the login rate limiter bucket per verified Tailscale user instead of collapsing the tailnet into one loopback bucket. Serve's `Tailscale-User-*` headers are read only when this is `true` **and** the request arrives from loopback. A global login guard applies either way. Full trust boundary: § 3.4. |
 
-### Hermes context (read-only)
+### Hermes — the conversational authority (required)
+
+All four are **required** when `VOICE_ENABLED=true`. Missing or invalid, the
+server refuses to start: a voice surface with no conversational authority is a
+Realtime model answering on its own, which is exactly what this product must
+never be.
 
 | Variable | Purpose |
 | --- | --- |
-| `HERMES_READ_CONTEXT_URL` | Documented read-only Hermes endpoint. Must be HTTPS, or loopback HTTP. **If unset, voice reports context unavailable** — it never invents conversation content. |
-| `HERMES_READ_CONTEXT_TOKEN` | Optional server-only bearer for that endpoint. Never returned or logged. |
+| `VOICE_HERMES_API_URL` | Base URL of the **private** Hermes API server. HTTPS, or HTTP on loopback only. |
+| `VOICE_HERMES_API_KEY` | Server-only bearer credential for that deployment. Never returned to the browser, never logged. |
+| `VOICE_HERMES_SESSION_ID` | The stable Hermes session mapped to the voice account. Server state — the browser can never choose, supply or observe it. |
+| `VOICE_HERMES_SESSION_KEY` | Sent as `X-Hermes-Session-Key`. Server-only, never returned or logged. |
+
+The only supported interface is:
+
+```
+POST {VOICE_HERMES_API_URL}/api/sessions/{session_id}/chat
+Authorization: Bearer {VOICE_HERMES_API_KEY}
+X-Hermes-Session-Key: {VOICE_HERMES_SESSION_KEY}
+Content-Type: application/json
+
+{ "message": "<the actual transcript, verbatim>" }
+```
+
+The response must be a JSON object carrying the assistant content in `content`
+(or `message.content`), bounded to 4000 UTF-8 bytes. It may carry an effective
+or rotated session id in `session_id` (or `effective_session_id`), which the
+relay adopts for subsequent turns. Anything else — an unparseable body, empty
+content, content over the bound, an over-long session id — is refused, and
+**nothing is spoken**. There is no fallback answer.
+
+#### Required deployment posture — this is the enforcement point
+
+The Hermes session-chat API has **no per-request tool disable**. There is no
+flag the relay can send to make a shared Hermes behave read-only for one call.
+Voice V1 therefore requires a **dedicated/private Hermes API-server
+deployment** configured with:
+
+- **MCP disabled.**
+- **Zero effective `api_server` toolsets** — configure the Hermes API-server
+  platform with the documented `no_mcp` sentinel and no other toolsets. The
+  relay rejects every discovery row whose `enabled` value is `true`, whatever
+  it is called, `read_only` included: a label is not proof of a tool boundary.
+- A capabilities report at `GET {VOICE_HERMES_API_URL}/v1/capabilities` and a
+  toolset report at `GET {VOICE_HERMES_API_URL}/v1/toolsets`, both authenticated
+  with the same bearer. The documented shapes are:
+
+  ```json
+  {
+    "object": "hermes.api_server.capabilities",
+    "platform": "hermes-agent",
+    "endpoints": { "toolsets": { "method": "GET", "path": "/v1/toolsets" } }
+  }
+  { "object": "list", "platform": "api_server", "data": [] }
+  ```
+
+The paths are the fixed `HERMES_CAPABILITIES_PATH` (`/v1/capabilities`) and
+`HERMES_TOOLSETS_PATH` (`/v1/toolsets`) contracts, not browser- or
+request-supplied values. `VOICE_HERMES_POLICY_TIMEOUT_MS` defaults to `10000` ms
+(valid range `100`–`120000`) and bounds each policy probe. A timeout, transport
+error or malformed response is a refusal.
+
+The relay checks that report at startup and before admitting a call, caches a
+passing result for ten minutes, and **refuses to place a call** if it does not
+certify. Every undeclared field is treated as a permissive one: "the report did
+not say" is not evidence that tools are off.
+
+A system prompt asking Hermes not to use tools is **not** enforcement and is
+never treated as such anywhere in this system.
 
 ### Model
 
@@ -284,10 +411,9 @@ integer inside its declared range. `parseInt('abc', 10)` is `NaN`, and a `NaN`
 cap compares false against everything — i.e. silently disables the brake it was
 meant to be. A bad value is a boot failure instead.
 
-There is deliberately **no** context-freshness variable. The Hermes read
-contract reports each snapshot's `observedAt`, but nothing in V1 gates a tool
-answer on that timestamp, so advertising a maximum age would be describing a
-control that does not exist.
+There is deliberately **no** context-freshness variable. Freshness is whatever
+the Hermes deployment answers with at the moment it is asked; there is no cached
+snapshot on this side to go stale.
 
 ### 5.1 Budget account identity
 
@@ -346,10 +472,10 @@ variables, and every one of them is a **UTF-8 byte** bound:
 
 | Constant | Value | Bounds |
 | --- | --- | --- |
-| `VOICE_MAX_TOOL_ARGUMENT_BYTES` | 8192 | Realtime function-call argument blob. Larger blobs are refused, not parsed. |
-| `VOICE_MAX_TOOL_OUTPUT_BYTES` | 2000 | Tool answer returned to the model. |
-| `VOICE_MAX_CONTEXT_BYTES` | 12000 | Serialized Hermes snapshot. Turns, then sessions, are dropped to fit; a snapshot that cannot fit is reported unavailable rather than sent over budget. |
-| `VOICE_MAX_CONTEXT_TURNS` | 12 | Conversation turns per read. |
+| `VOICE_HERMES_MAX_TRANSCRIPT_BYTES` | 4000 | Final UTF-8 transcript bound before the relay sends the actual turn to Hermes; over-bound input is refused, not truncated. |
+| `VOICE_HERMES_MAX_ASSISTANT_BYTES` | 4000 | Complete UTF-8 Hermes answer bound before audio rendering; over-bound content is refused, not truncated. |
+| `VOICE_MAX_SESSION_ID_BYTES` | 200 | Effective/rotated Hermes session-id bound; an invalid rotation is refused and the prior mapping is retained. |
+| `VOICE_MAX_ITEM_ID_BYTES` | 256 | Provider transcript item-id bound used for deduplication. |
 | `VOICE_MAX_PROVIDER_EVENT_BYTES` | 32768 | Provider sideband event the relay will parse. Oversize events are dropped without ending the call. |
 
 ---
@@ -389,8 +515,9 @@ cleared by restarting with a new data directory if you need a hard reset.
 
 ```bash
 # Secrets come from your own store; values are never printed.
-# The file supplies OPENAI_API_KEY and WEBAPP_PASSWORD, and optionally
-# HERMES_READ_CONTEXT_URL / HERMES_READ_CONTEXT_TOKEN.
+# The file supplies OPENAI_API_KEY, WEBAPP_PASSWORD, and the four required
+# server-only Hermes route values: VOICE_HERMES_API_URL, VOICE_HERMES_API_KEY,
+# VOICE_HERMES_SESSION_ID, VOICE_HERMES_SESSION_KEY.
 set -a; source <your-secret-env-file>; set +a
 
 VOICE_ENABLED=true \
@@ -400,9 +527,9 @@ VOICE_PUBLIC_ORIGIN=https://<machine>.<tailnet>.ts.net \
 npm run build && npm start
 ```
 
-Startup refuses to proceed if `WEBAPP_PASSWORD` is missing, if `VOICE_MODEL` is
-set to anything but `gpt-realtime-2.1`, or if `VOICE_PUBLIC_ORIGIN` is
-malformed. It warns — and then accepts loopback origins only — if
+Startup refuses to proceed if `WEBAPP_PASSWORD` is missing, if any of the four
+`VOICE_HERMES_*` values is missing or invalid, if `VOICE_MODEL` is set to
+anything but `gpt-realtime-2.1`, or if `VOICE_PUBLIC_ORIGIN` is malformed. It warns — and then accepts loopback origins only — if
 `VOICE_PUBLIC_ORIGIN` is absent.
 
 Then from the phone, on the tailnet:
@@ -416,8 +543,9 @@ Tap **Call**, grant the microphone, and speak. Tap **Hang up** to end.
 ### Health
 
 `GET /api/voice/status` (authenticated) reports connection, session id, epoch,
-state, idle status, context availability, component health, and budget. It never
-returns a credential.
+state, idle status, whether a certified conversational authority is available,
+component health, and budget. It never returns a credential, and never returns
+the Hermes session id or key.
 
 ---
 
@@ -433,7 +561,9 @@ returns a credential.
 | Server refuses to start, complains about `WEBAPP_PASSWORD` | `VOICE_ENABLED=true` with no password | Set `WEBAPP_PASSWORD`, or disable voice (§ 4). |
 | `503 Voice is unavailable.` from every voice route | Voice enabled without authentication configured | Same fix as above; the relay refuses to serve voice unauthenticated. |
 | `Could not start a call right now.` | Token mint failed | Check `OPENAI_API_KEY` is set server-side and the provider is reachable. |
-| Voice says live context is unavailable | `HERMES_READ_CONTEXT_URL` unset or unreachable | Configure the documented read endpoint. This is intentional — it will never invent content. |
+| Server refuses to start, complains about `VOICE_HERMES_*` | The server-only Hermes route is incomplete or the URL is plaintext non-loopback | Supply all four values; use HTTPS (or loopback HTTP) (§ 5). |
+| `Could not start a call right now.` and the log says the Hermes tool policy is not certified | The deployment's `/v1/capabilities` or `/v1/toolsets` is unreachable, or reports MCP enabled / any effective `api_server` toolset | Point voice at a dedicated Hermes deployment with MCP off, the `no_mcp` sentinel, and zero effective toolsets (§ 5). Fail-closed is deliberate. |
+| The call connects but nothing is ever spoken | Hermes returned an error, an unparseable body, or content over the byte bound | Check the server log for a `hermes_*` reason. Silence is intentional: there is no fallback answer and nothing is invented. |
 | Server refuses to start, complains about `VOICE_MODEL` | `VOICE_MODEL` set to a non-pinned model | Unset it, or set it to exactly `gpt-realtime-2.1`. |
 | Call ends by itself | Budget cap, idle timeout, or absolute session cap | Check `/api/voice/status` budget fields and the caps above. |
 | `The call dropped and could not be restored.` | Two transport failures in one call | Tap **Call again**. Reconnect is deliberately bounded to one attempt per call. |

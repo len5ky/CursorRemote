@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type WebSocket from 'ws';
 import { VoiceTransport, type VoiceTerminationStatus } from '../src/server/transports/voice/index.js';
-import { FakeHermesConversationReader, FakeRealtimeSocket, testVoiceConfig } from './helpers/voice-fixtures.js';
+import { FakeHermesAgent, FakeRealtimeSocket, testVoiceConfig } from './helpers/voice-fixtures.js';
 
 /**
  * Termination in-flight state is per session, not per transport.
@@ -36,11 +36,11 @@ interface TransportOptions {
 }
 
 function makeTransport(dir: string, options: TransportOptions = {}): VoiceTransport {
-  return new VoiceTransport(testVoiceConfig(options.config), dir, new FakeHermesConversationReader(), {
+  return new VoiceTransport(testVoiceConfig(options.config), dir, new FakeHermesAgent(), {
     fetchImpl: (async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith('/client_secrets')) {
-        return new Response(JSON.stringify({ value: 'ephemeral-browser-secret', expires_at: 123 }), { status: 200 });
+        return new Response(JSON.stringify({ value: 'ephemeral-browser-secret', expires_at: 123, model: 'gpt-realtime-2.1' }), { status: 200 });
       }
       if (url.includes('/hangup')) {
         if (options.hangupGate) await options.hangupGate;

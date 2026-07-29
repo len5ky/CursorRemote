@@ -11,7 +11,7 @@ import type { Transport } from './transports/types.js';
 import { TelegramTransport } from './transports/telegram/index.js';
 import { RawTelegramTransport } from './transports/telegram-raw/index.js';
 import { VoiceTransport } from './transports/voice/index.js';
-import { HttpHermesConversationReader } from './transports/voice/context.js';
+import { HermesSessionChatClient, assertVoiceHermesRoute } from './transports/voice/hermes-chat.js';
 
 const logStream = createWriteStream('./temp/server.log', { flags: 'a' });
 const origLog = console.log;
@@ -157,13 +157,15 @@ async function main(): Promise<void> {
     if (!config.voice.openaiApiKey) {
       console.warn('[dicktator] VOICE_ENABLED but OPENAI_API_KEY is missing — voice transport disabled');
     } else {
+      // Fail closed: without a complete server-only Hermes route there is no
+      // conversational authority, and a voice surface with no authority would
+      // be a Realtime model answering on its own. That is exactly what this
+      // product must never do, so the transport is not wired at all.
+      const route = assertVoiceHermesRoute(config.voice.hermes);
       const voice = new VoiceTransport(
         config.voice,
         config.dataDir,
-        new HttpHermesConversationReader(
-          config.voice.hermesReadContextUrl,
-          config.voice.hermesReadContextToken,
-        )
+        new HermesSessionChatClient(route),
       );
       relay.setVoiceTransport(voice);
       voice.start().catch(err => {

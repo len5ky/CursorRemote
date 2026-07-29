@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import type WebSocket from 'ws';
 import { VoiceTransport } from '../src/server/transports/voice/index.js';
 import type { VoiceSessionController } from '../src/server/transports/voice/session.js';
-import { FakeHermesConversationReader, FakeRealtimeSocket, testVoiceConfig } from './helpers/voice-fixtures.js';
+import { FakeHermesAgent, FakeRealtimeSocket, testVoiceConfig } from './helpers/voice-fixtures.js';
 
 /**
  * `providerHangupConfirmed` used to be `callId ? await hangup(callId) : true`,
@@ -23,13 +23,13 @@ interface TransportOptions {
 }
 
 function makeTransport(dir: string, options: TransportOptions = {}): VoiceTransport {
-  return new VoiceTransport(testVoiceConfig(), dir, new FakeHermesConversationReader(), {
+  return new VoiceTransport(testVoiceConfig(), dir, new FakeHermesAgent(), {
     fetchImpl: (async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith('/client_secrets')) {
         const status = options.mintStatus ?? 200;
         return status === 200
-          ? new Response(JSON.stringify({ value: 'ephemeral-browser-secret', expires_at: 123 }), { status: 200 })
+          ? new Response(JSON.stringify({ value: 'ephemeral-browser-secret', expires_at: 123, model: 'gpt-realtime-2.1' }), { status: 200 })
           : new Response('nope', { status });
       }
       if (url.includes('/hangup')) return new Response(null, { status: options.hangupStatus ?? 200 });

@@ -5,12 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type WebSocket from 'ws';
 import { RealtimeBridge } from '../src/server/transports/voice/realtime-bridge.js';
-import { VoiceToolRouter } from '../src/server/transports/voice/tools.js';
 import { VoiceTransport } from '../src/server/transports/voice/index.js';
 import type { VoiceSessionContext } from '../src/server/transports/voice/session.js';
-import { VOICE_MAX_TOOL_ARGUMENT_BYTES } from '../src/server/transports/voice/constants.js';
 import {
-  FakeHermesConversationReader,
+  FakeHermesAgent,
   FakeRealtimeSocket,
   testVoiceConfig,
 } from './helpers/voice-fixtures.js';
@@ -25,11 +23,10 @@ import {
  * connection that was already gone, while the session it had just activated
  * stayed activated.
  *
- * And an oversized function-call envelope was answered with
- * `conversation.item.create`. That envelope is untrusted by definition — its
- * `call_id` may be truncated or forged and its arguments were never parsed — so
- * the only defensible policy is to write nothing at all to the provider
- * conversation and end the session.
+ * And a function-call envelope was answered with `conversation.item.create`.
+ * The corrected surface declares no tools at all, so any function call is an
+ * envelope this relay never solicited: the only defensible policy is to write
+ * nothing to the provider conversation and end the session.
  */
 
 const context = (): VoiceSessionContext => ({ sessionId: 'session-1', epoch: 1, leaseId: 'lease-1' });
@@ -47,7 +44,7 @@ describe('sideband attach — a close before open settles the attach', () => {
   it('rejects the attach promise instead of leaving it pending', async () => {
     const record = { failures: [] as string[] };
     const socket = new FakeRealtimeSocket(false);
-    const bridge = new RealtimeBridge(testVoiceConfig(), {} as VoiceToolRouter, silentAuthority(record), {
+    const bridge = new RealtimeBridge(testVoiceConfig(), new FakeHermesAgent(), silentAuthority(record), {
       websocketFactory: () => socket as unknown as WebSocket,
     });
 
@@ -65,7 +62,7 @@ describe('sideband attach — a close before open settles the attach', () => {
   it('releases the socket but keeps the call id so the provider call can still be hung up', async () => {
     const record = { failures: [] as string[] };
     const socket = new FakeRealtimeSocket(false);
-    const bridge = new RealtimeBridge(testVoiceConfig(), {} as VoiceToolRouter, silentAuthority(record), {
+    const bridge = new RealtimeBridge(testVoiceConfig(), new FakeHermesAgent(), silentAuthority(record), {
       websocketFactory: () => socket as unknown as WebSocket,
     });
 
@@ -84,7 +81,7 @@ describe('sideband attach — a close before open settles the attach', () => {
   it('reports the provider failure once, not once per close and error', async () => {
     const record = { failures: [] as string[] };
     const socket = new FakeRealtimeSocket(false);
-    const bridge = new RealtimeBridge(testVoiceConfig(), {} as VoiceToolRouter, silentAuthority(record), {
+    const bridge = new RealtimeBridge(testVoiceConfig(), new FakeHermesAgent(), silentAuthority(record), {
       websocketFactory: () => socket as unknown as WebSocket,
     });
 
@@ -104,12 +101,12 @@ describe('voice transport — close-only attach lifecycle', () => {
     const transport = new VoiceTransport(
       testVoiceConfig(),
       dataDir,
-      new FakeHermesConversationReader(),
+      new FakeHermesAgent(),
       {
         fetchImpl: (async (input: RequestInfo | URL) => {
           const url = String(input);
           if (url.endsWith('/client_secrets')) {
-            return new Response(JSON.stringify({ value: 'ephemeral-browser-secret' }), { status: 200 });
+            return new Response(JSON.stringify({ value: 'ephemeral-browser-secret', model: 'gpt-realtime-2.1' }), { status: 200 });
           }
           if (url.includes('/hangup')) { hangups.push(url); return new Response(null, { status: 200 }); }
           throw new Error(`unexpected provider call: ${url}`);
@@ -144,81 +141,44 @@ describe('voice transport — close-only attach lifecycle', () => {
   });
 });
 
-describe('provider tool envelope — oversized input is a non-writing failure', () => {
+describe('provider tool call — refused outright, never answered', () => {
   const attached = async (record: { failures: string[] }) => {
     const socket = new FakeRealtimeSocket();
-    const bridge = new RealtimeBridge(testVoiceConfig(), {} as VoiceToolRouter, silentAuthority(record), {
+    const bridge = new RealtimeBridge(testVoiceConfig(), new FakeHermesAgent(), silentAuthority(record), {
       websocketFactory: () => socket as unknown as WebSocket,
     });
-    await bridge.attachSideband('call-oversize', context());
+    await bridge.attachSideband('call-tooling', context());
     socket.sent.length = 0;
     return { socket, bridge };
   };
 
-  it('writes no conversation item for an oversized argument blob and ends the session', async () => {
-    const record = { failures: [] as string[] };
-    const { socket } = await attached(record);
+  /**
+   * The session declares no tools and `tool_choice: 'none'`, so a function call
+   * cannot legitimately arrive at all. There is no longer a well-formed variant
+   * to answer: answering *any* of these would write a tool output for a tool
+   * this surface does not have, on the authority of an envelope it never
+   * solicited. Every shape below is a non-writing failure.
+   */
+  const envelopes: Array<[Record<string, unknown>, string]> = [
+    [{ type: 'response.function_call_arguments.done', name: 'get_status', call_id: 'call-abc', arguments: '{}' }, 'a well-formed call'],
+    [{ type: 'response.function_call_arguments.done', name: 'get_status', call_id: 'call-abc', arguments: '{not json' }, 'malformed arguments'],
+    [{ type: 'response.function_call_arguments.done', name: 'x'.repeat(500), call_id: 'call-abc', arguments: '{}' }, 'an oversized name'],
+    [{ type: 'response.function_call_arguments.done', name: 'get_status', call_id: 'c'.repeat(1_000), arguments: '{}' }, 'an oversized call id'],
+    [{ type: 'response.function_call_arguments.done', name: '', call_id: '', arguments: '{}' }, 'an empty envelope'],
+    [{ type: 'response.function_call_arguments.delta', name: 'get_status', call_id: 'call-abc', arguments: '{' }, 'a partial call'],
+  ];
 
-    socket.emit('message', JSON.stringify({
-      type: 'response.function_call_arguments.done',
-      name: 'get_status',
-      call_id: 'call-abc',
-      arguments: JSON.stringify({ padding: 'x'.repeat(VOICE_MAX_TOOL_ARGUMENT_BYTES + 500) }),
-    }));
-    await new Promise((resolve) => setImmediate(resolve));
-
-    assert.deepEqual(socket.sentEvents(), [], 'an untrusted envelope must produce no provider write at all');
-    assert.equal(record.failures.length, 1, 'the session is terminated with a definite reason');
-    assert.match(record.failures[0], /tool_envelope/);
-  });
-
-  it('writes no conversation item for an oversized call id or function name', async () => {
-    for (const event of [
-      { type: 'response.function_call_arguments.done', name: 'x'.repeat(500), call_id: 'call-abc', arguments: '{}' },
-      { type: 'response.function_call_arguments.done', name: 'get_status', call_id: 'c'.repeat(1_000), arguments: '{}' },
-      { type: 'response.function_call_arguments.done', name: '', call_id: 'call-abc', arguments: '{}' },
-      { type: 'response.function_call_arguments.done', name: 'get_status', call_id: '', arguments: '{}' },
-    ]) {
+  for (const [event, label] of envelopes) {
+    it(`writes nothing and ends the session for ${label}`, async () => {
       const record = { failures: [] as string[] };
       const { socket } = await attached(record);
 
       socket.emit('message', JSON.stringify(event));
       await new Promise((resolve) => setImmediate(resolve));
 
-      assert.deepEqual(
-        socket.sentEvents(),
-        [],
-        `an envelope with name "${String(event.name).slice(0, 12)}" must not be answered`,
-      );
-      assert.equal(record.failures.length, 1);
-    }
-  });
-
-  it('still answers a well-formed call whose arguments are merely malformed', async () => {
-    const record = { failures: [] as string[] };
-    const socket = new FakeRealtimeSocket();
-    const bridge = new RealtimeBridge(
-      testVoiceConfig(),
-      new VoiceToolRouter({ contextReader: new FakeHermesConversationReader() }),
-      silentAuthority(record),
-      { websocketFactory: () => socket as unknown as WebSocket },
-    );
-    await bridge.attachSideband('call-malformed', context());
-    socket.sent.length = 0;
-
-    socket.emit('message', JSON.stringify({
-      type: 'response.function_call_arguments.done',
-      name: 'get_status',
-      call_id: 'call-abc',
-      arguments: '{not json',
-    }));
-    await new Promise((resolve) => setImmediate(resolve));
-
-    const types = socket.sentEvents().map((event) => event.type);
-    assert.ok(
-      types.includes('conversation.item.create'),
-      'a bounded, well-formed tool call still gets its answer so the model is not left waiting',
-    );
-    assert.equal(record.failures.length, 0, 'a recoverable argument error does not end the call');
-  });
+      assert.deepEqual(socket.sentEvents(), [], `${label} must produce no provider write at all`);
+      assert.equal(record.failures.length, 1, 'the session is terminated with a definite reason');
+      assert.equal(record.failures[0], 'provider_tool_call_refused');
+    });
+  }
 });

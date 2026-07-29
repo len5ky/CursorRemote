@@ -1,58 +1,78 @@
 import type { VoiceConfig } from '../../src/server/types.js';
 import { KNOWN_VOICE_PRICE_VERSION } from '../../src/server/transports/voice/pricing.js';
-import type {
-  HermesConversationReader,
-  HermesConversationSnapshot,
-  HermesReadResult,
-  ReadContextLimits,
-} from '../../src/server/transports/voice/tools.js';
+import {
+  HERMES_CAPABILITIES_PATH,
+  HERMES_TOOLSETS_PATH,
+  HermesPolicyResult,
+  HermesTurnResult,
+  VoiceHermesAgent,
+} from '../../src/server/transports/voice/hermes-chat.js';
 
 /**
- * Deterministic Hermes reader for tests only.
+ * Deterministic stand-in for the *only* conversational authority: the private
+ * Hermes deployment reached server-to-server over session chat.
  *
  * This lives under tests/ on purpose. Production startup wires
- * HttpHermesConversationReader and reports `unavailable` when no Hermes read
- * endpoint is configured; it must never be able to select this class, because
- * a fixture that looks live is worse than an honest failure.
+ * HermesSessionChatClient against explicitly configured, server-only route
+ * values and fails closed when they are absent; it must never be able to select
+ * this class, because a fixture that looks live is worse than an honest failure.
  */
-export class FakeHermesConversationReader implements HermesConversationReader {
-  readonly calls: ReadContextLimits[] = [];
+export class FakeHermesAgent implements VoiceHermesAgent {
+  /** Every transcript the relay actually submitted, in order. */
+  readonly sent: string[] = [];
+  /** The abort signal handed to each in-flight turn, in order. */
+  readonly signals: AbortSignal[] = [];
+  policyCalls = 0;
 
   constructor(
-    private readonly result: HermesReadResult = {
-      kind: 'available',
-      snapshot: FakeHermesConversationReader.snapshot(),
-    },
+    private readonly script: {
+      reply?: (transcript: string, index: number) => HermesTurnResult;
+      delayMs?: (index: number) => number;
+      policy?: HermesPolicyResult;
+    } = {},
   ) {}
 
-  static snapshot(overrides: Partial<HermesConversationSnapshot> = {}): HermesConversationSnapshot {
-    return {
-      conversationId: 'hermes-conversation-1',
-      revision: 'rev-42',
-      observedAt: '2026-07-29T00:00:00.000Z',
-      agentStatus: 'idle',
-      sessions: [{
-        id: 'hermes-1',
-        title: 'Hermes',
-        status: 'idle',
-        tabs: [{ title: 'Current context', isActive: true, status: 'idle' }],
-      }],
-      turns: [
-        { role: 'user', content: 'where are we up to' },
-        { role: 'assistant', content: 'the migration is finished' },
-      ],
-      ...overrides,
-    };
+  async send(transcript: string, options: { signal: AbortSignal }): Promise<HermesTurnResult> {
+    const index = this.sent.length;
+    this.sent.push(transcript);
+    this.signals.push(options.signal);
+    const delayMs = this.script.delayMs?.(index) ?? 0;
+    if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    if (options.signal.aborted) return { kind: 'error', reason: 'aborted' };
+    return this.script.reply?.(transcript, index)
+      ?? { kind: 'ok', assistantText: `hermes answer ${index + 1}` };
   }
 
-  static unavailable(reason = 'no live Hermes endpoint configured'): FakeHermesConversationReader {
-    return new FakeHermesConversationReader({ kind: 'unavailable', reason });
+  async verifyPolicy(): Promise<HermesPolicyResult> {
+    this.policyCalls += 1;
+    return this.script.policy ?? { ok: true };
   }
+}
 
-  async readConversation(limits: ReadContextLimits = {}): Promise<HermesReadResult> {
-    this.calls.push(limits);
-    return this.result;
-  }
+/** A correctly locked-down documented Hermes `/v1/capabilities` report. */
+export function hermesCapabilities(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    object: 'hermes.api_server.capabilities',
+    platform: 'hermes-agent',
+    model: 'hermes-agent',
+    auth: { type: 'bearer', required: true },
+    runtime: { mode: 'server_agent', tool_execution: 'server', split_runtime: false },
+    features: { session_chat: true, skills_api: true },
+    endpoints: {
+      toolsets: { method: 'GET', path: HERMES_TOOLSETS_PATH },
+    },
+    ...overrides,
+  };
+}
+
+/** A correctly locked-down documented Hermes `/v1/toolsets` report. */
+export function hermesToolsets(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    object: 'list',
+    platform: 'api_server',
+    data: [],
+    ...overrides,
+  };
 }
 
 /**
@@ -105,8 +125,16 @@ export function testVoiceConfig(overrides: Partial<VoiceConfig> = {}): VoiceConf
     enabled: true,
     openaiApiKey: 'server-key-for-test',
     publicOrigin: '',
-    hermesReadContextUrl: '',
-    hermesReadContextToken: '',
+    // Server-only Hermes route. Never returned to the browser, never logged.
+    hermes: {
+      apiUrl: 'https://hermes.private.test',
+      apiKey: 'herme...st',
+      sessionId: 'hermes-session-configured',
+      sessionKey: 'hermes-session-key-for-test',
+      capabilitiesPath: HERMES_CAPABILITIES_PATH,
+      toolsetsPath: HERMES_TOOLSETS_PATH,
+      policyTimeoutMs: 10_000,
+    },
     voice: 'marin',
     accountId: 'test-operator',
     // A real entry from the frozen price table: admission requires a *known*

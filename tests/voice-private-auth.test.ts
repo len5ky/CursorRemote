@@ -46,12 +46,21 @@ describe('voice private auth — configuration', () => {
       assert.throws(() => loadConfig(), /WEBAPP_PASSWORD/);
 
       process.env.WEBAPP_PASSWORD = 'a-real-password';
+      // Voice also refuses to boot without the server-only Hermes route.
+      assert.throws(() => loadConfig(), /VOICE_HERMES_API_URL/);
+      process.env.VOICE_HERMES_API_URL = 'https://hermes.private.test';
+      process.env.VOICE_HERMES_API_KEY = 'hermes-fixture-key';
+      process.env.VOICE_HERMES_SESSION_ID = 'hermes-fixture-session';
+      process.env.VOICE_HERMES_SESSION_KEY = 'hermes-fixture-session-key';
       assert.doesNotThrow(() => loadConfig());
     } finally {
       if (saved.voice === undefined) delete process.env.VOICE_ENABLED;
       else process.env.VOICE_ENABLED = saved.voice;
       if (saved.password === undefined) delete process.env.WEBAPP_PASSWORD;
       else process.env.WEBAPP_PASSWORD = saved.password;
+      for (const key of ['VOICE_HERMES_API_URL', 'VOICE_HERMES_API_KEY', 'VOICE_HERMES_SESSION_ID', 'VOICE_HERMES_SESSION_KEY']) {
+        delete process.env[key];
+      }
     }
   });
 });

@@ -5,9 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type WebSocket from 'ws';
 import { VoiceTransport } from '../src/server/transports/voice/index.js';
-import { VoiceToolRouter } from '../src/server/transports/voice/tools.js';
-import type { VoiceSessionContext } from '../src/server/transports/voice/session.js';
-import { FakeHermesConversationReader, FakeRealtimeSocket, testVoiceConfig } from './helpers/voice-fixtures.js';
+import { FakeHermesAgent, FakeRealtimeSocket, testVoiceConfig } from './helpers/voice-fixtures.js';
 import { startVoiceRelay } from './helpers/voice-relay-harness.js';
 
 /**
@@ -21,16 +19,13 @@ import { startVoiceRelay } from './helpers/voice-relay-harness.js';
  * request hung until its own timeout. The phone's Hang up button appears to do
  * nothing, and the operator has no signal at all.
  *
- * The same shape existed on the tool path: `disconnect_voice` awaited
- * `terminateVoice` bare, so a failing termination rejected out of the tool
- * router, the sideband's catch-all swallowed it, and the model was left waiting
- * for a `function_call_output` that never arrived.
+ * The tool path this suite also used to cover is gone: the corrected surface
+ * exposes no Realtime tools at all, so there is no `disconnect_voice` for a
+ * failing termination to reject out of.
  *
  * A failure must be answered generically. The cause — a ledger path, an errno,
  * a provider status — is operator diagnostics and stays in the server log.
  */
-
-const CONTEXT: VoiceSessionContext = { sessionId: 'session-fail', epoch: 1, leaseId: 'lease-fail' };
 
 /** Detail that must never reach a client, in an error a real failure could carry. */
 const INFRA_DETAIL = '/srv/relay/data/voice-usage.json';
@@ -42,11 +37,11 @@ function withDir<T>(name: string, run: (dir: string) => Promise<T>): Promise<T> 
 }
 
 function makeTransport(dir: string): VoiceTransport {
-  return new VoiceTransport(testVoiceConfig(), dir, new FakeHermesConversationReader(), {
+  return new VoiceTransport(testVoiceConfig(), dir, new FakeHermesAgent(), {
     fetchImpl: (async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith('/client_secrets')) {
-        return new Response(JSON.stringify({ value: 'ephemeral-browser-secret', expires_at: 123 }), { status: 200 });
+        return new Response(JSON.stringify({ value: 'ephemeral-browser-secret', expires_at: 123, model: 'gpt-realtime-2.1' }), { status: 200 });
       }
       if (url.includes('/hangup')) return new Response(null, { status: 200 });
       throw new Error(`unexpected provider call: ${url}`);
@@ -188,38 +183,6 @@ describe('voice termination failure — HTTP route', () => {
     } finally {
       await harness.close();
     }
-  });
-});
-
-describe('voice termination failure — tool path', () => {
-  it('answers disconnect_voice generically when the termination fails', async () => {
-    const router = new VoiceToolRouter(
-      {
-        contextReader: new FakeHermesConversationReader(),
-        terminateVoice: async () => { throw new Error(INFRA_ERROR); },
-      },
-      { accepts: () => true, live: () => true },
-    );
-
-    const result = await router.call('disconnect_voice', {}, CONTEXT);
-
-    assert.equal(result.ok, false, 'a failed termination is not reported as a success');
-    assert.ok(!result.output.includes(INFRA_DETAIL), `the model must not be told the path: ${result.output}`);
-    assert.ok(!result.output.includes('EACCES'), `the model must not be told the errno: ${result.output}`);
-    assert.ok(result.output.length > 0, 'the model still receives a spoken-safe answer');
-  });
-
-  it('still reports a successful disconnect as a terminal state', async () => {
-    const router = new VoiceToolRouter(
-      {
-        contextReader: new FakeHermesConversationReader(),
-        terminateVoice: async () => ({ state: 'terminated' }),
-      },
-      { accepts: () => true, live: () => true },
-    );
-    const result = await router.call('disconnect_voice', {}, CONTEXT);
-    assert.equal(result.ok, true);
-    assert.match(result.output, /terminated/);
   });
 });
 

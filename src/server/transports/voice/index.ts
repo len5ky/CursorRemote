@@ -2,7 +2,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { join } from 'node:path';
 import type { Transport } from '../types.js';
 import type { VoiceConfig } from '../../types.js';
-import { VoiceToolRouter, type HermesConversationReader } from './tools.js';
+import type { VoiceHermesAgent } from './hermes-chat.js';
 import { RealtimeBridge, type ClientSecretResult, type RealtimeBridgeOptions } from './realtime-bridge.js';
 import { VOICE_REALTIME_MODEL, VOICE_MAX_CALL_ID_LENGTH } from './constants.js';
 import { VoiceSessionController, type VoiceSessionContext, type VoiceSessionStatus } from './session.js';
@@ -11,7 +11,16 @@ const ORPHAN_HANGUP_ATTEMPTS = 2;
 const ORPHAN_HANGUP_RETRY_DELAY_MS = 100;
 const ATTACH_TOKEN_TTL_MS = 120_000;
 
-type VoiceHealth = { voice: boolean; sideband: boolean; socket: boolean; context: boolean };
+/**
+ * How long a certified Hermes tool policy is trusted before it is re-checked.
+ *
+ * The deployment could be reconfigured underneath a long-running relay, and the
+ * whole read-only guarantee rests on that report, so it is not certified once
+ * at boot and believed forever.
+ */
+const HERMES_POLICY_TTL_MS = 600_000;
+
+type VoiceHealth = { voice: boolean; sideband: boolean; socket: boolean; hermes: boolean };
 
 /**
  * What actually happened to the provider-side call during termination.
@@ -49,18 +58,20 @@ interface AttachGrant {
 }
 
 /**
- * Owns admission, sideband attachment, read-only tools, and idempotent cleanup.
+ * Owns admission, sideband attachment, Hermes policy certification, and
+ * idempotent cleanup.
+ *
  * The transport intentionally has no dependency on the general web mutation
- * surface; Hermes context arrives only through HermesConversationReader.
+ * surface, and no conversational capability of its own: every word spoken on a
+ * call comes back from the private Hermes deployment through VoiceHermesAgent.
  */
 export class VoiceTransport implements Transport {
   readonly name = 'voice';
 
   private readonly config: VoiceConfig;
   private readonly bridge: RealtimeBridge;
-  private readonly router: VoiceToolRouter;
   private readonly sessions: VoiceSessionController;
-  private readonly contextReader: HermesConversationReader;
+  private readonly hermes: VoiceHermesAgent;
   private started = false;
   private reaper: ReturnType<typeof setInterval> | null = null;
   private socketHealthy: () => boolean = () => false;
@@ -80,28 +91,28 @@ export class VoiceTransport implements Transport {
   private readonly completedOwners = new Map<string, string>();
   private readonly orphanHangups = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly attachGrants = new Map<string, AttachGrant>();
-  private contextAvailable = false;
+  /** Result of the last Hermes tool-policy certification, and when it was made. */
+  private hermesPolicyOk = false;
+  private hermesPolicyCheckedAt = 0;
+  private hermesPolicyInFlight: Promise<boolean> | null = null;
 
   /**
+   * @param hermes The private Hermes deployment, and the only conversational
+   *   authority on this surface. Its session identity is server state; nothing
+   *   a client sends can select or influence it.
    * @param providerOptions Transport seams for the provider connection. Tests
-   * inject a fetch/WebSocket double here so the lifecycle can be exercised
-   * without a real Realtime call. The model is never injectable — it is pinned
-   * to VOICE_REALTIME_MODEL.
+   *   inject a fetch/WebSocket double here so the lifecycle can be exercised
+   *   without a real Realtime call. The model is never injectable — it is pinned
+   *   to VOICE_REALTIME_MODEL.
    */
   constructor(
     config: VoiceConfig,
     dataDir: string,
-    contextReader: HermesConversationReader,
+    hermes: VoiceHermesAgent,
     providerOptions: RealtimeBridgeOptions = {},
   ) {
     this.config = config;
-    this.contextReader = {
-      readConversation: async (limits) => {
-        const result = await contextReader.readConversation(limits);
-        this.contextAvailable = result.kind === 'available';
-        return result;
-      },
-    };
+    this.hermes = hermes;
     this.sessions = new VoiceSessionController({
       dataPath: join(dataDir, 'voice-usage.json'),
       priceVersion: config.usagePriceVersion,
@@ -114,15 +125,7 @@ export class VoiceTransport implements Transport {
       leaseMs: config.sessionLeaseMs,
     });
 
-    const deps = {
-      contextReader: this.contextReader,
-      terminateVoice: async (context: VoiceSessionContext) => this.terminate(context.sessionId, context.epoch, 'tool_disconnect'),
-    };
-    this.router = new VoiceToolRouter(deps, {
-      accepts: (context) => this.sessions.canUseTools(context),
-      live: (context) => this.sessions.accept(context),
-    });
-    this.bridge = new RealtimeBridge(config, this.router, {
+    this.bridge = new RealtimeBridge(config, this.hermes, {
       accepts: (context) => this.sessions.accept(context),
       userTurn: (context) => { this.sessions.touch(context); },
       providerFailure: (context, reason) => { this.terminateDetached(context.sessionId, context.epoch, reason); },
@@ -162,6 +165,42 @@ export class VoiceTransport implements Transport {
     }
   }
 
+  /**
+   * Certify — or re-certify — that the configured Hermes deployment is private,
+   * has MCP disabled and reports `api_server.toolsets` as exactly `[]`.
+   *
+   * The Hermes session-chat API has no per-request tool disable, so this report
+   * is the only enforcement point there is. It fails closed on every error
+   * path, and concurrent callers share one in-flight check rather than
+   * stampeding the deployment.
+   */
+  private async ensureHermesPolicy(): Promise<boolean> {
+    const fresh = this.hermesPolicyOk && Date.now() - this.hermesPolicyCheckedAt < HERMES_POLICY_TTL_MS;
+    if (fresh) return true;
+    if (this.hermesPolicyInFlight) return this.hermesPolicyInFlight;
+
+    this.hermesPolicyInFlight = (async () => {
+      let verdict: Awaited<ReturnType<VoiceHermesAgent['verifyPolicy']>>;
+      try {
+        verdict = await this.hermes.verifyPolicy();
+      } catch {
+        verdict = { ok: false, reason: 'hermes_policy_check_failed' };
+      }
+      this.hermesPolicyOk = verdict.ok;
+      this.hermesPolicyCheckedAt = Date.now();
+      if (!verdict.ok) {
+        console.error(`[voice] Hermes tool policy not certified (${verdict.reason}); voice stays unavailable`);
+      }
+      return verdict.ok;
+    })();
+
+    try {
+      return await this.hermesPolicyInFlight;
+    } finally {
+      this.hermesPolicyInFlight = null;
+    }
+  }
+
   private sweepAttachGrants(): void {
     const now = Date.now();
     for (const [key, grant] of this.attachGrants) {
@@ -175,6 +214,20 @@ export class VoiceTransport implements Transport {
    *   it changes on every login and a per-login budget is not a budget.
    */
   async mintClientSecret(ownerKey: string): Promise<ClientSecretResult & { sessionId: string; epoch: number; attachToken: string }> {
+    // Nothing is admitted against an uncertified Hermes deployment. A call that
+    // came up anyway would be a live microphone wired to a conversational
+    // backend whose tool policy nobody has verified.
+    //
+    // 503, not 500: this is not something that broke unexpectedly, it is a
+    // precondition the deployment has not met, and the surface is deliberately
+    // refusing. The caller is told only that voice is unavailable — which
+    // precondition failed is operator diagnostics and stays in the log.
+    if (!await this.ensureHermesPolicy()) {
+      throw Object.assign(
+        new Error('voice is unavailable until the private Hermes deployment certifies its tool policy'),
+        { statusCode: 503 },
+      );
+    }
     const admitted = this.sessions.admit(ownerKey, this.config.accountId);
     if (!admitted.ok || !admitted.context) throw new Error(admitted.error ?? 'voice admission denied');
     const context = admitted.context;
@@ -384,7 +437,7 @@ export class VoiceTransport implements Transport {
     epoch: number | null;
     state: VoiceSessionStatus['state'];
     idleStatus: VoiceSessionStatus['idleStatus'];
-    contextAvailable: boolean;
+    hermesCertified: boolean;
     health: VoiceHealth;
     budget: VoiceSessionStatus['budget'];
   } {
@@ -396,12 +449,16 @@ export class VoiceTransport implements Transport {
       epoch: session.epoch,
       state: session.state,
       idleStatus: session.idleStatus,
-      contextAvailable: this.contextAvailable,
+      // "Can this surface hold a conversation at all" — i.e. is there a
+      // currently certified private Hermes deployment behind it. It reads the
+      // same fact admission gates on, TTL included, so the status report and
+      // the mint route cannot disagree. It is not a claim about any one turn.
+      hermesCertified: this.available,
       health: {
-        voice: !!context && this.sessions.canUseTools(context),
+        voice: !!context && this.sessions.accept(context),
         sideband: !!context && this.bridge.connectedFor(context),
         socket: this.socketHealthy(),
-        context: this.contextAvailable,
+        hermes: this.available,
       },
       budget: session.budget,
     };
@@ -453,14 +510,50 @@ export class VoiceTransport implements Transport {
     schedule();
   }
 
+  /**
+   * True only when a call can actually be placed right now: the private Hermes
+   * deployment has certified, within the policy TTL, that it is private, has
+   * MCP disabled and exposes zero `api_server` toolsets.
+   *
+   * This is the transport's own answer about itself, and it is the same fact
+   * admission gates on — so the status report, the boot log and the mint route
+   * cannot disagree about whether voice works.
+   */
+  get available(): boolean {
+    return this.hermesPolicyOk && Date.now() - this.hermesPolicyCheckedAt < HERMES_POLICY_TTL_MS;
+  }
+
+  /**
+   * Bring the transport up, and say plainly whether it came up usable.
+   *
+   * The Hermes tool policy is certified here so a misconfigured or unreachable
+   * deployment is visible at boot rather than at 70km/h. It is deliberately not
+   * fatal: the relay also serves the web and Telegram surfaces, and killing all
+   * of them over a Hermes blip would be a worse failure than an unavailable
+   * voice button. What must not happen is voice coming up *looking* fine —
+   * admission stays closed, the boot log says so, and `/api/voice/status`
+   * reports it.
+   *
+   * The reaper starts either way. Leases, budgets and orphaned provider calls
+   * still have to be cleaned up on a transport that is refusing new calls.
+   */
   async start(): Promise<void> {
     this.started = true;
+    const certified = await this.ensureHermesPolicy();
     this.reaper = setInterval(() => {
       for (const expired of this.sessions.reap()) {
         this.terminateDetached(expired.context.sessionId, expired.context.epoch, expired.reason);
       }
     }, Math.min(this.config.sessionLeaseMs, 5_000));
-    console.log(`[voice] Transport ready (model: ${VOICE_REALTIME_MODEL}, voice: ${this.config.voice})`);
+    if (certified) {
+      console.log(`[voice] Transport ready (model: ${VOICE_REALTIME_MODEL}, voice: ${this.config.voice})`);
+    } else {
+      console.error(
+        '[voice] Transport started UNAVAILABLE: the private Hermes deployment has not certified its tool policy. '
+        + 'No call can be placed until it does. Check VOICE_HERMES_API_URL reachability and that the deployment '
+        + 'reports a private deployment, MCP disabled and zero api_server toolsets.'
+      );
+    }
   }
 
   async stop(): Promise<void> {

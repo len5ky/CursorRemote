@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { VoiceSessionController } from '../src/server/transports/voice/session.js';
 import { VoiceTransport } from '../src/server/transports/voice/index.js';
 import type WebSocket from 'ws';
-import { FakeHermesConversationReader, FakeRealtimeSocket, testVoiceConfig } from './helpers/voice-fixtures.js';
+import { FakeHermesAgent, FakeRealtimeSocket, testVoiceConfig } from './helpers/voice-fixtures.js';
 import { KNOWN_VOICE_PRICE_VERSION } from '../src/server/transports/voice/pricing.js';
 
 function makeController(nowRef: { value: number }) {
@@ -34,9 +34,9 @@ function makeTransport(
   options: { mintStatus?: number; sidebandWorks?: boolean } = {},
 ): VoiceTransport {
   const mintStatus = options.mintStatus ?? 200;
-  return new VoiceTransport(testVoiceConfig(), dir, new FakeHermesConversationReader(), {
+  return new VoiceTransport(testVoiceConfig(), dir, new FakeHermesAgent(), {
     fetchImpl: (async () => (mintStatus === 200
-      ? new Response(JSON.stringify({ value: 'ephemeral-browser-secret', expires_at: 123 }), { status: 200 })
+      ? new Response(JSON.stringify({ value: 'ephemeral-browser-secret', expires_at: 123, model: 'gpt-realtime-2.1' }), { status: 200 })
       : new Response('nope', { status: mintStatus }))) as typeof fetch,
     websocketFactory: options.sidebandWorks
       ? (() => new FakeRealtimeSocket() as unknown as WebSocket)

@@ -13,18 +13,18 @@ const config = testVoiceConfig;
 describe('private voice recovery RED inventory', () => {
   it('removes staged confirmation from the voice source and public relay surface', () => {
     const voiceIndex = read('src/server/transports/voice/index.ts');
-    const tools = read('src/server/transports/voice/tools.ts');
+    const bridge = read('src/server/transports/voice/realtime-bridge.ts');
     const relay = read('src/server/relay.ts');
     assert.doesNotMatch(voiceIndex, /pendingConfirm|confirmLatest|deferLatest|latestPending|confirm_pending/);
-    assert.doesNotMatch(tools, /PendingConfirmation|latestPending|deferPending|confirm_pending/);
+    assert.doesNotMatch(bridge, /PendingConfirmation|latestPending|deferPending|confirm_pending/);
     assert.doesNotMatch(relay, /api\/voice\/(confirm|defer)/);
   });
 
   it('severs the voice composition graph from CommandExecutor and mutation callbacks', () => {
     const voiceIndex = read('src/server/transports/voice/index.ts');
-    const tools = read('src/server/transports/voice/tools.ts');
+    const bridge = read('src/server/transports/voice/realtime-bridge.ts');
     assert.doesNotMatch(voiceIndex, /CommandExecutor|commandExecutor|mutationHealth|activateTarget|sendMessage|clickApproval|clickAction|setMode|setModel/);
-    assert.doesNotMatch(tools, /activateTarget|sendMessage|clickApproval|clickAction|setMode|setModel|mutationHealth/);
+    assert.doesNotMatch(bridge, /activateTarget|sendMessage|clickApproval|clickAction|setMode|setModel|mutationHealth/);
   });
 
   it('pins every provider session to the exact required model', () => {
@@ -33,9 +33,18 @@ describe('private voice recovery RED inventory', () => {
   });
 
   it('does not ship a deterministic conversational fixture in production source', () => {
-    const context = read('src/server/transports/voice/context.ts');
-    assert.doesNotMatch(context, /DeterministicVoiceContextAdapter|Deterministic read-only context/);
-    assert.match(context, /unavailable|HermesConversationReader|readConversation/i);
+    const hermes = read('src/server/transports/voice/hermes-chat.js'.replace('.js', '.ts'));
+    assert.doesNotMatch(hermes, /DeterministicVoiceContextAdapter|Deterministic read-only context/);
+    // The only conversational content in production comes back over the wire
+    // from the configured Hermes deployment, and an unusable route fails closed.
+    assert.match(hermes, /assertVoiceHermesRoute|resolveVoiceHermesRoute/);
+    assert.match(hermes, /HermesSessionChatClient/);
+  });
+
+  it('has no Realtime tool surface left for the provider to hold a conversation with', () => {
+    const session = buildSessionConfig(config()).session as { tools?: unknown[]; tool_choice?: string };
+    assert.deepEqual(session.tools, []);
+    assert.equal(session.tool_choice, 'none');
   });
 
   it('has a dedicated minimal online-only PWA shell and network-only worker', () => {

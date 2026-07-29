@@ -11,7 +11,7 @@ import type { CDPBridge } from '../../src/server/cdp-bridge.js';
 import type { CommandExecutor } from '../../src/server/command-executor.js';
 import type { StateManager } from '../../src/server/state-manager.js';
 import type { ServerConfig } from '../../src/server/types.js';
-import { FakeHermesConversationReader, FakeRealtimeSocket, testVoiceConfig } from './voice-fixtures.js';
+import { FakeHermesAgent, FakeRealtimeSocket, testVoiceConfig } from './voice-fixtures.js';
 
 /**
  * Shared relay + mocked-voice-transport harness for route-level tests.
@@ -56,6 +56,11 @@ export interface VoiceRelayHarnessOptions {
   priceVersion?: string;
   /** Stable single-operator budget account id. */
   accountId?: string;
+  /**
+   * Make the private Hermes deployment fail its tool-policy certification, so
+   * the transport refuses to admit a call at all.
+   */
+  hermesPolicyFails?: boolean;
 }
 
 export interface VoiceRelayHarness {
@@ -67,6 +72,8 @@ export interface VoiceRelayHarness {
   transport: VoiceTransport | null;
   providerCalls: string[];
   sockets: FakeRealtimeSocket[];
+  /** The mocked private Hermes deployment; records every transcript submitted. */
+  hermes: FakeHermesAgent;
   login(): Promise<string>;
   /** Raw request so tests can set forbidden-in-fetch headers such as Host. */
   raw(options: {
@@ -112,16 +119,20 @@ export async function startVoiceRelay(options: VoiceRelayHarnessOptions = {}): P
     { on: () => {}, off: () => {} } as unknown as CDPBridge,
   );
 
+  const hermes = new FakeHermesAgent(options.hermesPolicyFails
+    ? { policy: { ok: false, reason: 'hermes_mcp_not_disabled' } }
+    : {});
+
   let transport: VoiceTransport | null = null;
   if (options.withTransport !== false) {
-    transport = new VoiceTransport(config.voice, dataDir, new FakeHermesConversationReader(), {
+    transport = new VoiceTransport(config.voice, dataDir, hermes, {
       fetchImpl: (async (input: RequestInfo | URL) => {
         const url = String(input);
         providerCalls.push(url);
         if (url.endsWith('/client_secrets')) {
           const status = options.mintStatus ?? 200;
           return status === 200
-            ? new Response(JSON.stringify({ value: 'ephemeral-browser-secret', expires_at: 4102444800 }), { status: 200 })
+            ? new Response(JSON.stringify({ value: 'ephemeral-browser-secret', expires_at: 4102444800, model: 'gpt-realtime-2.1' }), { status: 200 })
             : new Response('nope', { status });
         }
         if (url.includes('/hangup')) return new Response(null, { status: options.hangupStatus ?? 200 });
@@ -176,6 +187,7 @@ export async function startVoiceRelay(options: VoiceRelayHarnessOptions = {}): P
     transport,
     providerCalls,
     sockets,
+    hermes,
     raw,
     async login(): Promise<string> {
       const response = await fetch(`${baseUrl}/api/login`, {

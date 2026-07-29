@@ -1,20 +1,19 @@
 /** The only Realtime model permitted by the private voice surface. */
 export const VOICE_REALTIME_MODEL = 'gpt-realtime-2.1' as const;
 
-export const VOICE_MAX_TOOL_ARGUMENT_BYTES = 8_192;
-
 /**
- * Bounds on the rest of the function-call envelope. Unlike the argument blob
- * these are never truncated to fit: a truncated `call_id` names a different
- * call, and answering it would write a tool output against an identifier the
- * model never issued. Over the bound is refused, not trimmed.
+ * The pinned automatic-speech-recognition model for input transcription.
+ *
+ * This is not a second conversational model and must never become one: it turns
+ * audio into the text this relay forwards to Hermes, and it is never asked to
+ * answer anything. Hermes is the only source of assistant content.
  */
-export const VOICE_MAX_TOOL_NAME_BYTES = 128;
-export const VOICE_MAX_TOOL_CALL_ID_BYTES = 256;
-export const VOICE_MAX_TOOL_OUTPUT_BYTES = 2_000;
+export const VOICE_TRANSCRIPTION_MODEL = 'whisper-1' as const;
+
+/** Bound on the provider `item_id` the relay will accept as a turn key. */
+export const VOICE_MAX_ITEM_ID_BYTES = 256;
+
 export const VOICE_MAX_CALL_ID_LENGTH = 200;
-export const VOICE_MAX_CONTEXT_TURNS = 12;
-export const VOICE_MAX_CONTEXT_BYTES = 12_000;
 
 /**
  * Largest provider sideband event the relay will parse. Anything above this is
@@ -31,3 +30,24 @@ export const VOICE_MAX_PROVIDER_EVENT_BYTES = 32_768;
  * bounding how much the socket will buffer.
  */
 export const VOICE_MAX_PROVIDER_FRAME_BYTES = VOICE_MAX_PROVIDER_EVENT_BYTES + 1_024;
+
+/**
+ * How many recent transcript item ids are remembered for dedupe.
+ *
+ * The provider can repeat a completed-transcription event; the relay must not
+ * ask Hermes the same question twice. Bounded so a long call cannot grow the
+ * set without limit.
+ */
+export const VOICE_MAX_TRANSCRIPT_ITEM_MEMORY = 128;
+
+/**
+ * How many superseded rendering turns are remembered as "cancel this on sight".
+ *
+ * A rendering can be interrupted in the window between the relay asking for it
+ * and the provider acknowledging it, and the acknowledgement still arrives. The
+ * turn id has to survive that window so the late `response.created` is
+ * recognised as an expected-but-abandoned rendering — cancelled on arrival,
+ * without being mistaken for an unauthorised response and failing the call.
+ * Bounded so a long, chatty call cannot grow the set without limit.
+ */
+export const VOICE_MAX_INTERRUPTED_RENDER_MEMORY = 32;

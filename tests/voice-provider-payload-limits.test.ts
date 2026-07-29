@@ -3,13 +3,12 @@ import assert from 'node:assert/strict';
 import type { ClientOptions } from 'ws';
 import type WebSocket from 'ws';
 import { RealtimeBridge } from '../src/server/transports/voice/realtime-bridge.js';
-import { VoiceToolRouter } from '../src/server/transports/voice/tools.js';
 import {
   VOICE_MAX_PROVIDER_EVENT_BYTES,
   VOICE_MAX_PROVIDER_FRAME_BYTES,
 } from '../src/server/transports/voice/constants.js';
 import type { VoiceSessionContext } from '../src/server/transports/voice/session.js';
-import { FakeHermesConversationReader, FakeRealtimeSocket, testVoiceConfig } from './helpers/voice-fixtures.js';
+import { FakeHermesAgent, FakeRealtimeSocket, testVoiceConfig } from './helpers/voice-fixtures.js';
 
 /**
  * The sideband used a 16 KiB ws `maxPayload` while the application ignored
@@ -25,11 +24,8 @@ const CONTEXT: VoiceSessionContext = { sessionId: 'session-limits', epoch: 1, le
 function makeBridge(options: { onProviderFailure?: (reason: string) => void } = {}) {
   const captured: { options: ClientOptions | null } = { options: null };
   const sockets: FakeRealtimeSocket[] = [];
-  const router = new VoiceToolRouter(
-    { contextReader: new FakeHermesConversationReader(), terminateVoice: async () => ({ state: 'terminated' }) },
-    { accepts: () => true, live: () => true },
-  );
-  const bridge = new RealtimeBridge(testVoiceConfig(), router, {
+  const hermes = new FakeHermesAgent();
+  const bridge = new RealtimeBridge(testVoiceConfig(), hermes, {
     accepts: () => true,
     userTurn: () => {},
     providerFailure: (_context, reason) => { options.onProviderFailure?.(reason); },
@@ -43,7 +39,7 @@ function makeBridge(options: { onProviderFailure?: (reason: string) => void } = 
       return socket as unknown as WebSocket;
     },
   });
-  return { bridge, captured, sockets };
+  return { bridge, captured, sockets, hermes };
 }
 
 describe('voice provider payload limits — alignment', () => {
@@ -65,15 +61,17 @@ describe('voice provider payload limits — alignment', () => {
 describe('voice provider payload limits — oversize input is non-fatal', () => {
   it('drops an oversize provider event without failing the session or the sideband', async () => {
     const failures: string[] = [];
-    const { bridge, captured, sockets } = makeBridge({ onProviderFailure: (reason) => failures.push(reason) });
+    const { bridge, captured, sockets, hermes } = makeBridge({ onProviderFailure: (reason) => failures.push(reason) });
     await bridge.attachSideband('provider-call-limits', CONTEXT);
     const socket = sockets[0];
 
+    // A completed-transcript event padded past the parse limit. It is the only
+    // event type that can start a Hermes turn, so it is the one that matters:
+    // an oversize frame must not become a question nobody asked.
     const oversize = JSON.stringify({
-      type: 'response.function_call_arguments.done',
-      name: 'get_status',
-      call_id: 'fc-oversize',
-      arguments: '{}',
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item-oversize',
+      transcript: 'a real question',
       padding: 'x'.repeat(VOICE_MAX_PROVIDER_EVENT_BYTES + 1),
     });
     assert.ok(Buffer.byteLength(oversize) > VOICE_MAX_PROVIDER_EVENT_BYTES);
@@ -87,25 +85,22 @@ describe('voice provider payload limits — oversize input is non-fatal', () => 
 
     assert.deepEqual(failures, [], 'an oversize event must not be reported as a provider failure');
     assert.equal(socket.readyState, 1, 'the sideband must stay open');
-    assert.equal(
-      socket.sentEvents().some((e) => (e.item as { call_id?: string } | undefined)?.call_id === 'fc-oversize'),
-      false,
-      'the oversize event must not be acted on',
-    );
+    assert.deepEqual(hermes.sent, [], 'the oversize event must not be acted on');
 
-    // The session keeps working: a well-sized event still gets answered.
+    // The session keeps working: a well-sized transcript still drives a turn.
     socket.emit('message', Buffer.from(JSON.stringify({
-      type: 'response.function_call_arguments.done',
-      name: 'get_status',
-      call_id: 'fc-ok',
-      arguments: '{}',
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item-ok',
+      transcript: 'where are we up to',
     })));
     await new Promise((r) => setTimeout(r, 20));
 
-    const answered = socket.sentEvents()
-      .map((e) => e.item as { call_id?: string } | undefined)
-      .some((item) => item?.call_id === 'fc-ok');
-    assert.equal(answered, true, 'the sideband still answers after an oversize event');
+    assert.deepEqual(hermes.sent, ['where are we up to'], 'the sideband still works after an oversize event');
+    assert.equal(
+      socket.sentEvents().some((e) => e.type === 'response.create'),
+      true,
+      'and the Hermes answer is still rendered',
+    );
     assert.equal(captured.options?.maxPayload, VOICE_MAX_PROVIDER_FRAME_BYTES);
 
     bridge.detach();

@@ -6,10 +6,9 @@ import { join } from 'node:path';
 import type WebSocket from 'ws';
 import { VoiceSessionController } from '../src/server/transports/voice/session.js';
 import { RealtimeBridge } from '../src/server/transports/voice/realtime-bridge.js';
-import { VoiceToolRouter } from '../src/server/transports/voice/tools.js';
 import type { VoiceSessionContext } from '../src/server/transports/voice/session.js';
 import { KNOWN_VOICE_PRICE_VERSION } from '../src/server/transports/voice/pricing.js';
-import { FakeRealtimeSocket, testVoiceConfig } from './helpers/voice-fixtures.js';
+import { FakeHermesAgent, FakeRealtimeSocket, testVoiceConfig } from './helpers/voice-fixtures.js';
 import { startVoiceRelay, type VoiceRelayHarness } from './helpers/voice-relay-harness.js';
 
 /**
@@ -130,7 +129,7 @@ describe('voice usage settlement — per-response provider costs accumulate', ()
     const reported: number[] = [];
     const context: VoiceSessionContext = { sessionId: 'session-1', epoch: 1, leaseId: 'lease-1' };
     const socket = new FakeRealtimeSocket();
-    const bridge = new RealtimeBridge(testVoiceConfig(), {} as VoiceToolRouter, {
+    const bridge = new RealtimeBridge(testVoiceConfig(), new FakeHermesAgent(), {
       accepts: () => true,
       userTurn: () => {},
       providerFailure: () => {},

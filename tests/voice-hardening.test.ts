@@ -1,10 +1,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { RealtimeBridge, parseUsageFromDone } from '../src/server/transports/voice/realtime-bridge.js';
-import { VoiceToolRouter } from '../src/server/transports/voice/tools.js';
 import { VoiceSessionController } from '../src/server/transports/voice/session.js';
 import type { VoiceConfig } from '../src/server/types.js';
-import { testVoiceConfig } from './helpers/voice-fixtures.js';
+import { FakeHermesAgent, testVoiceConfig } from './helpers/voice-fixtures.js';
 import { KNOWN_VOICE_PRICE_VERSION } from '../src/server/transports/voice/pricing.js';
 
 function config(): VoiceConfig {
@@ -19,7 +18,7 @@ function config(): VoiceConfig {
 describe('voice hardening — provider hangup recovery', () => {
   it('retries a transient provider hangup failure without exposing the server key', async () => {
     let attempts = 0;
-    const bridge = new RealtimeBridge(config(), {} as VoiceToolRouter, {
+    const bridge = new RealtimeBridge(config(), new FakeHermesAgent(), {
       accepts: () => true,
       userTurn: () => {},
       providerFailure: () => {},

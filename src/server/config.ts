@@ -5,6 +5,12 @@ import type { ServerConfig, SelectorConfig } from './types.js';
 import { VOICE_REALTIME_MODEL } from './transports/voice/constants.js';
 import { normalizeVoiceOrigin } from './transports/voice/origin-policy.js';
 import {
+  assertVoiceHermesRoute,
+  HERMES_CAPABILITIES_PATH,
+  HERMES_TOOLSETS_PATH,
+  VOICE_HERMES_POLICY_TIMEOUT_MS,
+} from './transports/voice/hermes-chat.js';
+import {
   KNOWN_VOICE_PRICE_VERSION,
   isKnownVoicePriceVersion,
   knownVoicePriceVersions,
@@ -179,8 +185,19 @@ export function loadConfig(): ServerConfig {
       enabled: process.env.VOICE_ENABLED === 'true',
       openaiApiKey: process.env.OPENAI_API_KEY ?? '',
       publicOrigin: voicePublicOrigin,
-      hermesReadContextUrl: process.env.HERMES_READ_CONTEXT_URL ?? '',
-      hermesReadContextToken: process.env.HERMES_READ_CONTEXT_TOKEN ?? '',
+      hermes: {
+        apiUrl: process.env.VOICE_HERMES_API_URL ?? '',
+        apiKey: process.env.VOICE_HERMES_API_KEY ?? '',
+        sessionId: process.env.VOICE_HERMES_SESSION_ID ?? '',
+        sessionKey: process.env.VOICE_HERMES_SESSION_KEY ?? '',
+        capabilitiesPath: HERMES_CAPABILITIES_PATH,
+        toolsetsPath: HERMES_TOOLSETS_PATH,
+        policyTimeoutMs: readIntegerEnv(process.env, 'VOICE_HERMES_POLICY_TIMEOUT_MS', {
+          min: 100,
+          max: 120_000,
+          fallback: VOICE_HERMES_POLICY_TIMEOUT_MS,
+        }),
+      },
       voice: process.env.VOICE_NAME ?? 'marin',
       accountId: normalizeVoiceAccountId(process.env.VOICE_ACCOUNT_ID),
       // Conservative V1 defaults. Operators can only admit when this versioned price is known.
@@ -206,7 +223,14 @@ export function loadConfig(): ServerConfig {
   }
 
   assertVoicePrivateAuth(config);
-  if (config.voice.enabled) assertKnownVoicePriceVersion(config.voice.usagePriceVersion);
+  if (config.voice.enabled) {
+    assertKnownVoicePriceVersion(config.voice.usagePriceVersion);
+    // The private Hermes deployment is the only conversational authority the
+    // voice surface has. Without a complete server-only route there is nothing
+    // to speak on its behalf, so this is a boot failure rather than a call that
+    // fails once the operator is already talking.
+    assertVoiceHermesRoute(config.voice.hermes);
+  }
 
   if (config.voice.enabled && config.voice.publicOrigin.length === 0) {
     console.warn(
