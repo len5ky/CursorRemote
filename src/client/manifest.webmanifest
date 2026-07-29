@@ -1,0 +1,31 @@
+{
+  "name": "Private voice",
+  "short_name": "Voice",
+  "description": "Private read-only voice companion for your own Hermes context.",
+  "start_url": "/voice",
+  "scope": "/voice",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#101215",
+  "theme_color": "#101215",
+  "icons": [
+    {
+      "src": "/voice-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/voice-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/voice-icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

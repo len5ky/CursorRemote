@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="referrer" content="no-referrer">
+<title>Private voice</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/voice-icon-192.png">
+<link rel="apple-touch-icon" href="/voice-icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="Private voice">
+<meta name="theme-color" content="#101215">
+<link rel="stylesheet" href="/voice.css">
+</head>
+<body>
+  <main class="call" aria-labelledby="title">
+    <h1 id="title">Private voice</h1>
+
+    <p id="call-state" class="state" role="status" aria-live="polite">Ready</p>
+
+    <button id="call-button" class="call-button" type="button" aria-describedby="call-message">
+      Call
+    </button>
+
+    <p id="call-message" class="message" role="status" aria-live="polite"></p>
+  </main>
+
+  <!-- Remote audio sink. Kept in the DOM so mobile browsers keep playback alive. -->
+  <audio id="remote-audio" class="remote-audio" autoplay playsinline></audio>
+
+  <script src="/voice.js"></script>
+</body>
+</html>

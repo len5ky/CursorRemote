@@ -1,142 +1,173 @@
-# DICKTATOR — voice control for Cursor agent sessions
+# Private voice — read-only voice companion for Hermes
 
-> **You dictate; they obey.**
+> Formerly "DICKTATOR / car mode". The mutation-capable voice surface described
+> by earlier revisions of this file **no longer exists**. See
+> [§ What changed](#what-changed) below.
 
-DICKTATOR is CursorRemote's voice transport ("car mode"): a hands-free layer for
-monitoring and driving live Cursor agent sessions by voice. It mirrors the
-Telegram transport's command vocabulary over an OpenAI Realtime speech-to-speech
-session; voice-session safety is independently enforced by the relay.
+The private voice surface is a single-user, installable web app that places a
+voice call to your own Hermes context over OpenAI Realtime. It can **read** that
+context and end its own call. It cannot change anything.
+
+Deployment, Tailscale/HTTPS, environment variables and privacy:
+**[`private-voice-pwa-deploy.md`](./private-voice-pwa-deploy.md)**.
 
 ## Architecture
 
 ```
-Browser (web client)                Relay server                       OpenAI
-┌─────────────────┐   POST /api/voice/token   ┌──────────────────┐
-│ mic button /    │ ────────────────────────► │ RealtimeBridge    │ ──► POST /v1/realtime/client_secrets
-│ DICKTATOR panel │ ◄──────ephemeral token────│  (real API key    │
-│                 │                           │   server-side)    │
+Phone PWA (/voice)                    Relay server                        OpenAI
+┌─────────────────┐  POST /api/voice/token   ┌────────────────────┐
+│  Call / Hang up │ ───────────────────────► │ RealtimeBridge      │ ──► POST /v1/realtime/client_secrets
+│                 │ ◄─ ephemeral credential ─│  (standard key      │      (server-side only)
+│                 │    sessionId, epoch,     │   never leaves here)│
+│                 │    one-time attachToken  │                     │
+│                 │                          │                     │
 │  WebRTC (audio) │ ═══════════════════════════════════════════════► /v1/realtime/calls
-│                 │   POST /api/voice/call    │                   │
-│                 │ ────────{callId}────────► │ sideband WS ══════════► wss://…/v1/realtime?call_id=…
-└─────────────────┘                           └──────────────────┘
-                                                    │ tool calls only
-                                              ┌─────▼──────────────┐
-                                               │ VoiceTransport      │→ CommandExecutor / StateManager
-                                               │ (FSM, budget, closed│  (CDP into live Cursor windows)
-                                               │  tools, confirms)   │
-                                              └────────────────────┘
+│                 │  POST /api/voice/call    │                     │
+│                 │ ──── {callId, …} ──────► │ sideband WS ═══════════► wss://…/v1/realtime?call_id=…
+└─────────────────┘                          └─────────┬───────────┘
+                                                       │ read-only tool calls
+                                             ┌─────────▼────────────────┐
+                                             │ VoiceToolRouter          │
+                                             │ HermesConversationReader │  (read-only, bounded, redacted)
+                                             └──────────────────────────┘
 ```
 
 Key points:
 
 - **Audio never touches the relay.** The browser connects WebRTC directly to
-  OpenAI using an ephemeral client secret minted server-side
-  (`/v1/realtime/client_secrets`). The relay attaches a **sideband WebSocket**
-  (`wss://api.openai.com/v1/realtime?call_id=…`) that owns all tool-call
-  handling and proactive announcements.
-- **Closed tool set.** The Realtime model can only call:
-  `list_sessions, set_target, get_status, get_all_status, read_recent,
-  send_to_session, approve, reject, run_action, skip_action, set_mode,
-  set_model, cancel, confirm_pending, disconnect_voice`. No shell or arbitrary
-  commands. `disconnect_voice` is transport control, never Cursor `cancel`.
-- **Server-enforced confirmation.** Mutations return a single-use 90-second token
-  bound to session/epoch/lease, target revision, canonical arguments, and tool.
-  The relay consumes and revalidates it before execution; termination or target
-  change invalidates it.
-- **Sticky target.** `set_target` resolves a title once, then pins the stable
-  Cursor window/composer identity and revision. Mutations fail closed when that
-  exact target is unavailable or stale.
+  OpenAI using an ephemeral client secret minted server-side. The relay attaches
+  a **sideband WebSocket** with its own standard key and handles tool calls
+  there.
+- **Exact model.** Every Realtime session is pinned to `gpt-realtime-2.1` by a
+  single constant. There is no mini model, preview model, or fallback, and no
+  environment variable that can select one.
+- **Read-only by construction.** The tool set is
+  `list_sessions, get_status, get_all_status, read_recent, disconnect_voice`.
+  `disconnect_voice` is transport control — it ends the voice call and never
+  touches Hermes. Legacy mutation names and unknown names fail closed with a
+  stable `read_only_denied` result that does not drop the sideband.
+- **No mutator to reach.** `VoiceToolDeps` carries only a
+  `HermesConversationReader` and the transport disconnect. The voice subsystem
+  has no `CommandExecutor` dependency at all, so a prompt injection or dispatch
+  bug has nothing to call.
+- **Honest context.** Production wires `HttpHermesConversationReader` against a
+  documented read-only endpoint. When that endpoint is unconfigured or
+  unreachable it returns `unavailable` and the assistant says so. It never
+  substitutes canned text, and production cannot select a test fixture.
 - **Session safety.** The server owns `idle → admitting → active → terminating
-  → terminated|failed`; stale session/epoch/lease events are ignored and
-  termination revokes authority before bounded provider cleanup.
+  → terminated|failed`. Sideband events and tool calls are accepted only for the
+  current session id and epoch; hangup is idempotent; a delayed event from an
+  earlier call cannot affect a later one.
+- **One-time attach grant.** The attach token is single-use and bound to owner,
+  session and epoch, and is consumed before any provider I/O.
 - **Budget and idle.** Admission reserves against an account-keyed daily ledger
   using versioned known pricing. Unknown pricing, cap/idle/lease expiry, and the
   absolute session cap deny or terminate safely.
-- **Spoken digests.** `digest.ts` converts transcript/state into 2–3 spoken
-  sentences via a cheap OpenRouter model, stripping file paths, hashes, URLs,
-  and code identifiers.
-- **Proactive events.** New pending approvals, agent errors, and
-  agent-finished transitions are pushed into the Realtime conversation as
-  system items (rate-limited, default 15 s minimum gap) so DICKTATOR speaks up
-  unprompted.
 
-Source: `src/server/transports/voice/` (`realtime-bridge.ts`, `tools.ts`,
-`digest.ts`, `index.ts`) plus `src/client/voice.js` and relay endpoints
-`/api/voice/{token,call,terminate,disconnect,heartbeat,status,confirm,defer}`.
+Source: `src/server/transports/voice/`
+(`constants.ts`, `context.ts`, `tools.ts`, `realtime-bridge.ts`, `session.ts`,
+`index.ts`), the PWA in `src/client/` (`voice.html`, `voice.css`, `voice.js`,
+`manifest.webmanifest`, `voice-sw.js`), and relay endpoints
+`/api/voice/{token,call,terminate,disconnect,heartbeat,status}`.
 
-## Android V2 + Android Auto
+## The phone surface
 
-`apps/dicktator-android` mirrors the browser admission path with native WebRTC:
-it requests `RECORD_AUDIO`, mints `/api/voice/token`, sends SDP directly to
-`https://api.openai.com/v1/realtime/calls`, applies the answer, attaches the
-returned call ID via `/api/voice/call`, and heartbeats every 10 seconds. Its
-microphone/media-playback foreground service owns the tracks and peer connection.
-Both the notification and app Hang Up controls stop local media first and then
-call `/api/voice/terminate`. The Android UI displays the sticky target, state,
-idle and budget fields returned by `/api/voice/status`.
+One screen: a title, a compact state line, one large Call / Hang up button, and
+one status line. No approval controls, no text entry, no model selection, no
+settings, no transcript, no debug output.
 
-Android Auto is provided by `DicktatorCarAppService` (Car App Library templates):
-**Talk** starts the same WebRTC service; **Approve** / **Later** hit
-`/api/voice/confirm` and `/api/voice/defer` for the latest staged confirmation
-(token never returned over status); **Hang Up** matches the phone terminate path.
-See `apps/dicktator-android/README.md` for DHU / device run steps.
+States surfaced: Ready, Microphone requested, Connecting, Listening, Speaking,
+Reconnecting, Ending, Ended, Error.
+
+Behaviour worth knowing:
+
+- The microphone is requested from the user gesture, before any credential is
+  minted; every failure path stops all local tracks.
+- The call is only "live" once WebRTC **and** sideband registration succeed.
+- Reconnect is bounded to **one** attempt per call, always with a fresh
+  credential and a new epoch. The budget is per call, not per connection, so a
+  flapping link cannot reconnect indefinitely.
+- Explicit Hang up never reconnects, and neither does a server-side hangup.
+- `pagehide` performs best-effort cleanup via `sendBeacon`; correctness never
+  depends on that request arriving, because the server lease reaper is
+  authoritative.
+- The service worker is network-only and caches nothing.
 
 ## Configuration
 
-| Env var | Default | Notes |
-| --- | --- | --- |
-| `VOICE_ENABLED` | `false` | Enable the transport. |
-| `OPENAI_API_KEY` | — | Required. Used server-side only; never logged. |
-| `VOICE_MODEL` | `gpt-realtime-2.1` | Fallback option: `gpt-realtime-2.1-mini`. |
-| `VOICE_NAME` | `marin` | Realtime output voice. |
-| `OPENROUTER_API_KEY` | — | For the digest summarizer (falls back to deterministic digests without it). |
-| `VOICE_DIGEST_MODEL` | `google/gemini-2.5-flash-lite` | Flash-class digest model. |
-| `VOICE_TTS_MODEL` | `x-ai/grok-voice-tts-1.0` | **Config-only — synthesis not wired yet.** Recommended (Jul 2026): Grok Voice TTS, $15/M chars, inline speech tags for pause/emphasis/speed. Fallback: `qwen/qwen-audio-3.0-tts-flash`. |
-| `VOICE_STT_MODEL` | `x-ai/grok-stt-1.0` | **Config-only — not wired yet.** For future batch audio ingestion; $0.10/hour. |
-| `VOICE_PROACTIVE_MIN_INTERVAL_MS` | `15000` | Rate limit for proactive spoken notifications. |
-| `VOICE_USAGE_PRICE_VERSION` | `openai-realtime-2026-01` | Required known price-table version for admission. |
-| `VOICE_USAGE_UNIT_PRICE_CENTS_PER_MINUTE` | `50` | Conservative ledger estimate. |
-| `VOICE_USAGE_DAILY_CAP_CENTS` | `500` | Account daily hard cap. |
-| `VOICE_USAGE_PER_SESSION_CAP_CENTS` | `100` | Session reservation and hard cap. |
-| `VOICE_SESSION_ABSOLUTE_MS` | `1800000` | Absolute wall-clock cap. |
-| `VOICE_SESSION_IDLE_MS` | `120000` | Idle termination bound. |
+All environment variables, caps and secret-handling rules live in
+[`private-voice-pwa-deploy.md § 5`](./private-voice-pwa-deploy.md#5-environment-variables).
 
-Honest status: live speech in/out currently goes entirely through the OpenAI
-Realtime session. The OpenRouter TTS/STT models above are reserved config for
-a future pipeline (e.g. synthesizing digests server-side, or ingesting
-recorded voice memos) and are not called anywhere yet.
+The short version: `VOICE_ENABLED`, `OPENAI_API_KEY` (server-only),
+`WEBAPP_PASSWORD`, `HERMES_READ_CONTEXT_URL` (+ optional
+`HERMES_READ_CONTEXT_TOKEN`), and the `VOICE_USAGE_*` / `VOICE_SESSION_*` caps.
+There is **no model variable**; setting `VOICE_MODEL` to anything other than
+`gpt-realtime-2.1` fails startup.
 
-## Setup / smoke test
+## Smoke test
 
 ```bash
-cd ~/Projects/cursor-ide-remote && git checkout voice-transport
-set -a; source ~/.config/palermo/credentials.env; set +a   # OPENAI_API_KEY, OPENROUTER_API_KEY
-VOICE_ENABLED=true npm run dev        # Cursor must be running with --remote-debugging-port=9222
+set -a; source <your-secret-env-file>; set +a    # OPENAI_API_KEY only
+VOICE_ENABLED=true SERVER_HOST=127.0.0.1 npm run dev
 ```
 
-1. Open `http://127.0.0.1:3000`, tap the mic icon (top right) to reveal the
-   DICKTATOR panel, hit **Connect**, grant microphone access.
-2. Say: *"list my sessions"* → should speak back window/tab names.
-3. Say: *"target <project>"* then *"what's the status?"*.
-4. Try a mutation: *"send 'run the tests' to it"* → DICKTATOR must read the
-   message back and only execute after your explicit "yes"
-   (`confirm_pending` is enforced server-side; a wrong or reused token fails).
+Open `https://<machine>.<tailnet>.ts.net/voice` from the phone (HTTPS is
+required for microphone access), tap **Call**, and try:
 
-Tests: `npx tsx --test tests/voice-session.test.ts tests/voice-tools.test.ts tests/voice-digest.test.ts`.
+1. *"list my sessions"* → speaks back the connected Hermes contexts.
+2. *"what's the status?"* → speaks the current agent status.
+3. *"what happened recently?"* → summarises bounded recent context.
+4. *"approve that"* → must refuse and say the surface is read-only.
+
+Automated tests (none of these call OpenAI):
+
+```bash
+npx tsx --test tests/private-voice-contract.test.ts \
+                tests/private-voice-smoke.test.ts \
+                tests/voice-tools.test.ts \
+                tests/voice-session.test.ts \
+                tests/voice-ownership.test.ts \
+                tests/voice-hardening.test.ts \
+                tests/voice-client-lifecycle.test.ts \
+                tests/voice-red.test.ts
+```
 
 ## Disconnect, health, and recovery
 
-**Hang Up** immediately tears down microphone, audio, timers, and peer connection,
-then makes a bounded `POST /api/voice/terminate` request carrying the session and
-epoch. The server revokes tools and confirmations, closes the sideband, asks OpenAI
-to hang up, and emits `voice:hangup`. A timeout is shown as local disconnect complete
-with server cleanup unconfirmed, never verified teardown.
+**Hang up** tears down microphone, audio, timers, data channel and peer
+connection, then makes a bounded `POST /api/voice/terminate` carrying session and
+epoch. The server revokes tool authority, closes the sideband, asks OpenAI to
+hang up, and emits `voice:hangup`. An unconfirmed provider hangup is retried by
+an orphan reaper and is reported honestly as unconfirmed, never as verified
+teardown.
 
-`/api/voice/status` reports separate voice, sideband, relay socket, CDP, and selected
-target health plus estimated versus provider-reported spend and remaining budget.
-Read-only status may be degraded; mutations require healthy signals and the exact
-pinned target revision.
+`/api/voice/status` reports connection, session id, epoch, state, idle status,
+context availability, component health (voice, sideband, relay socket, context)
+and budget. It never returns a credential.
 
-V1 has no automatic model routing, model-switch reconnect, Android/Auto client, or
-capability packs. `gpt-realtime-2.1` remains the default; Mini is configuration-only
-until a separate adversarial tool-safety evaluation passes.
+<a id="what-changed"></a>
+## What changed
+
+Earlier revisions of this document described a mutation-capable voice surface.
+That surface has been **removed**, not merely hidden. Specifically:
+
+| Removed | Why |
+| --- | --- |
+| `set_target`, `send_to_session`, `approve`, `reject`, `run_action`, `skip_action`, `set_mode`, `set_model`, `cancel` | Voice is read-only. These now fail closed. |
+| `confirm_pending` / staged confirmation tokens, `/api/voice/confirm`, `/api/voice/defer` | There is no staged mutation to confirm. |
+| `CommandExecutor` dependency in the voice composition | A read-only prompt is not a security boundary; the code graph now makes mutation impossible. |
+| `digest.ts`, `OPENROUTER_API_KEY`, `VOICE_DIGEST_MODEL`, `VOICE_TTS_MODEL`, `VOICE_STT_MODEL` | The second-provider digest path sent conversation content to OpenRouter. `gpt-realtime-2.1` now summarises the supplied read-only material directly, removing a whole context-sharing surface. |
+| `VOICE_MODEL` as a selectable model, `gpt-realtime-2.1-mini` as a fallback | The model is pinned to one constant. `VOICE_MODEL` is now only a startup tripwire. |
+| `VOICE_PROACTIVE_MIN_INTERVAL_MS` and proactive announcements | Not part of the private read-only surface. |
+
+**Android client status.** `apps/dicktator-android` still targets the old
+contract: its Android Auto **Approve** / **Later** controls call
+`/api/voice/confirm` and `/api/voice/defer`, which no longer exist, and will now
+fail against this server. The phone call path (token → SDP → attach → heartbeat
+→ terminate) still matches. Bringing that client in line — or retiring it — is
+tracked separately and is out of scope for the private voice PWA.
+
+Historical design records are preserved in
+[`dicktator-v1-contracts.md`](./dicktator-v1-contracts.md) and
+[`dicktator-final-build.plan.md`](./dicktator-final-build.plan.md); both are
+superseded by this document.

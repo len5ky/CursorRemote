@@ -354,25 +354,12 @@ export interface VoiceConfig {
   enabled: boolean;
   /** OpenAI API key used to mint ephemeral client secrets + sideband WS. Never logged. */
   openaiApiKey: string;
-  /** Realtime model. V1 never routes or reconnects to another model automatically. */
-  model: string;
-  /** Optional operator-selected Mini model name; unused unless explicitly configured. */
-  miniModel: string;
+  /** Documented, read-only Hermes context endpoint. Empty means unavailable. */
+  hermesReadContextUrl: string;
+  /** Optional server-only bearer for the configured Hermes read endpoint. Never returned or logged. */
+  hermesReadContextToken: string;
   /** Output voice name. */
   voice: string;
-  /** OpenRouter API key for the digest summarizer. Never logged. */
-  openrouterApiKey: string;
-  /** Cheap flash-class model used for spoken digests. */
-  digestModel: string;
-  /** OpenRouter TTS model for future digest synthesis (not wired yet).
-   *  Recommended: x-ai/grok-voice-tts-1.0 (inline speech tags for
-   *  pause/emphasis/speed); fallback qwen/qwen-audio-3.0-tts-flash. */
-  ttsModel: string;
-  /** OpenRouter STT model for future batch audio ingestion (not wired yet).
-   *  Recommended: x-ai/grok-stt-1.0. */
-  sttModel: string;
-  /** Minimum gap between proactive spoken notifications (ms). */
-  proactiveMinIntervalMs: number;
   /** Versioned, known realtime unit price required before admission. */
   usagePriceVersion: string;
   usageUnitPriceCentsPerMinute: number;

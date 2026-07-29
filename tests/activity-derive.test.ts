@@ -230,7 +230,9 @@ describe('applyDerivedActivityToState', () => {
       model: { current: 'test', currentId: 'test' },
       windows: [],
       activeWindowId: 'w0',
+      activeComposerId: '',
       composerQueue: { items: [] },
+      questionnaire: null,
     };
     const result = applyDerivedActivityToState(state);
     assert.deepEqual(result, state);

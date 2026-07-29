@@ -11,6 +11,7 @@ import type { Transport } from './transports/types.js';
 import { TelegramTransport } from './transports/telegram/index.js';
 import { RawTelegramTransport } from './transports/telegram-raw/index.js';
 import { VoiceTransport } from './transports/voice/index.js';
+import { HttpHermesConversationReader } from './transports/voice/context.js';
 
 const logStream = createWriteStream('./temp/server.log', { flags: 'a' });
 const origLog = console.log;
@@ -159,10 +160,10 @@ async function main(): Promise<void> {
       const voice = new VoiceTransport(
         config.voice,
         config.dataDir,
-        windowMonitor,
-        stateManager,
-        commandExecutor,
-        cdpBridge
+        new HttpHermesConversationReader(
+          config.voice.hermesReadContextUrl,
+          config.voice.hermesReadContextToken,
+        )
       );
       relay.setVoiceTransport(voice);
       voice.start().catch(err => {

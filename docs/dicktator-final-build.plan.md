@@ -29,6 +29,13 @@ todos:
 isProject: false
 ---
 
+> **Superseded — historical planning record.** This plan targeted the earlier
+> mutation-capable voice surface, including a possible `gpt-realtime-2.1-mini`
+> default. The shipping surface is read-only and pinned to `gpt-realtime-2.1`
+> with no mini/fallback path. See [`dicktator.md`](./dicktator.md) and
+> [`private-voice-pwa-deploy.md`](./private-voice-pwa-deploy.md).
+
+
 # DICKTATOR Final Build Plan (Guru-amended)
 
 ## Status

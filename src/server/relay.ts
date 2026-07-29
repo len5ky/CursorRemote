@@ -119,6 +119,7 @@ export class Relay {
 
   private sessionStore: WebappSessionStore;
   private loginAttempts = new Map<string, RateLimitEntry>();
+  private voiceAttempts = new Map<string, RateLimitEntry>();
   private voiceTransport: VoiceTransport | null = null;
   /** Authenticated session tokens with ≥ 1 connected socket.io client. */
   private activeSockets = new Map<string, number>();
@@ -204,6 +205,18 @@ export class Relay {
     return { allowed: true, retryAfter: 0 };
   }
 
+  private checkVoiceRateLimit(key: string): { allowed: boolean; retryAfter: number } {
+    const now = Date.now();
+    const entry = this.voiceAttempts.get(key);
+    if (!entry || now >= entry.resetAt) {
+      this.voiceAttempts.set(key, { count: 1, resetAt: now + 60_000 });
+      return { allowed: true, retryAfter: 0 };
+    }
+    if (entry.count >= 30) return { allowed: false, retryAfter: Math.ceil((entry.resetAt - now) / 1000) };
+    entry.count++;
+    return { allowed: true, retryAfter: 0 };
+  }
+
   /** First matching credential that exists in the persisted session store. */
   private resolveHttpSession(req: express.Request): string | undefined {
     if (!this.authEnabled) return undefined;
@@ -250,9 +263,27 @@ export class Relay {
 
     // --- Voice ("car mode") endpoints. Auth-checked explicitly because they
     // are registered before the trailing auth middleware. ---
+    const noStore = (res: express.Response): void => {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    };
     const voiceAuthOk = (req: express.Request, res: express.Response): boolean => {
+      noStore(res);
+      const origin = req.headers.origin;
+      if (typeof origin === 'string' && origin !== `${req.protocol}://${req.get('host')}`) {
+        res.status(403).json({ error: 'Origin denied' });
+        return false;
+      }
       if (this.authEnabled && this.resolveHttpSession(req) === undefined) {
         res.status(401).json({ error: 'Unauthorized' });
+        return false;
+      }
+      const key = this.resolveHttpSession(req) ?? this.getClientIp(req);
+      const rate = this.checkVoiceRateLimit(key);
+      if (!rate.allowed) {
+        res.setHeader('Retry-After', String(rate.retryAfter));
+        res.status(429).json({ error: 'Voice request rate limit exceeded' });
         return false;
       }
       return true;
@@ -264,11 +295,15 @@ export class Relay {
       try {
         const accountKey = this.resolveHttpSession(req) ?? 'local';
         const secret = await this.voiceTransport.mintClientSecret(accountKey);
-        res.json({ value: secret.value, expiresAt: secret.expiresAt ?? null, sessionId: secret.sessionId, epoch: secret.epoch });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error(`[relay] Voice token mint failed: ${msg}`);
-        res.status(500).json({ error: 'Failed to mint voice token' });
+        res.json({
+          clientSecret: secret.clientSecret,
+          expiresAt: secret.expiresAt ?? null,
+          sessionId: secret.sessionId,
+          epoch: secret.epoch,
+          attachToken: secret.attachToken,
+        });
+      } catch {
+        res.status(500).json({ error: 'Failed to mint voice session' });
       }
     });
 
@@ -276,13 +311,15 @@ export class Relay {
       if (!voiceAuthOk(req, res)) return;
       if (!this.voiceTransport) return res.status(503).json({ error: 'Voice transport not enabled' });
       const callId = typeof req.body?.callId === 'string' ? req.body.callId : '';
-      const ephemeralKey = typeof req.body?.ephemeralKey === 'string' ? req.body.ephemeralKey : undefined;
       const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId : '';
+      const attachToken = typeof req.body?.attachToken === 'string' ? req.body.attachToken : '';
       const epoch = Number.isSafeInteger(req.body?.epoch) ? req.body.epoch : -1;
-      if (!callId || !sessionId || epoch < 1 || (ephemeralKey?.length ?? 0) > 8_192) return res.status(400).json({ error: 'callId, sessionId, and epoch required' });
+      if (!/^[A-Za-z0-9_-]{1,200}$/.test(callId) || !/^[A-Za-z0-9_-]{1,200}$/.test(sessionId) || !attachToken || epoch < 1) {
+        return res.status(400).json({ error: 'Valid call, session, epoch, and attach token required' });
+      }
       const owner = this.resolveHttpSession(req);
       try {
-        await this.voiceTransport.attachCall(callId, ephemeralKey, sessionId, epoch, owner);
+        await this.voiceTransport.attachCall(callId, sessionId, epoch, attachToken, owner);
         res.json({ ok: true });
       } catch (err) {
         const e = err as NodeJS.ErrnoException & { statusCode?: number };
@@ -290,9 +327,7 @@ export class Relay {
           res.status(403).json({ error: 'Unauthorized' });
           return;
         }
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error(`[relay] Voice sideband attach failed: ${msg}`);
-        res.status(500).json({ error: 'Failed to attach voice session' });
+        res.status(409).json({ error: 'Voice session attach denied' });
       }
     });
 
@@ -350,38 +385,6 @@ export class Relay {
         reportedSpendCents: s.budget.reportedCents,
         remainingBudgetCents: s.budget.remainingCents,
       });
-    });
-
-    this.app.post('/api/voice/confirm', async (req, res) => {
-      if (!voiceAuthOk(req, res)) return;
-      if (!this.voiceTransport) return res.status(503).json({ error: 'Voice transport not enabled' });
-      const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId : '';
-      const epoch = Number.isSafeInteger(req.body?.epoch) ? req.body.epoch : -1;
-      if (!sessionId || epoch < 1) return res.status(400).json({ error: 'sessionId and epoch required' });
-      const owner = this.resolveHttpSession(req);
-      try {
-        res.json(await this.voiceTransport.confirmLatest(sessionId, epoch, owner));
-      } catch (err) {
-        const e = err as NodeJS.ErrnoException & { statusCode?: number };
-        if (e.statusCode === 403) return res.status(403).json({ error: 'Unauthorized' });
-        throw err;
-      }
-    });
-
-    this.app.post('/api/voice/defer', (req, res) => {
-      if (!voiceAuthOk(req, res)) return;
-      if (!this.voiceTransport) return res.status(503).json({ error: 'Voice transport not enabled' });
-      const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId : '';
-      const epoch = Number.isSafeInteger(req.body?.epoch) ? req.body.epoch : -1;
-      if (!sessionId || epoch < 1) return res.status(400).json({ error: 'sessionId and epoch required' });
-      const owner = this.resolveHttpSession(req);
-      try {
-        res.json(this.voiceTransport.deferLatest(sessionId, epoch, owner));
-      } catch (err) {
-        const e = err as NodeJS.ErrnoException & { statusCode?: number };
-        if (e.statusCode === 403) return res.status(403).json({ error: 'Unauthorized' });
-        throw err;
-      }
     });
 
     this.app.get('/login', (_req, res) => {
@@ -516,6 +519,57 @@ export class Relay {
         console.error(`[relay] Failed to serve index.html: ${err}`);
         res.status(500).send('Client files not found');
       }
+    });
+
+    // --- Private voice PWA surface. Registered before express.static so the
+    // page and its script are never reachable without an authenticated
+    // session; the manifest, worker and icons carry no secrets and stay
+    // public so installability works before login. ---
+    const voicePageGuard: express.RequestHandler = (req, res, next) => {
+      if (this.authEnabled && this.resolveHttpSession(req) === undefined) {
+        res.redirect('/login');
+        return;
+      }
+      next();
+    };
+
+    const voiceSecurityHeaders = (res: express.Response): void => {
+      res.setHeader('Content-Security-Policy', [
+        "default-src 'self'",
+        "script-src 'self'",
+        "style-src 'self'",
+        "img-src 'self' data:",
+        "media-src 'self' blob:",
+        // The browser posts SDP straight to the provider; nothing else is reachable.
+        "connect-src 'self' https://api.openai.com",
+        "frame-ancestors 'none'",
+        "base-uri 'none'",
+        "form-action 'none'",
+      ].join('; '));
+      res.setHeader('Permissions-Policy', 'microphone=(self), camera=(), geolocation=()');
+      res.setHeader('Referrer-Policy', 'no-referrer');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Cache-Control', 'no-store');
+    };
+
+    const sendVoiceAsset = (res: express.Response, file: string, type: string): void => {
+      try {
+        voiceSecurityHeaders(res);
+        res.type(type).send(readFileSync(join(clientDir, file), 'utf-8'));
+      } catch (err) {
+        console.error(`[relay] Failed to serve ${file}: ${err}`);
+        res.status(500).send('Voice client not found');
+      }
+    };
+
+    this.app.get(['/voice', '/voice.html'], voicePageGuard, (_req, res) => {
+      sendVoiceAsset(res, 'voice.html', 'html');
+    });
+    this.app.get('/voice.js', voicePageGuard, (_req, res) => {
+      sendVoiceAsset(res, 'voice.js', 'js');
+    });
+    this.app.get('/voice.css', voicePageGuard, (_req, res) => {
+      sendVoiceAsset(res, 'voice.css', 'css');
     });
 
     this.app.use(express.static(clientDir, {

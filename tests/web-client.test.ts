@@ -2,7 +2,7 @@ import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
-import { JSDOM } from 'jsdom';
+import { JSDOM, type DOMWindow } from 'jsdom';
 import type { CursorState } from '../src/server/types.js';
 
 const HTML_PATH = resolve('src/client/index.html');
@@ -32,7 +32,7 @@ function createTestEnv() {
     url: 'http://localhost:3000/',
     runScripts: 'dangerously',
     pretendToBeVisual: true,
-    beforeParse(window: Window) {
+    beforeParse(window: DOMWindow) {
       const mockSocket: MockSocket = {
         handlers: new Map(),
         connected: true,
@@ -385,6 +385,7 @@ describe('web: questionnaire widget', () => {
       model: { current: 'Auto', currentId: '' },
       windows: [],
       activeWindowId: '',
+      activeComposerId: '',
       composerQueue: { items: [] },
       questionnaire: null,
     };

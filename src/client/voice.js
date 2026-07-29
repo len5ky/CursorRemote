@@ -1,210 +1,468 @@
-// DICKTATOR — voice "car mode" client v0. You dictate; they obey.
-// Mints an ephemeral token from the relay, opens a WebRTC session directly to
-// OpenAI Realtime, then reports the call id back so the server can attach the
-// sideband channel that handles all tool calls. Audio never touches the relay.
-(function () {
+// Private voice — one-page mobile call surface.
+//
+// Audio goes browser -> OpenAI Realtime directly over WebRTC. The relay only
+// mints a short-lived ephemeral credential, admits the session, and attaches a
+// server-side sideband using its own standard key. The relay never carries
+// audio and the standard key never reaches this file.
+//
+// The ephemeral credential lives in a local variable for the duration of
+// negotiation and is dropped on every terminal path. It is never persisted to
+// browser storage, never placed in a URL, never logged, and never handed to a
+// service worker cache.
+(function (global) {
   'use strict';
 
-  const btnVoice = document.getElementById('btn-voice');
-  const panel = document.getElementById('voice-panel');
-  const chip = document.getElementById('voice-status-chip');
-  const targetEl = document.getElementById('voice-target');
-  const btnToggle = document.getElementById('btn-voice-toggle');
+  var OPENAI_REALTIME_CALLS_URL = 'https://api.openai.com/v1/realtime/calls';
+  var HEARTBEAT_INTERVAL_MS = 10000;
+  var MAX_RECONNECT_ATTEMPTS = 1;
+  var CALL_ID_PATTERN = /^[A-Za-z0-9_-]{1,200}$/;
 
-  let pc = null;
-  let micStream = null;
-  let audioEl = null;
-  let connected = false;
-  let statusTimer = null;
-  let heartbeatTimer = null;
-  let sessionId = null;
-  let epoch = null;
+  // Only these states are surfaced. No transcript, no debug payloads.
+  var UI = {
+    idle: { text: 'Ready', button: 'Call', mode: 'idle', disabled: false },
+    requesting_microphone: { text: 'Microphone requested', button: 'Connecting…', mode: 'busy', disabled: true },
+    obtaining_secret: { text: 'Connecting', button: 'Connecting…', mode: 'busy', disabled: true },
+    negotiating_webrtc: { text: 'Connecting', button: 'Connecting…', mode: 'busy', disabled: true },
+    attaching_sideband: { text: 'Connecting', button: 'Connecting…', mode: 'busy', disabled: true },
+    live: { text: 'Listening', button: 'Hang up', mode: 'active', disabled: false },
+    speaking: { text: 'Speaking', button: 'Hang up', mode: 'active', disabled: false },
+    reconnecting: { text: 'Reconnecting', button: 'Hang up', mode: 'active', disabled: true },
+    ending: { text: 'Ending', button: 'Ending…', mode: 'busy', disabled: true },
+    ended: { text: 'Ended', button: 'Call again', mode: 'idle', disabled: false },
+    error: { text: 'Error', button: 'Call again', mode: 'idle', disabled: false }
+  };
 
-  function authHeaders() {
-    const token = localStorage.getItem('cursor-remote-token');
-    const h = { 'Content-Type': 'application/json' };
-    if (token) h['Authorization'] = 'Bearer ' + token;
-    return h;
+  function isLiveState(state) {
+    return state === 'live' || state === 'speaking' || state === 'reconnecting';
   }
 
-  function setChip(state, label) {
-    chip.className = 'voice-chip ' + state;
-    chip.textContent = label;
-  }
+  function createVoiceCallController(env) {
+    var fetchImpl = env.fetch;
+    var mediaDevices = env.mediaDevices;
+    var PeerConnection = env.PeerConnection;
+    var remoteAudio = env.remoteAudio || null;
+    var view = env.view;
+    var timers = env.timers || {};
+    var setIntervalImpl = timers.setInterval || global.setInterval;
+    var clearIntervalImpl = timers.clearInterval || global.clearInterval;
+    var sendBeacon = env.sendBeacon || null;
 
-  async function refreshStatus() {
-    try {
-      const res = await fetch('/api/voice/status', { headers: authHeaders(), credentials: 'same-origin' });
-      if (!res.ok) return;
-      const data = await res.json();
-      if (!data.enabled) return;
-      btnVoice.classList.remove('hidden');
-       targetEl.textContent = data.target ? data.target.windowId + ' / ' + data.target.composerId : 'no target';
-       if (connected) setChip(data.connected ? 'live' : 'connecting', data.connected ? 'live' : 'linking');
-    } catch (_) { /* relay unreachable */ }
-  }
+    var state = 'idle';
+    var message = '';
+    var messageTone = 'info';
 
-  async function connect() {
-    setChip('connecting', 'connecting');
-    btnToggle.disabled = true;
-    try {
-      const tokenRes = await fetch('/api/voice/token', {
-        method: 'POST', headers: authHeaders(), credentials: 'same-origin',
+    // Latches. `starting` blocks double-taps; `intentionalHangup` and
+    // `serverEnded` each permanently suppress reconnect for this call.
+    var starting = false;
+    var intentionalHangup = false;
+    var serverEnded = false;
+
+    var pc = null;
+    var dataChannel = null;
+    var micStream = null;
+    var sessionId = null;
+    var epoch = null;
+    var attachToken = null;
+    var providerCallId = null;
+    var heartbeatTimer = null;
+    var reconnectAttempts = 0;
+
+    function render() {
+      var ui = UI[state] || UI.idle;
+      view.render({
+        state: state,
+        stateText: ui.text,
+        buttonLabel: ui.button,
+        buttonMode: ui.mode,
+        buttonDisabled: ui.disabled,
+        message: message,
+        messageTone: messageTone
       });
-      if (!tokenRes.ok) {
-        const t = await tokenRes.text().catch(() => '');
-        throw new Error('token mint failed (' + tokenRes.status + ') ' + t.slice(0, 120));
+    }
+
+    function setState(next, note, tone) {
+      state = next;
+      if (note !== undefined) {
+        message = note;
+        messageTone = tone || 'info';
       }
-      const token = await tokenRes.json();
-      const ephemeralKey = token.value;
-      if (!token.sessionId || !Number.isInteger(token.epoch)) throw new Error('voice admission response missing session identity');
-      sessionId = token.sessionId;
-      epoch = token.epoch;
+      render();
+    }
+
+    function jsonHeaders() {
+      // Auth rides the relay's HttpOnly session cookie. No credential is read
+      // from browser storage and none is placed in a query string.
+      return { 'Content-Type': 'application/json' };
+    }
+
+    function stopHeartbeat() {
+      if (heartbeatTimer !== null) {
+        clearIntervalImpl(heartbeatTimer);
+        heartbeatTimer = null;
+      }
+    }
+
+    function startHeartbeat() {
+      stopHeartbeat();
+      heartbeatTimer = setIntervalImpl(function () { void sendHeartbeat(); }, HEARTBEAT_INTERVAL_MS);
+    }
+
+    /** Stop every local capture track. Every terminal path routes through here. */
+    function stopLocalMedia() {
+      if (micStream && typeof micStream.getTracks === 'function') {
+        var tracks = micStream.getTracks() || [];
+        for (var i = 0; i < tracks.length; i++) {
+          try { tracks[i].stop(); } catch (e) { /* already stopped */ }
+        }
+      }
+      micStream = null;
+    }
+
+    function teardownPeer() {
+      if (dataChannel) {
+        try { dataChannel.close(); } catch (e) { /* already closed */ }
+        dataChannel = null;
+      }
+      if (pc) {
+        try { pc.close(); } catch (e) { /* already closed */ }
+        pc = null;
+      }
+      if (remoteAudio) {
+        try { remoteAudio.srcObject = null; } catch (e) { /* detached */ }
+      }
+    }
+
+    /**
+     * Idempotent local teardown plus best-effort server hangup. Correctness of
+     * the server session never depends on this request arriving: the relay's
+     * lease reaper is authoritative.
+     */
+    async function cleanup(options) {
+      var opts = options || {};
+      var endingSessionId = sessionId;
+      var endingEpoch = epoch;
+
+      stopHeartbeat();
+      stopLocalMedia();
+      teardownPeer();
+
+      // Drop all call identity and credentials from memory.
+      sessionId = null;
+      epoch = null;
+      attachToken = null;
+      providerCallId = null;
+
+      if (!opts.notifyServer || !endingSessionId || !Number.isInteger(endingEpoch)) return;
+
+      var body = JSON.stringify({
+        sessionId: endingSessionId,
+        epoch: endingEpoch,
+        reason: opts.reason || 'client_request'
+      });
+
+      if (opts.useBeacon && sendBeacon) {
+        try { sendBeacon('/api/voice/terminate', body); } catch (e) { /* best effort */ }
+        return;
+      }
 
       try {
-        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      } catch (micErr) {
-        throw new Error('mic denied: ' + (micErr && micErr.message ? micErr.message : micErr));
+        await fetchImpl('/api/voice/terminate', {
+          method: 'POST',
+          headers: jsonHeaders(),
+          credentials: 'same-origin',
+          body: body
+        });
+      } catch (e) {
+        // The server reaper remains authoritative if this never lands.
+      }
+    }
+
+    async function mintCredential() {
+      var response = await fetchImpl('/api/voice/token', {
+        method: 'POST',
+        headers: jsonHeaders(),
+        credentials: 'same-origin'
+      });
+      if (!response.ok) throw new Error('Could not start a call right now.');
+      var body = await response.json();
+      if (!body || typeof body.clientSecret !== 'string' || !body.clientSecret) {
+        throw new Error('Could not start a call right now.');
+      }
+      if (typeof body.sessionId !== 'string' || !body.sessionId || !Number.isInteger(body.epoch)) {
+        throw new Error('Could not start a call right now.');
+      }
+      if (typeof body.attachToken !== 'string' || !body.attachToken) {
+        throw new Error('Could not start a call right now.');
+      }
+      sessionId = body.sessionId;
+      epoch = body.epoch;
+      attachToken = body.attachToken;
+      return body.clientSecret;
+    }
+
+    function attachDataChannel(channel) {
+      dataChannel = channel;
+      if (!channel) return;
+      channel.onmessage = function (event) {
+        var payload;
+        try { payload = JSON.parse(event.data); } catch (e) { return; }
+        if (!payload || typeof payload.type !== 'string') return;
+        // Barge-in: the user speaking cancels the in-flight assistant response.
+        if (payload.type === 'input_audio_buffer.speech_started') {
+          if (state === 'speaking') setState('live');
+          try { channel.send(JSON.stringify({ type: 'response.cancel' })); } catch (e) { /* channel gone */ }
+          return;
+        }
+        if (payload.type === 'response.audio.delta' || payload.type === 'response.output_audio.delta') {
+          if (state === 'live') setState('speaking');
+          return;
+        }
+        if (payload.type === 'response.done' && state === 'speaking') setState('live');
+      };
+    }
+
+    /** Negotiate media directly with the provider using the ephemeral credential. */
+    async function negotiate(ephemeralCredential) {
+      pc = new PeerConnection();
+
+      pc.ontrack = function (event) {
+        if (remoteAudio && event && event.streams && event.streams[0]) {
+          remoteAudio.srcObject = event.streams[0];
+        }
+      };
+      pc.onconnectionstatechange = function () {
+        var connectionState = pc ? pc.connectionState : null;
+        if (connectionState === 'failed' || connectionState === 'disconnected') {
+          void handleTransportFailure();
+        }
+      };
+
+      if (typeof pc.createDataChannel === 'function') {
+        attachDataChannel(pc.createDataChannel('oai-events'));
       }
 
-      pc = new RTCPeerConnection();
-      audioEl = document.createElement('audio');
-      audioEl.autoplay = true;
-      pc.ontrack = (e) => { audioEl.srcObject = e.streams[0]; };
-      micStream.getTracks().forEach((t) => pc.addTrack(t, micStream));
+      var tracks = micStream.getTracks() || [];
+      for (var i = 0; i < tracks.length; i++) pc.addTrack(tracks[i], micStream);
 
-      const offer = await pc.createOffer();
+      var offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
-      const sdpRes = await fetch('https://api.openai.com/v1/realtime/calls', {
+      var response = await fetchImpl(OPENAI_REALTIME_CALLS_URL, {
         method: 'POST',
-        headers: { Authorization: 'Bearer ' + ephemeralKey, 'Content-Type': 'application/sdp' },
-        body: offer.sdp,
+        headers: {
+          Authorization: 'Bearer ' + ephemeralCredential,
+          'Content-Type': 'application/sdp'
+        },
+        body: offer.sdp
       });
-      const answerBody = await sdpRes.text();
-      if (!sdpRes.ok) {
-        let detail = answerBody.slice(0, 200);
-        try {
-          const parsed = JSON.parse(answerBody);
-          detail = parsed?.error?.message || detail;
-        } catch (_) { /* keep raw */ }
-        if (sdpRes.status === 429 || /quota|billing/i.test(detail)) {
-          throw new Error('OpenAI Realtime quota/billing: ' + detail);
-        }
-        throw new Error('WebRTC offer rejected (' + sdpRes.status + '): ' + detail);
-      }
-      const callId = sdpRes.headers.get('Location')
-        ? sdpRes.headers.get('Location').split('/').pop()
+      var answerSdp = await response.text();
+      if (!response.ok) throw new Error('The voice provider rejected the call.');
+
+      var location = response.headers && typeof response.headers.get === 'function'
+        ? response.headers.get('Location') || response.headers.get('location')
         : null;
-      await pc.setRemoteDescription({ type: 'answer', sdp: answerBody });
+      var callId = null;
+      if (location) {
+        var match = String(location).match(/\/calls\/([^/?#]+)(?:[/?#]|$)/);
+        if (match) callId = match[1];
+      }
+      if (!callId || !CALL_ID_PATTERN.test(callId)) {
+        throw new Error('The voice provider returned an unusable call.');
+      }
 
-      if (!callId) throw new Error('no call id in response');
-
-      const attachRes = await fetch('/api/voice/call', {
-        method: 'POST', headers: authHeaders(), credentials: 'same-origin',
-         body: JSON.stringify({ callId, ephemeralKey, sessionId, epoch }),
-      });
-      if (!attachRes.ok) throw new Error('sideband attach failed');
-
-      connected = true;
-      setChip('live', 'live');
-      btnToggle.textContent = 'Disconnect';
-      statusTimer = setInterval(refreshStatus, 5000);
-      heartbeatTimer = setInterval(sendHeartbeat, 10_000);
-    } catch (err) {
-      console.error('[dicktator]', err);
-      const msg = err && err.message ? String(err.message) : 'error';
-      // Keep chip short; full message goes to title tooltip + console
-      if (/quota|billing/i.test(msg)) setChip('error', 'quota');
-      else if (/mic/i.test(msg)) setChip('error', 'mic');
-      else setChip('error', 'error');
-      chip.title = msg;
-      targetEl.textContent = msg.length > 80 ? msg.slice(0, 77) + '…' : msg;
-       stopLocal();
-       void requestTermination('connect_failed');
-    } finally {
-      btnToggle.disabled = false;
+      await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+      return callId;
     }
-  }
 
-  function stopLocal() {
-    if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
-    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
-    if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
-    if (audioEl) { audioEl.srcObject = null; audioEl = null; }
-    if (pc) {
-      try { pc.getSenders().forEach((sender) => { sender.replaceTrack(null).catch(() => {}); }); } catch (_) {}
-      try { pc.close(); } catch (_) {}
-      pc = null;
-    }
-    connected = false;
-    btnToggle.textContent = 'Connect';
-  }
-
-  async function requestTermination(reason) {
-    const terminatingSessionId = sessionId;
-    const terminatingEpoch = epoch;
-    if (!terminatingSessionId || !Number.isInteger(terminatingEpoch)) return { confirmed: true };
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 4_000);
-    try {
-      const res = await fetch('/api/voice/terminate', {
-        method: 'POST', headers: authHeaders(), credentials: 'same-origin', signal: controller.signal,
-        body: JSON.stringify({ sessionId: terminatingSessionId, epoch: terminatingEpoch, reason }),
+    async function attachSideband(callId) {
+      var response = await fetchImpl('/api/voice/call', {
+        method: 'POST',
+        headers: jsonHeaders(),
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          callId: callId,
+          sessionId: sessionId,
+          epoch: epoch,
+          attachToken: attachToken
+        })
       });
-      if (!res.ok) throw new Error('termination failed');
-      return { confirmed: true };
-    } catch (_) {
-      return { confirmed: false };
-    } finally {
-      clearTimeout(timeout);
-      if (sessionId === terminatingSessionId && epoch === terminatingEpoch) {
-        sessionId = null;
-        epoch = null;
+      // The one-time grant is spent either way; it is never retried.
+      attachToken = null;
+      if (!response.ok) throw new Error('Could not connect this call to your workspace.');
+    }
+
+    async function sendHeartbeat() {
+      if (!isLiveState(state) || !sessionId || !Number.isInteger(epoch)) return;
+      try {
+        var response = await fetchImpl('/api/voice/heartbeat', {
+          method: 'POST',
+          headers: jsonHeaders(),
+          credentials: 'same-origin',
+          body: JSON.stringify({ sessionId: sessionId, epoch: epoch })
+        });
+        if (response.status === 409 || response.status === 403) {
+          // The server ended this call (budget, expiry, or takeover). Never
+          // reconnect after a server-side hangup.
+          serverEnded = true;
+          await cleanup({ notifyServer: false });
+          setState('ended', 'The call was ended by the server.', 'info');
+        }
+      } catch (e) {
+        // Transient; the server reaper stays authoritative.
       }
     }
-  }
 
-  async function sendHeartbeat() {
-    if (!connected || !sessionId || !Number.isInteger(epoch)) return;
-    try {
-      await fetch('/api/voice/heartbeat', {
-        method: 'POST', headers: authHeaders(), credentials: 'same-origin',
-        body: JSON.stringify({ sessionId, epoch }),
-      });
-    } catch (_) { /* the server reaper remains authoritative */ }
-  }
+    async function runCallSequence() {
+      setState('requesting_microphone', '');
+      try {
+        micStream = await mediaDevices.getUserMedia({ audio: true });
+      } catch (e) {
+        throw new Error('Microphone permission is required to place a call.');
+      }
 
-  async function disconnect(reason) {
-    btnToggle.disabled = true;
-    stopLocal();
-    const result = await requestTermination(reason || 'client_request');
-    if (result.confirmed) {
-      setChip('idle', 'off');
-      targetEl.textContent = 'local disconnect complete';
-    } else {
-      setChip('error', 'local off');
-      targetEl.textContent = 'local disconnect complete; server cleanup unconfirmed';
+      setState('obtaining_secret');
+      var ephemeralCredential = await mintCredential();
+
+      setState('negotiating_webrtc');
+      providerCallId = await negotiate(ephemeralCredential);
+      // Drop the provider credential the moment negotiation is done.
+      ephemeralCredential = null;
+
+      setState('attaching_sideband');
+      await attachSideband(providerCallId);
+
+      // Live only once media and sideband are both established. The reconnect
+      // budget is deliberately NOT reset here: it is per call, not per
+      // connection, so a flapping link cannot reconnect indefinitely. Only an
+      // explicit Call from the user refreshes it.
+      setState('live', '');
+      startHeartbeat();
     }
-    btnToggle.disabled = false;
+
+    async function failCall(err) {
+      var note = err && err.message ? String(err.message) : 'The call could not be completed.';
+      await cleanup({ notifyServer: true, reason: 'connect_failed' });
+      setState('error', note, 'error');
+    }
+
+    async function start() {
+      if (starting || isLiveState(state) || state === 'ending') return;
+      starting = true;
+      intentionalHangup = false;
+      serverEnded = false;
+      reconnectAttempts = 0;
+      try {
+        await runCallSequence();
+      } catch (err) {
+        await failCall(err);
+      } finally {
+        starting = false;
+      }
+    }
+
+    async function hangUp() {
+      if (!isLiveState(state) && state !== 'requesting_microphone' && !starting) return;
+      // Latch before any awaited network work so a racing transport failure
+      // cannot trigger a reconnect behind this hangup.
+      intentionalHangup = true;
+      setState('ending', '');
+      await cleanup({ notifyServer: true, reason: 'client_request' });
+      setState('ended', '');
+    }
+
+    async function handleTransportFailure() {
+      if (intentionalHangup || serverEnded) return;
+      if (!isLiveState(state)) return;
+      if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+        await cleanup({ notifyServer: true, reason: 'transport_failed' });
+        setState('error', 'The call dropped and could not be restored.', 'error');
+        return;
+      }
+      reconnectAttempts++;
+      setState('reconnecting', '');
+      // Release the old server session first: reconnecting always mints a
+      // fresh credential against a fresh epoch, never reuses the old one.
+      await cleanup({ notifyServer: true, reason: 'transport_failed' });
+      if (intentionalHangup || serverEnded) return;
+      try {
+        await runCallSequence();
+      } catch (err) {
+        await failCall(err);
+      }
+    }
+
+    function handlePageHide() {
+      if (!isLiveState(state) && state !== 'ending') return;
+      intentionalHangup = true;
+      void cleanup({ notifyServer: true, useBeacon: true, reason: 'page_hidden' });
+    }
+
+    function toggle() {
+      if (isLiveState(state)) return hangUp();
+      return start();
+    }
+
+    render();
+
+    return {
+      toggle: toggle,
+      start: start,
+      hangUp: hangUp,
+      handlePageHide: handlePageHide,
+      handleTransportFailure: handleTransportFailure,
+      sendHeartbeat: sendHeartbeat,
+      getState: function () { return state; },
+      getMessage: function () { return message; },
+      // Test seam only: reports whether call identity was dropped from memory.
+      hasCallIdentity: function () { return sessionId !== null || attachToken !== null; }
+    };
   }
 
-  btnVoice.addEventListener('click', () => panel.classList.toggle('hidden'));
-  btnToggle.addEventListener('click', () => { void (connected ? disconnect() : connect()); });
-  window.addEventListener('beforeunload', () => {
-    if (!connected) return;
-    stopLocal();
-    void requestTermination('browser_unload');
-  });
-  window.addEventListener('voice:hangup', (event) => {
-    const hangup = event.detail || {};
-    if (hangup.sessionId !== sessionId || hangup.epoch !== epoch) return;
-    stopLocal();
-    sessionId = null;
-    epoch = null;
-    setChip('idle', 'off');
-    targetEl.textContent = hangup.state === 'terminated' ? 'server disconnected' : 'server cleanup unconfirmed';
-  });
+  function bootstrap(doc) {
+    var stateEl = doc.getElementById('call-state');
+    var buttonEl = doc.getElementById('call-button');
+    var messageEl = doc.getElementById('call-message');
+    var audioEl = doc.getElementById('remote-audio');
+    if (!stateEl || !buttonEl || !messageEl) return null;
 
-  refreshStatus();
-})();
+    var controller = createVoiceCallController({
+      // Resolved lazily so the page still parses in a browser without fetch;
+      // the call button is the only thing that needs it.
+      fetch: function (input, init) { return global.fetch(input, init); },
+      mediaDevices: global.navigator.mediaDevices,
+      PeerConnection: global.RTCPeerConnection,
+      remoteAudio: audioEl,
+      sendBeacon: global.navigator.sendBeacon
+        ? global.navigator.sendBeacon.bind(global.navigator)
+        : null,
+      view: {
+        render: function (model) {
+          stateEl.textContent = model.stateText;
+          buttonEl.textContent = model.buttonLabel;
+          buttonEl.disabled = model.buttonDisabled;
+          buttonEl.setAttribute('data-mode', model.buttonMode);
+          buttonEl.setAttribute('aria-label', model.buttonLabel + '. ' + model.stateText + '.');
+          messageEl.textContent = model.message;
+          messageEl.setAttribute('data-tone', model.messageTone);
+        }
+      }
+    });
+
+    buttonEl.addEventListener('click', function () { void controller.toggle(); });
+    global.addEventListener('pagehide', function () { controller.handlePageHide(); });
+
+    if (global.navigator.serviceWorker && global.isSecureContext) {
+      global.navigator.serviceWorker.register('/voice-sw.js').catch(function () {
+        // Installability is optional; calling works without it.
+      });
+    }
+
+    return controller;
+  }
+
+  global.createVoiceCallController = createVoiceCallController;
+
+  if (global.document && global.document.getElementById('call-button')) {
+    global.__voiceController = bootstrap(global.document);
+  }
+})(typeof window !== 'undefined' ? window : globalThis);

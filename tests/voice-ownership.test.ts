@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { EventEmitter } from 'node:events';
 import { VoiceSessionController } from '../src/server/transports/voice/session.js';
 import { VoiceTransport } from '../src/server/transports/voice/index.js';
-import type { VoiceConfig } from '../src/server/types.js';
+import type WebSocket from 'ws';
+import { FakeHermesConversationReader, FakeRealtimeSocket, testVoiceConfig } from './helpers/voice-fixtures.js';
 
 function makeController(nowRef: { value: number }) {
   const dir = mkdtempSync(join(tmpdir(), 'cursor-remote-voice-own-'));
@@ -24,36 +24,43 @@ function makeController(nowRef: { value: number }) {
   return { controller, dir };
 }
 
+/**
+ * Every transport in this suite injects provider doubles. No test in this file
+ * is capable of reaching api.openai.com.
+ */
+function makeTransport(
+  dir: string,
+  options: { mintStatus?: number; sidebandWorks?: boolean } = {},
+): VoiceTransport {
+  const mintStatus = options.mintStatus ?? 200;
+  return new VoiceTransport(testVoiceConfig(), dir, new FakeHermesConversationReader(), {
+    fetchImpl: (async () => (mintStatus === 200
+      ? new Response(JSON.stringify({ value: 'ephemeral-browser-secret', expires_at: 123 }), { status: 200 })
+      : new Response('nope', { status: mintStatus }))) as typeof fetch,
+    websocketFactory: options.sidebandWorks
+      ? (() => new FakeRealtimeSocket() as unknown as WebSocket)
+      : (() => { throw new Error('provider sideband unavailable in tests'); }),
+  });
+}
+
 describe('voice account ownership boundary', () => {
-  it('currentOwner returns accountKey from admit and null after termination (controller-level proof)', () => {
+  it('currentOwner returns accountKey from admit and null after termination', () => {
     const now = { value: 1_000 };
     const { controller, dir } = makeController(now);
     try {
-      // Initially idle → no owner
       assert.equal(controller.currentOwner(), null, 'idle controller has no owner');
 
-      // Account A creates a session
       const admittedA = controller.admit('account-a');
       assert.equal(admittedA.ok, true);
       const ctxA = admittedA.context!;
 
-      // currentOwner must return 'account-a'
-      assert.equal(controller.currentOwner(), 'account-a', 'owner is account-a after admit');
-
-      // Activate so lifecycle ops work
+      assert.equal(controller.currentOwner(), 'account-a');
       assert.equal(controller.activate(ctxA), true);
       assert.equal(controller.accept(ctxA), true);
-
-      // Account B is NOT the owner
-      // (this is the check the transport will use: currentOwner() !== caller's key)
-      assert.equal(controller.currentOwner(), 'account-a');
       assert.notEqual(controller.currentOwner(), 'account-b');
 
-      // A remains live
-      assert.equal(controller.heartbeat(ctxA.sessionId, ctxA.epoch), true, 'A can heartbeat own session');
-      assert.equal(controller.accept(ctxA), true, 'A can accept own session');
+      assert.equal(controller.heartbeat(ctxA.sessionId, ctxA.epoch), true);
 
-      // After termination, owner is null
       controller.beginTermination(ctxA);
       controller.finishTermination(ctxA, true);
       assert.equal(controller.currentOwner(), null, 'owner null after termination');
@@ -65,99 +72,37 @@ describe('voice account ownership boundary', () => {
   it('proves live session A cannot be operated by account B', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cursor-remote-voice-own2-'));
     try {
-      const baseConfig: VoiceConfig = {
-        enabled: true,
-        openaiApiKey: 'sk-test-fake-do-not-use',
-        model: 'gpt-4o-realtime-preview',
-        miniModel: '',
-        voice: 'marin',
-        openrouterApiKey: 'sk-or-test-fake',
-        digestModel: 'test-model',
-        ttsModel: 'test-tts',
-        sttModel: 'test-stt',
-        proactiveMinIntervalMs: 15000,
-        usagePriceVersion: 'test-v1',
-        usageUnitPriceCentsPerMinute: 1,
-        dailyCapCents: 100,
-        perSessionCapCents: 10,
-        absoluteSessionMs: 10 * 60_000,
-        idleMs: 60_000,
-        idleGraceMs: 5_000,
-        leaseMs: 30_000,
-        targetMaxAgeMs: 5000,
-      };
+      const transport = makeTransport(dir);
+      {
+        const { sessionId, epoch, attachToken } = await transport.mintClientSecret('account-a');
 
-      function makeMockTransport(dataDir: string) {
-        const mm = new EventEmitter() as any;
-        mm.on = mm.on.bind(mm);
-        const sm = Object.assign(new EventEmitter(), {
-          getCurrentState: () => ({
-            connected: false, extractorStatus: 'idle', lastExtractionAt: null,
-            consecutiveExtractionFailures: 0, lastExtractionError: null,
-            agentStatus: 'idle' as const, agentActivityText: null, agentActivityLive: false,
-            agentActivitySource: 'none' as const, messages: [], pendingApprovals: [],
-            inputAvailable: false, chatTabs: [], activeComposerId: '',
-            mode: { current: '', available: [] }, model: { current: '', currentId: '' },
-            windows: [], activeWindowId: '', composerQueue: { items: [] }, questionnaire: null,
-          }),
-          generation: 0,
-          on: (() => {}) as any,
-          off: (() => {}) as any,
-        });
-        const ce = { sendMessage: async () => ({ ok: true }), switchTab: async () => ({ ok: true }), clickApproval: async () => ({ ok: true }), clickAction: async () => ({ ok: true }), setMode: async () => ({ ok: true }), setModel: async () => ({ ok: true }), newChat: async () => ({ ok: true }), getModelOptions: async () => ({ ok: true }), getPlanModelOptions: async () => ({ ok: true }), setPlanModel: async () => ({ ok: true }), reject: async () => ({ ok: true }), approveAll: async () => ({ ok: true }) } as any;
-        const cb = { switchWindow: async () => {}, on: (() => {}) as any, off: (() => {}) as any } as any;
-        const t = new VoiceTransport(baseConfig, dataDir, mm, sm, ce, cb);
-        return t;
+        // B cannot attach, even holding a syntactically valid grant token.
+        await assert.rejects(
+          () => transport.attachCall('call-attach-by-b', sessionId, epoch, attachToken, 'account-b'),
+          (err: NodeJS.ErrnoException & { statusCode?: number }) => err?.statusCode === 403,
+          'B attachCall throws 403 on a session it does not own',
+        );
+
+        const sessions = (transport as unknown as { sessions: VoiceSessionController }).sessions;
+        assert.equal(sessions.activate(sessions.currentContext()!), true);
+
+        // B cannot heartbeat — non-disclosing false rather than an error.
+        assert.equal(transport.heartbeat(sessionId, epoch, 'account-b'), false);
+
+        await assert.rejects(
+          () => transport.terminate(sessionId, epoch, 'test-by-b', 'account-b'),
+          (err: NodeJS.ErrnoException & { statusCode?: number }) => err?.statusCode === 403,
+          'B terminate throws 403',
+        );
+
+        assert.equal(transport.statusFor('account-b'), null, 'B statusFor returns null');
+
+        // A remains fully in control of its own session.
+        assert.equal(transport.heartbeat(sessionId, epoch, 'account-a'), true);
+        const aStatus = transport.statusFor('account-a');
+        assert.notEqual(aStatus, null);
+        assert.equal(aStatus?.sessionId, sessionId);
       }
-
-      const transport = makeMockTransport(dir);
-
-      // Seed a live session for account A via the private sessions controller
-      // (runtime type cast — no production API added for tests)
-      const sessions = (transport as unknown as { sessions: VoiceSessionController }).sessions;
-      const admitted = sessions.admit('account-a');
-      assert.equal(admitted.ok, true, 'A session admitted');
-      const ctxA = admitted.context!;
-      const { sessionId, epoch } = ctxA;
-
-      // Session is in 'admitting' state. B cannot attachCall
-      // (assertOwner fires before the activate check)
-      await assert.rejects(
-        () => transport.attachCall('call-attach-by-b', undefined, sessionId, epoch, 'account-b'),
-        (err: any) => err?.statusCode === 403,
-        'B attachCall throws 403 on owning session'
-      );
-
-      // Activate A's session so heartbeat/terminate can reach the owner check
-      assert.equal(sessions.activate(ctxA), true, 'A session activated');
-
-      // B cannot heartbeat
-      assert.equal(transport.heartbeat(sessionId, epoch, 'account-b'), false,
-        'B heartbeat returns false (non-disclosing)');
-
-      // B cannot terminate
-      await assert.rejects(
-        () => transport.terminate(sessionId, epoch, 'test-by-b', 'account-b'),
-        (err: any) => err?.statusCode === 403,
-        'B terminate throws 403'
-      );
-
-      // B cannot read live status
-      assert.equal(transport.statusFor('account-b'), null,
-        'B statusFor returns null');
-
-      // Meanwhile A remains live and can heartbeat own session
-      assert.equal(transport.heartbeat(sessionId, epoch, 'account-a'), true,
-        'A can heartbeat own session');
-
-      // A sees own session status (not null)
-      const aStatus = transport.statusFor('account-a');
-      assert.notEqual(aStatus, null, 'A statusFor returns data');
-      assert.equal(aStatus?.sessionId, sessionId, 'A sees own sessionId');
-
-      // no-auth path (owner undefined) still falls through to existing behaviour
-      assert.equal(transport.heartbeat(sessionId, epoch, undefined), true,
-        'no-auth heartbeat still works');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -166,45 +111,7 @@ describe('voice account ownership boundary', () => {
   it('returns the cached termination to its owner after the session releases ownership', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cursor-remote-voice-own3-'));
     try {
-      const baseConfig: VoiceConfig = {
-        enabled: true,
-        openaiApiKey: 'sk-test-fake-do-not-use',
-        model: 'gpt-4o-realtime-preview',
-        miniModel: '',
-        voice: 'marin',
-        openrouterApiKey: 'sk-or-test-fake',
-        digestModel: 'test-model',
-        ttsModel: 'test-tts',
-        sttModel: 'test-stt',
-        proactiveMinIntervalMs: 15000,
-        usagePriceVersion: 'test-v1',
-        usageUnitPriceCentsPerMinute: 1,
-        dailyCapCents: 100,
-        perSessionCapCents: 10,
-        absoluteSessionMs: 10 * 60_000,
-        idleMs: 60_000,
-        idleGraceMs: 5_000,
-        leaseMs: 30_000,
-        targetMaxAgeMs: 5000,
-      };
-      const mm = new EventEmitter() as any;
-      const sm = Object.assign(new EventEmitter(), {
-        getCurrentState: () => ({
-          connected: false, extractorStatus: 'idle', lastExtractionAt: null,
-          consecutiveExtractionFailures: 0, lastExtractionError: null,
-          agentStatus: 'idle' as const, agentActivityText: null, agentActivityLive: false,
-          agentActivitySource: 'none' as const, messages: [], pendingApprovals: [],
-          inputAvailable: false, chatTabs: [], activeComposerId: '',
-          mode: { current: '', available: [] }, model: { current: '', currentId: '' },
-          windows: [], activeWindowId: '', composerQueue: { items: [] }, questionnaire: null,
-        }),
-        generation: 0,
-        on: (() => {}) as any,
-        off: (() => {}) as any,
-      });
-      const ce = {} as any;
-      const cb = {} as any;
-      const transport = new VoiceTransport(baseConfig, dir, mm, sm, ce, cb);
+      const transport = makeTransport(dir);
       const sessions = (transport as unknown as { sessions: VoiceSessionController }).sessions;
       const admitted = sessions.admit('account-a');
       assert.equal(admitted.ok, true);
@@ -213,8 +120,74 @@ describe('voice account ownership boundary', () => {
 
       const first = await transport.terminate(context.sessionId, context.epoch, 'client_request', 'account-a');
       const repeat = await transport.terminate(context.sessionId, context.epoch, 'client_request', 'account-a');
+      assert.deepEqual(repeat, first, 'repeated hangup is idempotent');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
-      assert.deepEqual(repeat, first);
+describe('voice attach grant', () => {
+  it('consumes the attach token exactly once so a replay cannot attach twice', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cursor-remote-voice-attach1-'));
+    try {
+      const transport = makeTransport(dir, { sidebandWorks: true });
+      {
+        const { sessionId, epoch, attachToken } = await transport.mintClientSecret('account-a');
+        // First attach succeeds and the session stays live, so the replay can
+        // only be refused because the one-time grant was already consumed.
+        await transport.attachCall('call-1', sessionId, epoch, attachToken, 'account-a');
+
+        await assert.rejects(
+          () => transport.attachCall('call-1', sessionId, epoch, attachToken, 'account-a'),
+          /grant is invalid or expired/,
+          'a replayed attach token must be refused',
+        );
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a stale epoch, an unknown session and a malformed call id', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cursor-remote-voice-attach2-'));
+    try {
+      const transport = makeTransport(dir);
+      {
+        const { sessionId, epoch, attachToken } = await transport.mintClientSecret('account-a');
+        await assert.rejects(
+          () => transport.attachCall('call-1', sessionId, epoch + 1, attachToken, 'account-a'),
+          /grant is invalid or expired/,
+          'a stale epoch must not attach',
+        );
+        await assert.rejects(
+          () => transport.attachCall('call-1', 'some-other-session', epoch, attachToken, 'account-a'),
+          /grant is invalid or expired/,
+          'an unknown session must not attach',
+        );
+        await assert.rejects(
+          () => transport.attachCall('call id with spaces', sessionId, epoch, attachToken, 'account-a'),
+          /invalid call id/,
+          'a malformed provider call id must be refused',
+        );
+        await assert.rejects(
+          () => transport.attachCall('call-1', sessionId, epoch, 'short', 'account-a'),
+          /invalid attach token/,
+          'an undersized attach token must be refused',
+        );
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('releases the admitted session when provider admission fails', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cursor-remote-voice-attach3-'));
+    try {
+      const transport = makeTransport(dir, { mintStatus: 500 });
+      await assert.rejects(() => transport.mintClientSecret('account-a'));
+      // A failed mint must not strand an admitted session holding the slot.
+      assert.equal(transport.currentOwner, null, 'failed admission releases ownership');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

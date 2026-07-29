@@ -2,6 +2,23 @@ import 'dotenv/config';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import type { ServerConfig, SelectorConfig } from './types.js';
+import { VOICE_REALTIME_MODEL } from './transports/voice/constants.js';
+
+/**
+ * The private voice surface has no configurable model: every Realtime call is
+ * pinned to VOICE_REALTIME_MODEL. VOICE_MODEL survives only as a deployment
+ * tripwire — an operator who sets it to anything else gets a startup failure
+ * rather than a silently ignored value or a fallback model.
+ */
+export function assertPinnedVoiceModel(env: NodeJS.ProcessEnv = process.env): void {
+  const configured = env.VOICE_MODEL;
+  if (configured !== undefined && configured !== VOICE_REALTIME_MODEL) {
+    throw new Error(
+      `VOICE_MODEL must be exactly ${VOICE_REALTIME_MODEL} (got "${configured}"). ` +
+      'The private voice surface has no fallback or mini model.'
+    );
+  }
+}
 
 export function loadConfig(): ServerConfig {
   const preRegisteredRaw = process.env.TELEGRAM_ALLOWED_USERS ?? '';
@@ -11,6 +28,8 @@ export function loadConfig(): ServerConfig {
     .filter(n => !isNaN(n));
 
   const dataDir = process.env.DATA_DIR ?? resolve(process.cwd(), 'data');
+
+  assertPinnedVoiceModel();
 
   return {
     cdpUrl: process.env.CDP_URL ?? 'http://127.0.0.1:9222',
@@ -32,15 +51,9 @@ export function loadConfig(): ServerConfig {
     voice: {
       enabled: process.env.VOICE_ENABLED === 'true',
       openaiApiKey: process.env.OPENAI_API_KEY ?? '',
-      model: process.env.VOICE_MODEL ?? 'gpt-realtime-2.1',
-      miniModel: process.env.VOICE_MINI_MODEL ?? '',
+      hermesReadContextUrl: process.env.HERMES_READ_CONTEXT_URL ?? '',
+      hermesReadContextToken: process.env.HERMES_READ_CONTEXT_TOKEN ?? '',
       voice: process.env.VOICE_NAME ?? 'marin',
-      openrouterApiKey: process.env.OPENROUTER_API_KEY ?? '',
-      digestModel: process.env.VOICE_DIGEST_MODEL ?? 'google/gemini-2.5-flash-lite',
-      // TTS/STT are config-only for now (synthesis not wired); see docs/dicktator.md.
-      ttsModel: process.env.VOICE_TTS_MODEL ?? 'x-ai/grok-voice-tts-1.0',
-      sttModel: process.env.VOICE_STT_MODEL ?? 'x-ai/grok-stt-1.0',
-      proactiveMinIntervalMs: parseInt(process.env.VOICE_PROACTIVE_MIN_INTERVAL_MS ?? '15000', 10),
       // Conservative V1 defaults. Operators can only admit when this versioned price is known.
       usagePriceVersion: process.env.VOICE_USAGE_PRICE_VERSION ?? 'openai-realtime-2026-01',
       usageUnitPriceCentsPerMinute: parseInt(process.env.VOICE_USAGE_UNIT_PRICE_CENTS_PER_MINUTE ?? '50', 10),

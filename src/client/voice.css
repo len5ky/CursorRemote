@@ -1,0 +1,105 @@
+/* Private voice — one screen, mobile first. No dashboards, no settings. */
+
+:root {
+  --bg: #101215;
+  --fg: #e7eaee;
+  --muted: #99a1ab;
+  --accent: #2f7d4f;
+  --accent-active: #a03434;
+  --danger: #e06666;
+  --surface: #191d22;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+.call {
+  min-height: 100%;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.75rem;
+  padding: 2rem 1.25rem calc(2rem + env(safe-area-inset-bottom));
+  text-align: center;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.state {
+  margin: 0;
+  font-size: 1.6rem;
+  font-weight: 600;
+  min-height: 2rem;
+}
+
+.call-button {
+  /* Well above the 44x44 CSS px minimum touch target. */
+  width: min(15rem, 70vw);
+  height: min(15rem, 70vw);
+  border-radius: 50%;
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  font-size: 1.35rem;
+  font-weight: 600;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 150ms ease, transform 100ms ease;
+}
+
+.call-button:active:not(:disabled) { transform: scale(0.97); }
+
+.call-button:focus-visible {
+  outline: 3px solid #7fb0ff;
+  outline-offset: 4px;
+}
+
+.call-button[data-mode="active"] { background: var(--accent-active); }
+
+.call-button:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
+.message {
+  margin: 0;
+  min-height: 2.5rem;
+  max-width: 32rem;
+  font-size: 0.95rem;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.message[data-tone="error"] { color: var(--danger); }
+
+/* Audio sink must stay in the layout but carries no controls. */
+.remote-audio {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .call-button { transition: none; }
+}

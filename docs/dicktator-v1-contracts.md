@@ -1,5 +1,13 @@
 # DICKTATOR V1 contracts
 
+> **Superseded — historical record.** These contracts describe the earlier
+> mutation-capable voice surface. The shipping surface is read-only: staged
+> confirmation, the mutation tool set and the `CommandExecutor` dependency have
+> been removed, and the model is pinned to `gpt-realtime-2.1` with no fallback.
+> For the current contract see [`dicktator.md`](./dicktator.md) and
+> [`private-voice-pwa-deploy.md`](./private-voice-pwa-deploy.md). The session,
+> epoch, lease and idempotent-termination invariants below still hold.
+
 These contracts are server-authoritative. V1 excludes Android, Auto/capability packs,
 automatic model routing, model-switch reconnects, and generalized recovery.
 

@@ -268,16 +268,16 @@ export class VoiceSessionController {
     return { accepted: true, state: 'terminating' };
   }
 
-  finishTermination(context: VoiceSessionContext, providerConfirmed: boolean): VoiceSessionStatus {
+  finishTermination(context: VoiceSessionContext, providerHangupConfirmed: boolean): VoiceSessionStatus {
     if (!this.matches(context)) return this.status();
     const session = this.session!;
     const spend = session.reportedCents ?? this.estimateCents(session);
     try {
       this.ledger.settle(session.context.sessionId, this.now(), spend);
     } catch {
-      providerConfirmed = false;
+      providerHangupConfirmed = false;
     }
-    session.state = providerConfirmed ? 'terminated' : 'failed';
+    session.state = providerHangupConfirmed ? 'terminated' : 'failed';
     return this.status();
   }
 

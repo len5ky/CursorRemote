@@ -238,7 +238,10 @@
     "discover": "tsx src/discovery/discover-dom.ts",
     "record": "mkdir -p data && tsx scripts/record-cdp.ts",
     "replay": "tsx scripts/replay-cdp.ts",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
     "test": "npx tsx --test tests/*.test.ts",
+    "smoke:voice": "npx tsx --test tests/private-voice-smoke.test.ts",
+    "verify": "npm run typecheck && npm test && npm run build",
     "probe": "tsx scripts/probe-cdp.ts",
     "wait-record": "tsx scripts/wait-record.ts"
   },

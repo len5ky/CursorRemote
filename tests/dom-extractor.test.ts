@@ -35,12 +35,12 @@ function withDom(html: string): CursorState {
     if (documentDescriptor) {
       Object.defineProperty(globalThis, 'document', documentDescriptor);
     } else {
-      delete globalThis.document;
+      Reflect.deleteProperty(globalThis, 'document');
     }
     if (nodeDescriptor) {
       Object.defineProperty(globalThis, 'Node', nodeDescriptor);
     } else {
-      delete globalThis.Node;
+      Reflect.deleteProperty(globalThis, 'Node');
     }
   }
 }
