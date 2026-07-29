@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
+import { randomUUID } from 'crypto';
 import { join } from 'path';
 
 /** HttpOnly cookie name; must match client expectations only for non-HttpOnly flows (we use server-side parse). */
@@ -30,11 +31,21 @@ export function createWebappSessionStore(dataDir: string): WebappSessionStore {
     }
   }
 
+  /**
+   * This file is a store of live bearer credentials: anything that can read it
+   * can present a token and be that operator. The default 0644 made it readable
+   * by every account on the machine, so a session could be lifted straight off
+   * disk. Written through a 0600 temp file and renamed into place, which also
+   * makes the replacement atomic and — unlike writing over the existing file —
+   * actually fixes the mode of a file created before this was true.
+   */
   function save(): void {
+    const tmpPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
     try {
       mkdirSync(dataDir, { recursive: true });
       const arr = [...tokens];
-      writeFileSync(filePath, JSON.stringify({ tokens: arr }) + '\n', 'utf-8');
+      writeFileSync(tmpPath, JSON.stringify({ tokens: arr }) + '\n', { encoding: 'utf-8', mode: 0o600 });
+      renameSync(tmpPath, filePath);
     } catch (e) {
       console.error('[relay] Failed to persist web app sessions:', e);
     }

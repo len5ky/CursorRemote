@@ -9,6 +9,10 @@ data/
 releases/
 temp/server.log
 tmp/
+
+# Agent coordination lock. Written at the repo root while an agent holds the
+# branch; runtime state, never source.
+.agent-lock
 scripts/generate-keys.ts
 azure_token
 openvsx_token

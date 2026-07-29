@@ -5,6 +5,7 @@ import type {
   ReadContextLimits,
   SessionSummary,
 } from './tools.js';
+import { truncateUtf8 } from './tools.js';
 import {
   VOICE_MAX_CONTEXT_BYTES,
   VOICE_MAX_CONTEXT_TURNS,
@@ -84,8 +85,10 @@ function parseSnapshot(body: unknown, limits: ReadContextLimits): HermesReadResu
     sessions.push(session);
   }
 
+  const turnBudget = resolveTurnBudget(limits.maxTurns);
   const turns = [];
-  for (const item of body.turns.slice(-Math.min(limits.maxTurns ?? VOICE_MAX_CONTEXT_TURNS, VOICE_MAX_CONTEXT_TURNS))) {
+  // `slice(-0)` is `slice(0)`, so a zero budget must not reach slice at all.
+  for (const item of turnBudget === 0 ? [] : body.turns.slice(-turnBudget)) {
     if (!isRecord(item) || typeof item.role !== 'string' || !VALID_ROLES.has(item.role)) {
       return { kind: 'unavailable', reason: 'Hermes read response contained an invalid turn' };
     }
@@ -94,7 +97,7 @@ function parseSnapshot(body: unknown, limits: ReadContextLimits): HermesReadResu
     turns.push({
       role: item.role as 'user' | 'assistant' | 'system' | 'tool',
       content,
-      ...(typeof item.observedAt === 'string' ? { observedAt: item.observedAt.slice(0, 128) } : {}),
+      ...(typeof item.observedAt === 'string' ? { observedAt: truncateUtf8(item.observedAt, 128) } : {}),
     });
   }
 
@@ -106,12 +109,60 @@ function parseSnapshot(body: unknown, limits: ReadContextLimits): HermesReadResu
     sessions,
     turns,
   };
-  const maxBytes = Math.max(1_000, Math.min(limits.maxBytes ?? VOICE_MAX_CONTEXT_BYTES, VOICE_MAX_CONTEXT_BYTES));
-  const serialized = JSON.stringify(snapshot);
-  if (Buffer.byteLength(serialized, 'utf8') > maxBytes) {
-    snapshot.turns = trimTurnsToBytes(snapshot.turns, maxBytes, snapshot);
+  const requestedMaxBytes = limits.maxBytes;
+  const maxBytes = requestedMaxBytes === undefined
+    ? VOICE_MAX_CONTEXT_BYTES
+    : Number.isFinite(requestedMaxBytes)
+      ? Math.max(0, Math.min(Math.floor(requestedMaxBytes), VOICE_MAX_CONTEXT_BYTES))
+      : 0;
+  if (!fitSnapshotToBytes(snapshot, maxBytes)) {
+    return { kind: 'unavailable', reason: 'Hermes read response could not be fitted to the context byte budget' };
   }
   return { kind: 'available', snapshot };
+}
+
+/**
+ * Force a snapshot under its declared byte budget, in place.
+ *
+ * Trimming turns alone was not enough: the budget bounds the *serialized*
+ * snapshot, and identity plus session metadata can already exceed it on their
+ * own — 32 sessions of 32 tabs, or identity fields whose control characters
+ * each cost six bytes once JSON-escaped. When that happened the reader still
+ * reported `available` and handed back a snapshot several times the budget the
+ * caller declared.
+ *
+ * Sessions are dropped from the end after the turns, because a shorter session
+ * list is a truthful subset while a re-encoded conversation id would not be. If
+ * even an empty snapshot does not fit, the honest answer is that context is
+ * unavailable — never a snapshot that breaks the bound the caller asked for.
+ */
+function fitSnapshotToBytes(snapshot: HermesConversationSnapshot, maxBytes: number): boolean {
+  const fits = (): boolean => Buffer.byteLength(JSON.stringify(snapshot), 'utf8') <= maxBytes;
+  if (fits()) return true;
+
+  snapshot.turns = trimTurnsToBytes(snapshot.turns, maxBytes, snapshot);
+  if (fits()) return true;
+
+  while (snapshot.sessions.length > 0) {
+    snapshot.sessions.pop();
+    if (fits()) return true;
+  }
+  return false;
+}
+
+/**
+ * A turn budget is a count, so it has to survive being zero or hostile.
+ *
+ * `slice(-n)` reads a zero as "start at index 0" and a negative as "drop the
+ * first n", so an unclamped budget *widened* the read instead of narrowing it:
+ * the status tools ask for `maxTurns: 0` and were handed every turn the
+ * endpoint offered. Anything that is not a usable count fails closed to zero
+ * rather than to the whole transcript.
+ */
+function resolveTurnBudget(requested: number | undefined): number {
+  if (requested === undefined) return VOICE_MAX_CONTEXT_TURNS;
+  if (!Number.isFinite(requested)) return 0;
+  return Math.max(0, Math.min(Math.floor(requested), VOICE_MAX_CONTEXT_TURNS));
 }
 
 function parseSession(value: unknown): SessionSummary | null {
@@ -122,7 +173,7 @@ function parseSession(value: unknown): SessionSummary | null {
   if (!id || !title || !status || !Array.isArray(value.tabs)) return null;
   const tabs = value.tabs.slice(0, MAX_TABS_PER_SESSION).map((tab) => {
     if (!isRecord(tab) || typeof tab.title !== 'string' || typeof tab.isActive !== 'boolean' || typeof tab.status !== 'string') return null;
-    return { title: tab.title.slice(0, 256), isActive: tab.isActive, status: tab.status.slice(0, 128) };
+    return { title: truncateUtf8(tab.title, 256), isActive: tab.isActive, status: truncateUtf8(tab.status, 128) };
   });
   return tabs.every(Boolean) ? { id, title, status, tabs: tabs as SessionSummary['tabs'] } : null;
 }
@@ -141,10 +192,17 @@ function trimTurnsToBytes(
   return kept;
 }
 
+/**
+ * The cap is measured in bytes, so the cut has to be made in bytes too.
+ *
+ * `value.slice(0, maxBytes)` measured the overflow correctly and then cut by
+ * UTF-16 code units, which is not a fix at all: a 600-byte Japanese
+ * conversation id is 200 code units, so a 256-byte cap let all 600 bytes
+ * through untouched.
+ */
 function boundedRequiredString(value: unknown, maxBytes: number): string | null {
   if (typeof value !== 'string' || value.length === 0) return null;
-  const valueBytes = Buffer.byteLength(value, 'utf8');
-  if (valueBytes > maxBytes) return value.slice(0, maxBytes);
+  if (Buffer.byteLength(value, 'utf8') > maxBytes) return truncateUtf8(value, maxBytes);
   return value;
 }
 

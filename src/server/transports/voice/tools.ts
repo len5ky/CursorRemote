@@ -194,15 +194,57 @@ export class VoiceToolRouter {
     if (!this.deps.terminateVoice || !context) {
       return this.result('invalid_request', 'Voice termination is unavailable.');
     }
-    const status = await this.deps.terminateVoice(context);
-    return this.result('ok', `Voice session ${status.state}.`);
+    // A bare await let a failing termination reject out of the router. The
+    // sideband's catch-all swallowed it, so no function_call_output was ever
+    // sent and the model sat waiting on a tool result that would never come.
+    // The failure is answered generically instead; the cause is logged
+    // server-side, because the model may repeat aloud whatever it is told.
+    try {
+      const status = await this.deps.terminateVoice(context);
+      return this.result('ok', `Voice session ${status.state}.`);
+    } catch (err) {
+      console.error(`[voice] Tool-initiated termination failed: ${err instanceof Error ? err.message : 'unknown error'}`);
+      return this.result('invalid_request', 'Voice termination is unavailable.');
+    }
   }
 
+  /**
+   * Context could not be read. The model is told the honest fact — the context
+   * is unavailable, so it must not pretend otherwise — but not *why*: the
+   * reason names env vars, endpoints and upstream statuses, and anything the
+   * model is told it may say out loud to whoever is on the call.
+   */
   private unavailable(reason: string): ToolResult {
-    return this.result('context_unavailable', `Live Hermes context is unavailable: ${reason}`);
+    console.warn(`[voice] Hermes context unavailable: ${reason}`);
+    return this.result('context_unavailable', 'Live Hermes context is unavailable right now.');
   }
 
   private result(kind: VoiceToolResultKind, output: string): ToolResult {
-    return { kind, ok: kind === 'ok', output: output.slice(0, VOICE_MAX_TOOL_OUTPUT_BYTES) };
+    return { kind, ok: kind === 'ok', output: truncateUtf8(output, VOICE_MAX_TOOL_OUTPUT_BYTES) };
   }
+}
+
+/**
+ * Cut a string to a UTF-8 *byte* ceiling without splitting a character.
+ *
+ * `String.prototype.slice` counts UTF-16 code units, so a cap written as
+ * `slice(0, N)` let N characters of non-ASCII context weigh up to 3N bytes
+ * (4N with astral characters) on the wire — the ceiling the provider and the
+ * sideband are sized against was silently blown by any non-English reply.
+ * Rewinding off continuation bytes keeps the result decodable: a tool output
+ * ending in half a character is not something the model can read back.
+ *
+ * Exported because every other byte cap on this surface — context identity
+ * fields, session metadata, turn bodies, the function name and call id echoed
+ * back to the provider — has exactly the same problem and must be cut the same
+ * way. A second, hand-rolled copy is how one of them drifts back to `slice`.
+ */
+export function truncateUtf8(value: string, maxBytes: number): string {
+  if (maxBytes <= 0) return '';
+  const buffer = Buffer.from(value, 'utf8');
+  if (buffer.length <= maxBytes) return value;
+  let end = maxBytes;
+  // 0b10xxxxxx is a continuation byte, so the cut landed mid-character.
+  while (end > 0 && (buffer[end] & 0xc0) === 0x80) end--;
+  return buffer.toString('utf8', 0, end);
 }

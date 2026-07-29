@@ -5,6 +5,7 @@ import { VoiceToolRouter } from '../src/server/transports/voice/tools.js';
 import { VoiceSessionController } from '../src/server/transports/voice/session.js';
 import type { VoiceConfig } from '../src/server/types.js';
 import { testVoiceConfig } from './helpers/voice-fixtures.js';
+import { KNOWN_VOICE_PRICE_VERSION } from '../src/server/transports/voice/pricing.js';
 
 function config(): VoiceConfig {
   return testVoiceConfig({
@@ -51,7 +52,7 @@ describe('voice hardening — idle and budget brakes', () => {
     let now = 10_000;
     const controller = new VoiceSessionController({
       dataPath: `/tmp/private-voice-hardening-${process.pid}.json`,
-      priceVersion: 'test-v1',
+      priceVersion: KNOWN_VOICE_PRICE_VERSION,
       unitPriceCentsPerMinute: 1,
       dailyCapCents: 100,
       perSessionCapCents: 10,

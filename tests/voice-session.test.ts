@@ -4,12 +4,13 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { VoiceSessionController, VoiceUsageLedger } from '../src/server/transports/voice/session.js';
+import { KNOWN_VOICE_PRICE_VERSION } from '../src/server/transports/voice/pricing.js';
 
 function makeController(nowRef: { value: number }, overrides: Partial<ConstructorParameters<typeof VoiceSessionController>[0]> = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'cursor-remote-voice-'));
   const controller = new VoiceSessionController({
     dataPath: join(dir, 'voice-usage.json'),
-    priceVersion: 'test-v1',
+    priceVersion: KNOWN_VOICE_PRICE_VERSION,
     unitPriceCentsPerMinute: 1,
     dailyCapCents: 20,
     perSessionCapCents: 10,

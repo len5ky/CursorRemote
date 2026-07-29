@@ -99,37 +99,65 @@ All environment variables, caps and secret-handling rules live in
 [`private-voice-pwa-deploy.md § 5`](./private-voice-pwa-deploy.md#5-environment-variables).
 
 The short version: `VOICE_ENABLED`, `OPENAI_API_KEY` (server-only),
-`WEBAPP_PASSWORD`, `HERMES_READ_CONTEXT_URL` (+ optional
-`HERMES_READ_CONTEXT_TOKEN`), and the `VOICE_USAGE_*` / `VOICE_SESSION_*` caps.
-There is **no model variable**; setting `VOICE_MODEL` to anything other than
-`gpt-realtime-2.1` fails startup.
+`WEBAPP_PASSWORD`, `VOICE_PUBLIC_ORIGIN`, `HERMES_READ_CONTEXT_URL` (+ optional
+`HERMES_READ_CONTEXT_TOKEN`), `VOICE_NAME`, `VOICE_ACCOUNT_ID`, and the
+`VOICE_USAGE_*` / `VOICE_SESSION_*` caps. Names only — values live in your
+secret store, never in the repo.
+
+Four of those are hard startup gates:
+
+- **`WEBAPP_PASSWORD` is mandatory** with `VOICE_ENABLED=true`. Without it the
+  server refuses to start, and a relay in that state answers `503` on every
+  voice route rather than serving an unauthenticated voice surface.
+- **`VOICE_PUBLIC_ORIGIN`** is the canonical browser origin
+  (`https://<machine>.<tailnet>.ts.net`), validated at startup and never
+  inferred from `Host` or any `X-Forwarded-*` header. Unset means loopback
+  origins only, so every phone request is refused with `403 Origin denied`.
+- There is **no model variable**. Every session is pinned to `gpt-realtime-2.1`
+  — no mini, no preview, no fallback — and setting `VOICE_MODEL` to anything
+  else fails startup.
+- **`VOICE_USAGE_PRICE_VERSION`** must name a version in the frozen price table
+  (`src/server/transports/voice/pricing.ts`). An invented version fails startup
+  and is refused again at admission, so a paid call is never metered against a
+  rate card nobody reviewed. Every numeric `VOICE_*` value is range-validated
+  at startup for the same reason.
+
+## Deployment
+
+Private tailnet only, over HTTPS, with the relay bound to loopback:
+
+```bash
+sudo tailscale serve --bg --https=443 http://127.0.0.1:3000
+tailscale serve status          # https://<machine>.<tailnet>.ts.net → http://127.0.0.1:3000
+tailscale funnel status         # must report no Funnel: public exposure is a non-goal
+```
+
+Full procedure, including the `VOICE_PUBLIC_ORIGIN` value this implies:
+[`private-voice-pwa-deploy.md § 3`](./private-voice-pwa-deploy.md#3-network-tailscale--https-required).
 
 ## Smoke test
 
 ```bash
-set -a; source <your-secret-env-file>; set +a    # OPENAI_API_KEY only
-VOICE_ENABLED=true SERVER_HOST=127.0.0.1 npm run dev
+set -a; source <your-secret-env-file>; set +a    # OPENAI_API_KEY, WEBAPP_PASSWORD
+VOICE_ENABLED=true SERVER_HOST=127.0.0.1 \
+  VOICE_PUBLIC_ORIGIN=https://<machine>.<tailnet>.ts.net npm run dev
 ```
 
-Open `https://<machine>.<tailnet>.ts.net/voice` from the phone (HTTPS is
-required for microphone access), tap **Call**, and try:
+Open `https://<machine>.<tailnet>.ts.net/voice` from the phone — a browser, on
+the tailnet; the browser PWA is the only supported client — log in, tap
+**Call**, and try:
 
 1. *"list my sessions"* → speaks back the connected Hermes contexts.
 2. *"what's the status?"* → speaks the current agent status.
 3. *"what happened recently?"* → summarises bounded recent context.
 4. *"approve that"* → must refuse and say the surface is read-only.
 
-Automated tests (none of these call OpenAI):
+Automated tests. Every provider interaction is a double — an injected `fetch`
+and a fake sideband socket — so none of these reach `api.openai.com`:
 
 ```bash
-npx tsx --test tests/private-voice-contract.test.ts \
-                tests/private-voice-smoke.test.ts \
-                tests/voice-tools.test.ts \
-                tests/voice-session.test.ts \
-                tests/voice-ownership.test.ts \
-                tests/voice-hardening.test.ts \
-                tests/voice-client-lifecycle.test.ts \
-                tests/voice-red.test.ts
+npm test                                       # full suite, zero skips
+npx tsx --test tests/voice-*.test.ts tests/private-voice-*.test.ts   # voice only
 ```
 
 ## Disconnect, health, and recovery
@@ -160,12 +188,15 @@ That surface has been **removed**, not merely hidden. Specifically:
 | `VOICE_MODEL` as a selectable model, `gpt-realtime-2.1-mini` as a fallback | The model is pinned to one constant. `VOICE_MODEL` is now only a startup tripwire. |
 | `VOICE_PROACTIVE_MIN_INTERVAL_MS` and proactive announcements | Not part of the private read-only surface. |
 
-**Android client status.** `apps/dicktator-android` still targets the old
-contract: its Android Auto **Approve** / **Later** controls call
-`/api/voice/confirm` and `/api/voice/defer`, which no longer exist, and will now
-fail against this server. The phone call path (token → SDP → attach → heartbeat
-→ terminate) still matches. Bringing that client in line — or retiring it — is
-tracked separately and is out of scope for the private voice PWA.
+**Android client status: unsupported.** The native Android phone/Auto client in
+`apps/dicktator-android` was built against the old, mutation-capable contract —
+its Android Auto **Approve** / **Later** controls call `/api/voice/confirm` and
+`/api/voice/defer`, which no longer exist. It is **not supported** on V1: it is
+not built, tested, or shipped, and its sources are archived for reference only.
+The supported V1 voice surface is the browser PWA at `/voice`, which is
+installable and runs in an Android browser as well as anywhere else. Any native
+Android compatibility work — porting the client to the read-only contract, or
+removing it — is future work, not a claim this document makes about today.
 
 Historical design records are preserved in
 [`dicktator-v1-contracts.md`](./dicktator-v1-contracts.md) and

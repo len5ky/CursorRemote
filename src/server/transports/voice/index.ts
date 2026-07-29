@@ -13,10 +13,29 @@ const ATTACH_TOKEN_TTL_MS = 120_000;
 
 type VoiceHealth = { voice: boolean; sideband: boolean; socket: boolean; context: boolean };
 
+/**
+ * What actually happened to the provider-side call during termination.
+ *
+ * - `no_provider_call` — the session never held a provider call id, so there
+ *   was nothing to hang up. This is a complete outcome, not a confirmation.
+ * - `confirmed` — the provider acknowledged the hangup.
+ * - `unresolved` — a provider call existed and the hangup was not acknowledged.
+ *   The orphan reaper may still be retrying.
+ * - `unknown` — this request was not the authority for the termination (stale
+ *   session, or a concurrent terminate owns the outcome).
+ */
+export type VoiceProviderCallCleanup = 'no_provider_call' | 'confirmed' | 'unresolved' | 'unknown';
+
 export interface VoiceTerminationStatus {
   sessionId: string | null;
   epoch: number | null;
   state: VoiceSessionStatus['state'];
+  providerCallCleanup: VoiceProviderCallCleanup;
+  /**
+   * True only when a provider call existed and the provider acknowledged the
+   * hangup. Absence of a call id is never confirmation — see
+   * VoiceProviderCallCleanup.
+   */
   providerHangupConfirmed: boolean;
   reason: string;
 }
@@ -45,8 +64,18 @@ export class VoiceTransport implements Transport {
   private started = false;
   private reaper: ReturnType<typeof setInterval> | null = null;
   private socketHealthy: () => boolean = () => false;
-  private onHangup: ((status: VoiceTerminationStatus) => void) | null = null;
-  private terminating: Promise<VoiceTerminationStatus> | null = null;
+  private onHangup: ((status: VoiceTerminationStatus, owner: string) => void) | null = null;
+  /**
+   * In-flight termination work, keyed by `sessionId:epoch`.
+   *
+   * A single shared promise was returned to whichever caller happened to
+   * arrive while any termination was running, so a request to end session B
+   * resolved with session A's identity, epoch, reason and provider-cleanup
+   * state. Keying the work per session keeps concurrent terminations of the
+   * *same* session collapsed onto one provider hangup while making it
+   * impossible for one session to be handed another's promise or result.
+   */
+  private readonly terminating = new Map<string, Promise<VoiceTerminationStatus>>();
   private readonly completedTerminations = new Map<string, VoiceTerminationStatus>();
   private readonly completedOwners = new Map<string, string>();
   private readonly orphanHangups = new Map<string, ReturnType<typeof setTimeout>>();
@@ -96,7 +125,7 @@ export class VoiceTransport implements Transport {
     this.bridge = new RealtimeBridge(config, this.router, {
       accepts: (context) => this.sessions.accept(context),
       userTurn: (context) => { this.sessions.touch(context); },
-      providerFailure: (context, reason) => { void this.terminate(context.sessionId, context.epoch, reason); },
+      providerFailure: (context, reason) => { this.terminateDetached(context.sessionId, context.epoch, reason); },
       reportSpend: (context, cents, source) => this.sessions.reportSpend(context, cents, source),
     }, providerOptions);
   }
@@ -109,11 +138,26 @@ export class VoiceTransport implements Transport {
     return owner ?? 'local';
   }
 
+  /**
+   * Who is entitled to act on, or observe, the named session.
+   *
+   * A completed termination is owned by whoever ran it, for as long as its
+   * record is retained — the record still holds that operator's session id,
+   * epoch, provider-cleanup state and termination reason, and `terminate()`
+   * replays it verbatim for that key. The live owner used to win this
+   * comparison, so as soon as the next operator was admitted to this
+   * single-session transport, *they* satisfied the gate for the previous
+   * operator's completed key and were handed its cached status — while the
+   * operator who actually ran it started getting 403 on their own session.
+   * Per-key ownership therefore takes precedence, and the live owner answers
+   * only for keys with no completed record of their own.
+   */
   private assertOwner(owner: string | undefined, sessionId?: string, epoch?: number): void {
     if (owner === undefined) return;
-    const currentOwner = this.sessions.currentOwner();
-    const completedOwner = sessionId && epoch ? this.completedOwners.get(`${sessionId}:${epoch}`) : undefined;
-    if ((currentOwner ?? completedOwner) !== owner) {
+    const completedOwner = sessionId !== undefined && epoch !== undefined
+      ? this.completedOwners.get(`${sessionId}:${epoch}`)
+      : undefined;
+    if ((completedOwner ?? this.sessions.currentOwner()) !== owner) {
       throw Object.assign(new Error('unauthorized'), { statusCode: 403 });
     }
   }
@@ -125,11 +169,16 @@ export class VoiceTransport implements Transport {
     }
   }
 
-  async mintClientSecret(accountKey: string): Promise<ClientSecretResult & { sessionId: string; epoch: number; attachToken: string }> {
-    const admitted = this.sessions.admit(accountKey);
+  /**
+   * @param ownerKey The authenticated web session, or `local`. It authorizes
+   *   the call and routes its events — it is never the budget identity, because
+   *   it changes on every login and a per-login budget is not a budget.
+   */
+  async mintClientSecret(ownerKey: string): Promise<ClientSecretResult & { sessionId: string; epoch: number; attachToken: string }> {
+    const admitted = this.sessions.admit(ownerKey, this.config.accountId);
     if (!admitted.ok || !admitted.context) throw new Error(admitted.error ?? 'voice admission denied');
     const context = admitted.context;
-    const owner = this.ownerFor(accountKey === 'local' ? undefined : accountKey);
+    const owner = this.ownerFor(ownerKey === 'local' ? undefined : ownerKey);
     const attachToken = randomBytes(32).toString('base64url');
     const key = `${context.sessionId}:${context.epoch}`;
     this.attachGrants.set(key, {
@@ -140,7 +189,9 @@ export class VoiceTransport implements Transport {
       expiresAt: Date.now() + ATTACH_TOKEN_TTL_MS,
     });
     try {
-      const secret = await this.bridge.mintClientSecret(accountKey);
+      // The provider is given a hash of the *stable* account, so its abuse
+      // signal follows the operator rather than resetting on every login.
+      const secret = await this.bridge.mintClientSecret(this.config.accountId);
       return { ...secret, sessionId: context.sessionId, epoch: context.epoch, attachToken };
     } catch (err) {
       this.attachGrants.delete(key);
@@ -189,33 +240,67 @@ export class VoiceTransport implements Transport {
     this.assertOwner(owner, sessionId, epoch);
     const completed = this.completedTerminations.get(key);
     if (completed) return completed;
-    if (this.terminating) return this.terminating;
+    const inFlight = this.terminating.get(key);
+    if (inFlight) return inFlight;
 
     const context = this.sessions.currentContext();
     if (!context || context.sessionId !== sessionId || context.epoch !== epoch) {
-      const status = this.sessions.status();
-      return { sessionId: status.sessionId, epoch: status.epoch, state: status.state, providerHangupConfirmed: false, reason: 'stale_session' };
+      // The transport holds nothing for the session that was named. Echo the
+      // caller's own identifiers back rather than the live session's: a stale
+      // request is not entitled to learn which session *is* current, and a
+      // caller that saw someone else's id here would act on a call it does not
+      // own. `idle` is what this transport knows about the named session — not
+      // a claim about whatever else may be running.
+      return {
+        sessionId,
+        epoch,
+        state: 'idle',
+        providerCallCleanup: 'unknown',
+        providerHangupConfirmed: false,
+        reason: 'stale_session',
+      };
     }
     if (!this.sessions.beginTermination(context).accepted) {
+      // A concurrent terminate owns the provider outcome; this caller cannot
+      // observe it, so it reports neither confirmation nor failure.
       const status = this.sessions.status();
-      return { sessionId, epoch, state: status.state, providerHangupConfirmed: status.state === 'terminated', reason };
+      return {
+        sessionId,
+        epoch,
+        state: status.state,
+        providerCallCleanup: 'unknown',
+        providerHangupConfirmed: false,
+        reason,
+      };
     }
 
-    this.terminating = (async () => {
+    // Resolved while the session is still live: finishTermination clears the
+    // account key, so currentOwner() is null by the time the hangup is
+    // announced and a later lookup would lose the only routing key there is.
+    const terminationOwner = this.ownerFor(owner ?? this.sessions.currentOwner() ?? undefined);
+
+    const work = (async () => {
       this.attachGrants.delete(key);
       const callId = this.bridge.detach(context);
       const providerFailed = reason.startsWith('provider_') || reason.startsWith('sideband_');
-      const providerHangupConfirmed = callId ? await this.bridge.hangup(callId) : true;
-      const state = this.sessions.finishTermination(context, providerHangupConfirmed && !providerFailed).state;
+      // No call id means there was never a provider call to hang up. That is a
+      // distinct outcome from a confirmed hangup and must never be reported as
+      // one — but it still leaves nothing outstanding, so it terminates clean.
+      const providerCallCleanup: VoiceProviderCallCleanup = callId
+        ? (await this.bridge.hangup(callId) ? 'confirmed' : 'unresolved')
+        : 'no_provider_call';
+      const cleanShutdown = providerCallCleanup !== 'unresolved' && !providerFailed;
+      const state = this.sessions.finishTermination(context, cleanShutdown).state;
       const result: VoiceTerminationStatus = {
         sessionId,
         epoch,
         state,
-        providerHangupConfirmed: providerHangupConfirmed && !providerFailed,
+        providerCallCleanup,
+        providerHangupConfirmed: providerCallCleanup === 'confirmed',
         reason,
       };
       this.completedTerminations.set(key, result);
-      this.completedOwners.set(key, this.ownerFor(owner ?? this.sessions.currentOwner() ?? undefined));
+      this.completedOwners.set(key, terminationOwner);
       if (this.completedTerminations.size > 16) {
         const oldest = this.completedTerminations.keys().next().value;
         if (oldest) {
@@ -223,15 +308,30 @@ export class VoiceTransport implements Transport {
           this.completedOwners.delete(oldest);
         }
       }
-      this.onHangup?.(result);
-      if (callId && !providerHangupConfirmed) this.reapOrphanHangup(callId, result);
+      this.announceHangup(result, terminationOwner);
+      if (callId && providerCallCleanup === 'unresolved') this.reapOrphanHangup(callId, result, terminationOwner);
       return result;
     })();
+    this.terminating.set(key, work);
     try {
-      return await this.terminating;
+      return await work;
     } finally {
-      this.terminating = null;
+      // Only ever clears this session's own entry, so a slow termination
+      // cannot drop a concurrent one belonging to a different session.
+      this.terminating.delete(key);
     }
+  }
+
+  /**
+   * Terminate on behalf of an internal caller that has no one to await it — the
+   * lease reaper and the provider-failure path. A bare `void this.terminate(…)`
+   * turned any failure into an unhandled rejection; the failure is a server-side
+   * log line instead, and there is no client to report it to.
+   */
+  private terminateDetached(sessionId: string, epoch: number, reason: string): void {
+    void this.terminate(sessionId, epoch, reason).catch(() => {
+      console.error('[voice] Internal termination failed');
+    });
   }
 
   heartbeat(sessionId: string, epoch: number, owner?: string): boolean {
@@ -243,12 +343,34 @@ export class VoiceTransport implements Transport {
     this.socketHealthy = provider;
   }
 
-  setHangupHandler(handler: (status: VoiceTerminationStatus) => void): void {
+  /**
+   * The handler is told *whose* call ended, not just that one did. A hangup
+   * carries the session id, epoch, termination reason and provider-cleanup
+   * state of one account; without the owner the only thing a transport can do
+   * with it is broadcast, which hands those details to every other logged-in
+   * operator.
+   */
+  setHangupHandler(handler: (status: VoiceTerminationStatus, owner: string) => void): void {
     this.onHangup = handler;
   }
 
+  /**
+   * Ownership of a status report follows the session it describes, including
+   * after that session has terminated.
+   *
+   * The gate used to consult `currentOwner()`, which reports null at the
+   * terminal transition — so the moment one operator hung up, the report
+   * describing *their* call (session id, epoch, lifecycle state, spend,
+   * remaining budget, start and last-activity times) became readable by every
+   * other authenticated operator. `sessionOwner()` keeps answering for the
+   * retained session, so the terminal report stays scoped to its owner while
+   * still being idempotently readable by them, and a relay that has never
+   * admitted a session stays readable by anyone.
+   */
   statusFor(owner?: string): ReturnType<VoiceTransport['_status']> | null {
-    if (owner !== undefined && this.sessions.currentOwner() !== null && this.sessions.currentOwner() !== owner) return null;
+    if (owner === undefined) return this._status();
+    const sessionOwner = this.sessions.sessionOwner();
+    if (sessionOwner !== null && sessionOwner !== owner) return null;
     return this._status();
   }
 
@@ -285,7 +407,25 @@ export class VoiceTransport implements Transport {
     };
   }
 
-  private reapOrphanHangup(callId: string, result: VoiceTerminationStatus): void {
+  /**
+   * Announce a completed hangup without letting the announcement decide whether
+   * the termination succeeded.
+   *
+   * The handler is relay-supplied (it emits into a socket.io room), and it ran
+   * inside the termination promise. A throw there rejected the termination
+   * itself — which the reaper and the provider-failure path both start with no
+   * caller to await them, so it surfaced as an unhandled rejection about a
+   * session that had in fact ended cleanly.
+   */
+  private announceHangup(result: VoiceTerminationStatus, owner: string): void {
+    try {
+      this.onHangup?.(result, owner);
+    } catch {
+      console.error('[voice] Hangup announcement failed');
+    }
+  }
+
+  private reapOrphanHangup(callId: string, result: VoiceTerminationStatus, owner: string): void {
     if (this.orphanHangups.has(callId)) return;
     let attempts = 0;
     const retry = async (): Promise<void> => {
@@ -293,8 +433,9 @@ export class VoiceTransport implements Transport {
       const confirmed = await this.bridge.hangup(callId).catch(() => false);
       if (confirmed) {
         this.orphanHangups.delete(callId);
+        result.providerCallCleanup = 'confirmed';
         result.providerHangupConfirmed = true;
-        this.onHangup?.(result);
+        this.announceHangup(result, owner);
         return;
       }
       if (attempts >= ORPHAN_HANGUP_ATTEMPTS) {
@@ -316,7 +457,7 @@ export class VoiceTransport implements Transport {
     this.started = true;
     this.reaper = setInterval(() => {
       for (const expired of this.sessions.reap()) {
-        void this.terminate(expired.context.sessionId, expired.context.epoch, expired.reason);
+        this.terminateDetached(expired.context.sessionId, expired.context.epoch, expired.reason);
       }
     }, Math.min(this.config.sessionLeaseMs, 5_000));
     console.log(`[voice] Transport ready (model: ${VOICE_REALTIME_MODEL}, voice: ${this.config.voice})`);
@@ -329,7 +470,15 @@ export class VoiceTransport implements Transport {
       this.reaper = null;
     }
     const context = this.sessions.currentContext();
-    if (context) await this.terminate(context.sessionId, context.epoch, 'transport_stop');
+    if (context) {
+      // Shutdown must still release timers, grants and the sideband even if the
+      // final termination fails.
+      try {
+        await this.terminate(context.sessionId, context.epoch, 'transport_stop');
+      } catch {
+        console.error('[voice] Termination during shutdown failed');
+      }
+    }
     for (const timer of this.orphanHangups.values()) clearTimeout(timer);
     this.orphanHangups.clear();
     this.attachGrants.clear();

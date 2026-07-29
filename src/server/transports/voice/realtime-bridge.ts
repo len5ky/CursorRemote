@@ -3,7 +3,14 @@ import WebSocket, { type ClientOptions } from 'ws';
 import type { VoiceConfig } from '../../types.js';
 import type { VoiceToolRouter } from './tools.js';
 import { VOICE_TOOL_SCHEMAS } from './tools.js';
-import { VOICE_MAX_TOOL_ARGUMENT_BYTES, VOICE_REALTIME_MODEL } from './constants.js';
+import {
+  VOICE_MAX_PROVIDER_EVENT_BYTES,
+  VOICE_MAX_PROVIDER_FRAME_BYTES,
+  VOICE_MAX_TOOL_ARGUMENT_BYTES,
+  VOICE_MAX_TOOL_CALL_ID_BYTES,
+  VOICE_MAX_TOOL_NAME_BYTES,
+  VOICE_REALTIME_MODEL,
+} from './constants.js';
 import type { VoiceSessionContext } from './session.js';
 
 /**
@@ -174,25 +181,46 @@ export class RealtimeBridge {
     return new Promise((resolve, reject) => {
       const ws = this.websocketFactory(`${OPENAI_WS_BASE}?call_id=${encodeURIComponent(callId)}`, {
         headers: { Authorization: `Bearer ${this.config.openaiApiKey}` },
-        maxPayload: 16 * 1024,
+        maxPayload: VOICE_MAX_PROVIDER_FRAME_BYTES,
       });
       this.ws = ws;
 
+      // Every terminal path — open, error, close, timeout — routes through
+      // `settle`, so the attach promise resolves or rejects exactly once. A
+      // socket that closed *before* it ever opened used to settle nothing at
+      // all: the caller's HTTP request hung for the full 15s connect timer over
+      // a connection that was already gone, while the session it had just
+      // activated stayed activated.
       let settled = false;
-      const timer = setTimeout(() => {
+      let opened = false;
+      let failureReported = false;
+      const settle = (err?: Error): void => {
         if (settled) return;
         settled = true;
-        reject(new Error('Sideband WS connect timeout'));
+        clearTimeout(timer);
+        if (err) reject(err);
+        else resolve();
+      };
+      /** One dead socket is one failure, however many events it emits on the way down. */
+      const reportFailure = (reason: string): void => {
+        if (failureReported || this.closedByUs.has(ws)) return;
+        failureReported = true;
+        this.authority.providerFailure(context, reason);
+      };
+
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settle(new Error('Sideband WS connect timeout'));
         this.authority.providerFailure(context, 'sideband_connect_timeout');
+        failureReported = true;
         this.closedByUs.add(ws);
         try { ws.close(); } catch { /* ok */ }
       }, 15_000);
 
       ws.on('open', () => {
-        clearTimeout(timer);
-        settled = true;
+        opened = true;
         console.log(`[dicktator] Sideband attached (call ${callId.substring(0, 12)}...)`);
-        resolve();
+        settle();
       });
       ws.on('message', (raw) => {
         if (!this.authority.accepts(context)) return;
@@ -201,20 +229,19 @@ export class RealtimeBridge {
         );
       });
       ws.on('error', () => {
-        clearTimeout(timer);
         console.error('[voice] Sideband WebSocket error');
-        if (!settled) {
-          settled = true;
-          reject(new Error('Sideband WebSocket connection failed'));
-        }
-        if (!this.closedByUs.has(ws)) this.authority.providerFailure(context, 'sideband_error');
+        settle(new Error('Sideband WebSocket connection failed'));
+        reportFailure('sideband_error');
       });
       ws.on('close', () => {
-        if (!this.closedByUs.has(ws)) {
-          console.log('[dicktator] Sideband WS closed');
-          this.authority.providerFailure(context, 'sideband_closed');
-        }
+        // Release only the socket. `callId` and `context` stay put: the browser
+        // did create a provider call, and termination needs the id to hang it
+        // up. Dropping them here would report `no_provider_call` and orphan a
+        // live, billable call at the provider.
         if (this.ws === ws) this.ws = null;
+        if (!this.closedByUs.has(ws)) console.log('[dicktator] Sideband WS closed');
+        settle(new Error('Sideband WebSocket closed before it opened'));
+        reportFailure(opened ? 'sideband_closed' : 'sideband_closed_before_open');
       });
     });
   }
@@ -257,25 +284,21 @@ export class RealtimeBridge {
     this.ws!.send(JSON.stringify(event));
   }
 
-  /**
-   * Push a proactive notification into the conversation and ask the model to
-   * speak. Used for new pendingApprovals / blocked agents.
-   */
-  announce(text: string, context: VoiceSessionContext): void {
-    if (!this.connectedFor(context)) return;
-    this.send({
-      type: 'conversation.item.create',
-      item: {
-        type: 'message',
-        role: 'system',
-        content: [{ type: 'input_text', text: `[proactive notification — briefly tell the user] ${text.slice(0, 240)}` }],
-      },
-    }, context);
-    this.send({ type: 'response.create' }, context);
-  }
+  // The only conversation item this bridge may create is the output of a tool
+  // the model itself invoked (see 'response.function_call_arguments.done'
+  // below). There is deliberately no helper that authors a turn: a synthetic
+  // message is indistinguishable to the model from something the user actually
+  // said, and an unreferenced helper is one import away from being a live path.
 
   private async onServerEvent(raw: string, context: VoiceSessionContext): Promise<void> {
-    if (raw.length > 32_768 || !this.authority.accepts(context)) return;
+    // Oversize provider input is refused, not fatal: the event is dropped and
+    // the sideband, session and lease all continue. Byte length (not UTF-16
+    // code units) is what the ws frame ceiling bounds, so measure the same way.
+    if (Buffer.byteLength(raw, 'utf8') > VOICE_MAX_PROVIDER_EVENT_BYTES) {
+      console.warn('[voice] Dropped an oversized provider event');
+      return;
+    }
+    if (!this.authority.accepts(context)) return;
     let event: { type?: string; [key: string]: unknown };
     try {
       event = JSON.parse(raw);
@@ -291,16 +314,38 @@ export class RealtimeBridge {
         break;
       }
       case 'response.function_call_arguments.done': {
-        const name = typeof event.name === 'string' ? event.name.slice(0, 128) : '';
-        const functionCallId = typeof event.call_id === 'string' ? event.call_id.slice(0, 256) : '';
+        // Every one of these caps is declared in bytes, so all three are
+        // measured in bytes. `rawArgs.length` counted UTF-16 code units, so an
+        // argument blob written in any non-ASCII script passed an 8 KiB cap at
+        // up to 24 KiB (32 KiB with astral characters) and was parsed and
+        // dispatched to the tool router anyway.
+        //
+        // An envelope that breaks any of those bounds gets a **non-writing**
+        // policy: nothing is created in the provider conversation and the
+        // session is ended with a definite reason. The alternative — answering
+        // it with `conversation.item.create` — writes into the conversation on
+        // the authority of a `call_id` that was itself over the bound, i.e. one
+        // that may be truncated or fabricated, in reply to arguments that were
+        // never parsed. There is no version of that which is safe, and the
+        // envelope is not something a well-behaved provider sends, so the
+        // honest outcome is a bounded failure and a hangup rather than a
+        // best-effort reply.
+        const rawName = typeof event.name === 'string' ? event.name : '';
+        const rawCallId = typeof event.call_id === 'string' ? event.call_id : '';
         const rawArgs = typeof event.arguments === 'string' ? event.arguments : '{}';
-        if (!name || !functionCallId || rawArgs.length > VOICE_MAX_TOOL_ARGUMENT_BYTES) {
-          this.send({
-            type: 'conversation.item.create',
-            item: { type: 'function_call_output', call_id: functionCallId, output: 'Invalid or oversized voice tool request.' },
-          }, context);
+        const withinEnvelopeBounds =
+          rawName.length > 0
+          && rawCallId.length > 0
+          && Buffer.byteLength(rawName, 'utf8') <= VOICE_MAX_TOOL_NAME_BYTES
+          && Buffer.byteLength(rawCallId, 'utf8') <= VOICE_MAX_TOOL_CALL_ID_BYTES
+          && Buffer.byteLength(rawArgs, 'utf8') <= VOICE_MAX_TOOL_ARGUMENT_BYTES;
+        if (!withinEnvelopeBounds) {
+          console.warn('[voice] Refused an out-of-bounds provider tool envelope; ending the session');
+          this.authority.providerFailure(context, 'provider_tool_envelope_rejected');
           return;
         }
+        const name = rawName;
+        const functionCallId = rawCallId;
         let parsed: unknown;
         try {
           parsed = JSON.parse(rawArgs);

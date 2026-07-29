@@ -346,6 +346,13 @@ export interface ServerConfig {
   webappPassword: string;
   windowTitleQualifier: boolean;
   dataDir: string;
+  /**
+   * `TAILSCALE_SERVE_IDENTITY` — the operator declaring that this relay is
+   * published through Tailscale Serve and reachable no other way. Only then are
+   * Serve's verified `Tailscale-User-*` headers read, and only from a loopback
+   * peer. See `src/server/request-identity.ts`.
+   */
+  trustTailscaleIdentity: boolean;
   telegram: TelegramConfig;
   voice: VoiceConfig;
 }
@@ -354,12 +361,28 @@ export interface VoiceConfig {
   enabled: boolean;
   /** OpenAI API key used to mint ephemeral client secrets + sideband WS. Never logged. */
   openaiApiKey: string;
+  /**
+   * Canonical public origin the voice PWA is served from, e.g.
+   * `https://<machine>.<tailnet>.ts.net`. Validated at startup and used as the
+   * Origin allow set; never inferred from Host or any X-Forwarded-* header.
+   * Empty means loopback development origins only.
+   */
+  publicOrigin: string;
   /** Documented, read-only Hermes context endpoint. Empty means unavailable. */
   hermesReadContextUrl: string;
   /** Optional server-only bearer for the configured Hermes read endpoint. Never returned or logged. */
   hermesReadContextToken: string;
   /** Output voice name. */
   voice: string;
+  /**
+   * Stable single-operator budget account.
+   *
+   * The cost ledger is keyed by this, never by a web session token: a token is
+   * ephemeral, so keying the daily cap on one meant logging out and back in
+   * handed the operator a fresh cap. Never returned in a response, never
+   * logged, and stored in the ledger only as a hash.
+   */
+  accountId: string;
   /** Versioned, known realtime unit price required before admission. */
   usagePriceVersion: string;
   usageUnitPriceCentsPerMinute: number;
@@ -371,7 +394,6 @@ export interface VoiceConfig {
    *  During the grace window lastActivityAt is stale but the session is not yet terminated. */
   sessionIdleGraceMs: number;
   sessionLeaseMs: number;
-  targetMaxAgeMs: number;
 }
 
 export interface TelegramConfig {

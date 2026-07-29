@@ -1,4 +1,5 @@
 import type { VoiceConfig } from '../../src/server/types.js';
+import { KNOWN_VOICE_PRICE_VERSION } from '../../src/server/transports/voice/pricing.js';
 import type {
   HermesConversationReader,
   HermesConversationSnapshot,
@@ -63,9 +64,18 @@ export class FakeRealtimeSocket {
   readonly sent: string[] = [];
   private readonly handlers = new Map<string, (value?: unknown) => void>();
 
+  /**
+   * @param autoOpen `false` models a socket that never reaches OPEN — the
+   * provider accepted the TCP connection and then closed, or the handshake was
+   * refused. The attach promise has to settle on that path too.
+   */
+  constructor(private readonly autoOpen = true) {
+    if (!autoOpen) this.readyState = 0;
+  }
+
   on(event: string, handler: (value?: unknown) => void): this {
     this.handlers.set(event, handler);
-    if (event === 'open') queueMicrotask(() => handler());
+    if (event === 'open' && this.autoOpen) queueMicrotask(() => handler());
     return this;
   }
 
@@ -94,10 +104,14 @@ export function testVoiceConfig(overrides: Partial<VoiceConfig> = {}): VoiceConf
   return {
     enabled: true,
     openaiApiKey: 'server-key-for-test',
+    publicOrigin: '',
     hermesReadContextUrl: '',
     hermesReadContextToken: '',
     voice: 'marin',
-    usagePriceVersion: 'test-v1',
+    accountId: 'test-operator',
+    // A real entry from the frozen price table: admission requires a *known*
+    // version, so a made-up fixture string would deny every test session.
+    usagePriceVersion: KNOWN_VOICE_PRICE_VERSION,
     usageUnitPriceCentsPerMinute: 1,
     usageDailyCapCents: 100,
     usagePerSessionCapCents: 10,
@@ -105,7 +119,6 @@ export function testVoiceConfig(overrides: Partial<VoiceConfig> = {}): VoiceConf
     sessionIdleMs: 60_000,
     sessionIdleGraceMs: 5_000,
     sessionLeaseMs: 30_000,
-    targetMaxAgeMs: 5_000,
     ...overrides,
   };
 }

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'crypto';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { dirname } from 'path';
+import { isKnownVoicePriceVersion } from './pricing.js';
 
 export type VoiceSessionState = 'idle' | 'admitting' | 'active' | 'terminating' | 'terminated' | 'failed';
 export type VoiceBudgetState = 'ok' | 'budget_draining' | 'hard_exceeded';
@@ -61,6 +62,12 @@ interface UsageFile {
 
 interface LiveSession {
   context: VoiceSessionContext;
+  /**
+   * Who may act on this session — the web session token. Ephemeral by design;
+   * it changes on every login and must never reach the ledger.
+   */
+  ownerKey: string;
+  /** Stable single-operator budget identity. Hashed before it hits the ledger. */
   accountKey: string;
   reservationCents: number;
   createdAt: number;
@@ -168,10 +175,18 @@ export class VoiceSessionController {
     this.ledger = new VoiceUsageLedger(options.dataPath);
   }
 
-  admit(accountKey: string): { ok: boolean; context?: VoiceSessionContext; error?: string } {
+  /**
+   * @param ownerKey Who may act on the session (the web session token).
+   * @param budgetAccountKey The stable operator the spend is charged to.
+   *   Defaults to the owner only for callers that genuinely have one identity;
+   *   the transport always passes the configured, stable account so a fresh
+   *   login cannot buy a fresh daily cap.
+   */
+  admit(ownerKey: string, budgetAccountKey: string = ownerKey): { ok: boolean; context?: VoiceSessionContext; error?: string } {
     if (!this.hasKnownPricing()) return { ok: false, error: 'known versioned pricing is required for voice admission' };
     if (this.session && !this.isTerminal(this.session.state)) return { ok: false, error: 'voice session already live' };
 
+    const accountKey = budgetAccountKey;
     const now = this.now();
     const context: VoiceSessionContext = {
       sessionId: randomUUID(),
@@ -195,6 +210,7 @@ export class VoiceSessionController {
 
     this.session = {
       context,
+      ownerKey,
       accountKey,
       reservationCents: this.options.perSessionCapCents,
       createdAt: now,
@@ -232,10 +248,25 @@ export class VoiceSessionController {
     return this.session ? { ...this.session.context } : null;
   }
 
-  /** The account key bound to the live session, or null if idle/terminated. */
+  /** The owner bound to the live session, or null if idle/terminated. */
   currentOwner(): string | null {
     if (!this.session || this.isTerminal(this.session.state)) return null;
-    return this.session.accountKey;
+    return this.session.ownerKey;
+  }
+
+  /**
+   * The account key of the retained session whatever its state, or null when no
+   * session has run since the last admission.
+   *
+   * `status()` keeps reporting a terminated session's id, epoch, lifecycle
+   * state and budget until a new admission replaces it, so anything that gates
+   * on ownership *of that report* has to ask who owned it — not who owns a
+   * live call. `currentOwner()` answers the second question and drops to null
+   * at the terminal transition, which is exactly when the report is still
+   * readable and still private.
+   */
+  sessionOwner(): string | null {
+    return this.session?.ownerKey ?? null;
   }
 
   heartbeat(sessionId: string, epoch: number): boolean {
@@ -254,10 +285,25 @@ export class VoiceSessionController {
     return true;
   }
 
+  /**
+   * Record the cost of **one** provider response.
+   *
+   * Provider `response.done` usage is per-response: the event describes the
+   * response that just finished, not a running total for the call. Assigning it
+   * to the session therefore lost every earlier response — a call that cost 30
+   * then 40 recorded 40 — and the daily ledger, which is what survives a
+   * restart, undercounted accordingly. Costs accumulate.
+   *
+   * `estimated` is the same per-response quantity priced locally from audio
+   * duration when the provider does not report cents, so it accumulates the
+   * same way; the wall-clock estimate in `estimateCents` remains a separate,
+   * independent conservative floor.
+   */
   reportSpend(context: VoiceSessionContext, cents: number, source: 'estimated' | 'reported' = 'reported'): boolean {
     if (!this.matches(context) || !Number.isFinite(cents) || cents < 0) return false;
-    if (source === 'reported') this.session!.reportedCents = Math.ceil(cents);
-    else this.session!.estimatedUsageCents = Math.max(this.session!.estimatedUsageCents ?? 0, Math.ceil(cents));
+    const responseCents = Math.ceil(cents);
+    if (source === 'reported') this.session!.reportedCents = (this.session!.reportedCents ?? 0) + responseCents;
+    else this.session!.estimatedUsageCents = (this.session!.estimatedUsageCents ?? 0) + responseCents;
     return true;
   }
 
@@ -271,7 +317,11 @@ export class VoiceSessionController {
   finishTermination(context: VoiceSessionContext, providerHangupConfirmed: boolean): VoiceSessionStatus {
     if (!this.matches(context)) return this.status();
     const session = this.session!;
-    const spend = session.reportedCents ?? this.estimateCents(session);
+    // Settle exactly what the live cap was already charging. Preferring the
+    // reported total on its own could settle *below* the conservative estimate
+    // the budget brake had been enforcing all call, so the durable ledger would
+    // record less than the running session had already spent against the cap.
+    const spend = this.spendCents(session);
     try {
       this.ledger.settle(session.context.sessionId, this.now(), spend);
     } catch {
@@ -319,10 +369,18 @@ export class VoiceSessionController {
     };
   }
 
+  /**
+   * The single number the live cap, the ledger settlement and the status report
+   * all use, so none of them can disagree about what a call has cost.
+   */
+  private spendCents(session: LiveSession): number {
+    return Math.max(this.estimateCents(session), session.estimatedUsageCents ?? 0, session.reportedCents ?? 0);
+  }
+
   private budget(session: LiveSession): VoiceBudgetStatus {
     const estimatedCents = Math.max(this.estimateCents(session), session.estimatedUsageCents ?? 0);
     const reportedCents = session.reportedCents;
-    const spentCents = Math.max(estimatedCents, reportedCents ?? 0);
+    const spentCents = this.spendCents(session);
     const dailyTotalCents = this.ledger.dailyTotal(session.accountKey, this.now());
     const remainingCents = Math.max(0, Math.min(
       session.reservationCents - spentCents,
@@ -365,8 +423,18 @@ export class VoiceSessionController {
     return 'idle_expired';
   }
 
+  /**
+   * A paid session is only admitted against a price version this code knows.
+   *
+   * "Non-empty string" was not that check: any value an operator invented
+   * satisfied it, so a call could be admitted, metered and settled against a
+   * rate card that had never been reviewed. The frozen table in `pricing.ts` is
+   * the authority.
+   */
   private hasKnownPricing(): boolean {
-    return this.options.priceVersion.trim().length > 0 && Number.isFinite(this.options.unitPriceCentsPerMinute) && this.options.unitPriceCentsPerMinute > 0;
+    return isKnownVoicePriceVersion(this.options.priceVersion)
+      && Number.isFinite(this.options.unitPriceCentsPerMinute)
+      && this.options.unitPriceCentsPerMinute > 0;
   }
 
   private isTerminal(state: VoiceSessionState): boolean {

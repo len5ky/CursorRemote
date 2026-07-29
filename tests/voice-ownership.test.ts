@@ -7,12 +7,13 @@ import { VoiceSessionController } from '../src/server/transports/voice/session.j
 import { VoiceTransport } from '../src/server/transports/voice/index.js';
 import type WebSocket from 'ws';
 import { FakeHermesConversationReader, FakeRealtimeSocket, testVoiceConfig } from './helpers/voice-fixtures.js';
+import { KNOWN_VOICE_PRICE_VERSION } from '../src/server/transports/voice/pricing.js';
 
 function makeController(nowRef: { value: number }) {
   const dir = mkdtempSync(join(tmpdir(), 'cursor-remote-voice-own-'));
   const controller = new VoiceSessionController({
     dataPath: join(dir, 'voice-usage.json'),
-    priceVersion: 'test-v1',
+    priceVersion: KNOWN_VOICE_PRICE_VERSION,
     unitPriceCentsPerMinute: 1,
     dailyCapCents: 100,
     perSessionCapCents: 10,

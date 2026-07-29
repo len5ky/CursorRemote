@@ -116,7 +116,8 @@ describe('private voice mocked provider lifecycle smoke', () => {
 
     const page = await fetch(`${baseUrl}/voice`, { redirect: 'manual' });
     assert.equal(page.status, 302, 'the voice page must redirect to login');
-    assert.equal(page.headers.get('location'), '/login');
+    // Back into the installed PWA scope, not out to the remote-control root.
+    assert.equal(page.headers.get('location'), '/login?next=%2Fvoice');
   });
 
   it('authenticates and mints a browser-only credential with no-store', async () => {

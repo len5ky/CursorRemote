@@ -71,6 +71,10 @@ boundary. The code graph itself must make mutation impossible.
 
 ### 2.5 Phone surface
 
+- **Browser PWA only for V1.** The supported client is the installable browser
+  PWA at `/voice`, including when installed from Chrome on Android. Native
+  Android and Android Auto clients are unsupported, not built, not tested and
+  not shipped for V1.
 - One screen: title, state line, one Call/Hang up button, one status line.
 - States: Ready, Microphone requested, Connecting, Listening, Speaking,
   Reconnecting, Ending, Ended, Error.
@@ -150,9 +154,11 @@ No automated step makes an OpenAI Realtime call.
 
 - **Live verification outstanding.** Real microphone/WebRTC interoperability is
   unproven until an authorised operator smoke runs against OpenAI.
-- **Android client out of sync.** `apps/dicktator-android` Android Auto
-  Approve/Later still call the removed `/api/voice/confirm` and
-  `/api/voice/defer` routes and will fail against this server. Its phone call
-  path still matches. Aligning or retiring that client is tracked separately.
+- **Native Android/Auto unsupported for V1.** The archived
+  `apps/dicktator-android` client targets the removed mutation-capable contract;
+  its Android Auto Approve/Later controls call `/api/voice/confirm` and
+  `/api/voice/defer`, which are not served. It is not part of the V1 product,
+  and any native port or retirement is future work. Use the browser PWA at
+  `/voice` instead.
 - **Playwright mobile-viewport smoke** is not wired; browser lifecycle coverage
   is jsdom-based.

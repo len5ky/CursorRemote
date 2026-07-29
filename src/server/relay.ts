@@ -17,16 +17,119 @@ import {
   type WebappSessionStore,
 } from './webapp-sessions.js';
 import type { VoiceTransport } from './transports/voice/index.js';
+import { createVoiceOriginPolicy, type VoiceOriginPolicy } from './transports/voice/origin-policy.js';
+import { FixedWindowRateLimiter } from './rate-limit.js';
+import { truncateUtf8 } from './transports/voice/tools.js';
+import { resolveLoginIdentity } from './request-identity.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-interface RateLimitEntry {
-  count: number;
-  resetAt: number;
+/**
+ * Rate-limit budgets. `maxKeys` bounds the tables: the login limiter is keyed
+ * by verified identity or peer address and the voice limiter by authenticated
+ * session, so neither can be grown without limit by a caller, but both are
+ * capped anyway.
+ */
+const LOGIN_RATE_LIMIT = { limit: 10, windowMs: 60_000, maxKeys: 4_096 } as const;
+/**
+ * The abuse guard that survives *above* per-identity buckets.
+ *
+ * Giving each verified Tailscale identity its own bucket is what stops one
+ * operator's typos locking out the tailnet — but it also means the number of
+ * buckets is the number of identities. This is the ceiling on login attempts as
+ * a whole, so no amount of identity churn buys unlimited password guesses.
+ */
+const LOGIN_GLOBAL_RATE_LIMIT = { limit: 60, windowMs: 60_000, maxKeys: 1 } as const;
+const VOICE_RATE_LIMIT = { limit: 30, windowMs: 60_000, maxKeys: 4_096 } as const;
+
+/**
+ * The private voice assets, and the only URL paths that may reach them.
+ *
+ * They live in the same directory as the public client, which `express.static`
+ * serves wholesale. A route registered before that mount matches one exact
+ * string; the static mount does not — it decodes the pathname and then
+ * `path.normalize`s it, so `//voice.js`, `/./voice.js`, `/voice%2Ejs` and
+ * `/a/../voice.js` all resolved to the same file while missing the route match
+ * entirely, and came back with no session check, no CSP, no `Permissions-Policy`
+ * and a cacheable `Cache-Control`.
+ *
+ * So the request path is normalized the same way `send` normalizes it, and any
+ * spelling that lands on a private asset is claimed here — before the static
+ * mount can ever see it.
+ */
+const VOICE_PRIVATE_ASSETS: ReadonlyMap<string, { file: string; type: string }> = new Map([
+  ['/voice', { file: 'voice.html', type: 'html' }],
+  ['/voice.html', { file: 'voice.html', type: 'html' }],
+  ['/voice.js', { file: 'voice.js', type: 'js' }],
+  ['/voice.css', { file: 'voice.css', type: 'css' }],
+]);
+
+/** Where an unauthenticated voice request is sent back to after logging in. */
+const VOICE_LOGIN_RETURN_PATH = '/voice';
+
+/**
+ * Resolve a request path to the file `express.static`/`send` would resolve it
+ * to: percent-decoded once, empty and `.` segments dropped, `..` popped.
+ *
+ * Returns `null` for a path that cannot be decoded or carries a NUL — `send`
+ * refuses those too, so refusing here keeps the two in step rather than letting
+ * one of them make a decision the other has not seen.
+ */
+export function normalizeRequestPath(rawPath: string): string | null {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(rawPath);
+  } catch {
+    return null;
+  }
+  if (decoded.includes('\0')) return null;
+  const segments: string[] = [];
+  for (const segment of decoded.split('/')) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..') {
+      segments.pop();
+      continue;
+    }
+    segments.push(segment);
+  }
+  return `/${segments.join('/')}`;
 }
 
-const LOGIN_PAGE_HTML = `<!DOCTYPE html>
+/**
+ * Where the login page sends the operator afterwards.
+ *
+ * The voice PWA is installed at the `/voice` scope, so bouncing a login through
+ * the origin root drops the operator out of the installed app and into the
+ * remote-control client. The return target is therefore honoured — but only
+ * from a closed allow-list, because "same-origin path" is not a property that
+ * survives contact with `//evil.example/x` or `javascript:`.
+ */
+const LOGIN_REDIRECT_TARGETS: ReadonlySet<string> = new Set(['/voice', '/voice.html']);
+
+export function resolveLoginRedirect(raw: unknown): string {
+  return typeof raw === 'string' && LOGIN_REDIRECT_TARGETS.has(raw) ? raw : '/';
+}
+
+/**
+ * Render a caught value for the *server log only*.
+ *
+ * Bounded so a hostile upstream cannot flood the log through an error message,
+ * and stack-free because a stack in a log line is noise the operator has to
+ * scroll past. Never pass the result to a response body.
+ */
+function errorDetail(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.slice(0, 300);
+}
+
+function loginPageHtml(nextPath: string): string {
+  // `nextPath` is one of a closed set of literals (see resolveLoginRedirect),
+  // JSON-encoded into a script literal. Nothing caller-supplied reaches here.
+  return LOGIN_PAGE_TEMPLATE.replace('__LOGIN_REDIRECT__', JSON.stringify(nextPath));
+}
+
+const LOGIN_PAGE_TEMPLATE = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -93,7 +196,7 @@ const LOGIN_PAGE_HTML = `<!DOCTYPE html>
         const data = await res.json();
         if (res.ok && data.token) {
           localStorage.setItem('cursor-remote-token', data.token);
-          window.location.href = '/';
+          window.location.href = __LOGIN_REDIRECT__;
         } else {
           err.textContent = data.error || 'Invalid password';
           err.style.display = 'block';
@@ -118,17 +221,61 @@ export class Relay {
   private cdpBridge: CDPBridge;
 
   private sessionStore: WebappSessionStore;
-  private loginAttempts = new Map<string, RateLimitEntry>();
-  private voiceAttempts = new Map<string, RateLimitEntry>();
+  private loginLimiter = new FixedWindowRateLimiter(LOGIN_RATE_LIMIT);
+  private loginGlobalLimiter = new FixedWindowRateLimiter(LOGIN_GLOBAL_RATE_LIMIT);
+  private voiceLimiter = new FixedWindowRateLimiter(VOICE_RATE_LIMIT);
   private voiceTransport: VoiceTransport | null = null;
+  private voiceOriginPolicy: VoiceOriginPolicy;
   /** Authenticated session tokens with ≥ 1 connected socket.io client. */
   private activeSockets = new Map<string, number>();
 
   /** Max-Age for session cookie (30 days), aligned with typical “stay signed in” expectation. */
   private static readonly SESSION_COOKIE_MAX_AGE_SEC = 30 * 24 * 60 * 60;
 
+  /**
+   * Room holding every socket authenticated as one account. The prefix keeps
+   * the name out of socket.io's per-socket id room namespace, and it matches
+   * VoiceTransport's owner key — the session token, or `local` when the relay
+   * runs unauthenticated.
+   */
+  private static accountRoom(owner: string): string {
+    return `acct:${owner}`;
+  }
+
   private get authEnabled(): boolean {
     return this.config.webappPassword.length > 0;
+  }
+
+  /**
+   * Voice is enabled but no password is configured. loadConfig() refuses to
+   * build such a config at all; this is the second gate, so a relay assembled
+   * any other way still cannot serve the voice surface open to the tailnet.
+   */
+  private get voiceUnprotected(): boolean {
+    return this.config.voice?.enabled === true && !this.authEnabled;
+  }
+
+  /** Logged once per process: the misconfiguration is static, the callers are not. */
+  private voiceUnprotectedLogged = false;
+
+  /**
+   * Refuse, and tell the caller nothing about why.
+   *
+   * This surface is reachable by anything that can hit the port, including an
+   * unauthenticated caller. Naming the missing setting in the response body
+   * would hand that caller a map of how the deployment is wired, so the setting
+   * name goes to the operator's log and the caller gets a bare refusal.
+   */
+  private refuseUnprotectedVoice(res: express.Response): void {
+    if (!this.voiceUnprotectedLogged) {
+      this.voiceUnprotectedLogged = true;
+      console.error(
+        '[relay] Voice is enabled but WEBAPP_PASSWORD is not set; '
+        + 'the private voice surface refuses to run unauthenticated. '
+        + 'Set WEBAPP_PASSWORD or disable voice.',
+      );
+    }
+    res.status(503).json({ error: 'Voice is unavailable.' });
   }
 
   constructor(
@@ -142,13 +289,22 @@ export class Relay {
     this.commandExecutor = commandExecutor;
     this.cdpBridge = cdpBridge;
     this.sessionStore = createWebappSessionStore(config.dataDir);
+    this.voiceOriginPolicy = createVoiceOriginPolicy({
+      publicOrigin: config.voice?.publicOrigin ?? '',
+      serverPort: config.serverPort,
+    });
 
     this.app = express();
     this.httpServer = createServer(this.app);
     this.io = new SocketServer(this.httpServer, {
       serveClient: false,
       cors: {
-        origin: true,
+        // `origin: true` reflects whatever Origin the caller sent and, with
+        // `credentials: true`, tells the browser to attach the session cookie
+        // to it — which is not a CORS policy, it is the absence of one. The
+        // allow set is the same validated canonical origin (plus the loopback
+        // development origins) the voice routes already enforce.
+        origin: [...this.voiceOriginPolicy.allowed],
         methods: ['GET', 'POST'],
         credentials: true,
       },
@@ -181,40 +337,17 @@ export class Relay {
     });
   }
 
+  /**
+   * The real peer address, never `X-Forwarded-For`.
+   *
+   * The relay binds loopback and the documented deployment is Tailscale Serve
+   * forwarding to it, so every request arrives from 127.0.0.1 and any
+   * `X-Forwarded-*` header is simply whatever the caller typed. Keying a rate
+   * limit off that let one client rotate the header and mint an unlimited
+   * number of fresh buckets, which made the login limit decorative.
+   */
   private getClientIp(req: express.Request): string {
-    const forwarded = req.headers['x-forwarded-for'];
-    if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
     return req.socket.remoteAddress ?? 'unknown';
-  }
-
-  private checkRateLimit(ip: string): { allowed: boolean; retryAfter: number } {
-    const now = Date.now();
-    const entry = this.loginAttempts.get(ip);
-
-    if (!entry || now >= entry.resetAt) {
-      this.loginAttempts.set(ip, { count: 1, resetAt: now + 60_000 });
-      return { allowed: true, retryAfter: 0 };
-    }
-
-    if (entry.count >= 10) {
-      const retryAfter = Math.ceil((entry.resetAt - now) / 1000);
-      return { allowed: false, retryAfter };
-    }
-
-    entry.count++;
-    return { allowed: true, retryAfter: 0 };
-  }
-
-  private checkVoiceRateLimit(key: string): { allowed: boolean; retryAfter: number } {
-    const now = Date.now();
-    const entry = this.voiceAttempts.get(key);
-    if (!entry || now >= entry.resetAt) {
-      this.voiceAttempts.set(key, { count: 1, resetAt: now + 60_000 });
-      return { allowed: true, retryAfter: 0 };
-    }
-    if (entry.count >= 30) return { allowed: false, retryAfter: Math.ceil((entry.resetAt - now) / 1000) };
-    entry.count++;
-    return { allowed: true, retryAfter: 0 };
   }
 
   /** First matching credential that exists in the persisted session store. */
@@ -253,13 +386,49 @@ export class Relay {
       if (!owner) return false;
       return (this.activeSockets.get(owner) ?? 0) > 0;
     });
-    transport.setHangupHandler((status) => this.io.emit('voice:hangup', status));
+    // Scoped to the owning account's room, never broadcast: a hangup carries
+    // one account's session id, epoch, reason and provider-cleanup state, and a
+    // client keying its UI off `voice:hangup` would tear down a call it does
+    // not own. Every socket the owner has open is in the room, so multiple tabs
+    // still all receive it.
+    transport.setHangupHandler((status, owner) => {
+      this.io.to(Relay.accountRoom(owner)).emit('voice:hangup', status);
+    });
   }
 
   private setupRoutes(): void {
     const clientDir = join(__dirname, '..', 'client');
 
     this.app.use(express.json({ limit: '16kb' }));
+
+    // `navigator.sendBeacon` is the only way a hiding page can still ask for a
+    // hangup, and a beacon built from a bare string is delivered as
+    // text/plain — which express.json() leaves unparsed, so the request used to
+    // 400 and the call survived until the reaper. Accept the text body on the
+    // voice routes and decode it as JSON, without loosening any other route.
+    const normalizeVoiceBeaconBody: express.RequestHandler = (req, res, next) => {
+      if (typeof req.body !== 'string') return next();
+      const raw = req.body.trim();
+      if (raw.length === 0) {
+        req.body = {};
+        return next();
+      }
+      try {
+        const parsed: unknown = JSON.parse(raw);
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+          return res.status(400).json({ error: 'Malformed voice request body' });
+        }
+        req.body = parsed;
+      } catch {
+        return res.status(400).json({ error: 'Malformed voice request body' });
+      }
+      return next();
+    };
+    this.app.use(
+      '/api/voice',
+      express.text({ type: ['text/plain', 'text/*'], limit: '16kb' }),
+      normalizeVoiceBeaconBody,
+    );
 
     // --- Voice ("car mode") endpoints. Auth-checked explicitly because they
     // are registered before the trailing auth middleware. ---
@@ -270,8 +439,15 @@ export class Relay {
     };
     const voiceAuthOk = (req: express.Request, res: express.Response): boolean => {
       noStore(res);
-      const origin = req.headers.origin;
-      if (typeof origin === 'string' && origin !== `${req.protocol}://${req.get('host')}`) {
+      if (this.voiceUnprotected) {
+        this.refuseUnprotectedVoice(res);
+        return false;
+      }
+      // The allow set comes from validated configuration only. req.protocol,
+      // Host and every X-Forwarded-* header are attacker-controlled on a direct
+      // request to the loopback port, and Tailscale Serve legitimately forwards
+      // an https:// origin over plain http, so none of them are consulted here.
+      if (!this.voiceOriginPolicy.allows(req.headers.origin)) {
         res.status(403).json({ error: 'Origin denied' });
         return false;
       }
@@ -279,8 +455,11 @@ export class Relay {
         res.status(401).json({ error: 'Unauthorized' });
         return false;
       }
+      // Authenticated identity first: one operator's traffic must not spend
+      // another's budget, and the fallback is the real peer address, never a
+      // caller-supplied one.
       const key = this.resolveHttpSession(req) ?? this.getClientIp(req);
-      const rate = this.checkVoiceRateLimit(key);
+      const rate = this.voiceLimiter.check(key);
       if (!rate.allowed) {
         res.setHeader('Retry-After', String(rate.retryAfter));
         res.status(429).json({ error: 'Voice request rate limit exceeded' });
@@ -302,8 +481,11 @@ export class Relay {
           epoch: secret.epoch,
           attachToken: secret.attachToken,
         });
-      } catch {
-        res.status(500).json({ error: 'Failed to mint voice session' });
+      } catch (err) {
+        // The provider's status/reason is operator diagnostics, not a response
+        // body: it describes an upstream the caller has no business probing.
+        console.error(`[voice] Client secret mint failed: ${errorDetail(err)}`);
+        res.status(500).json({ error: 'Failed to start a voice session.' });
       }
     });
 
@@ -327,6 +509,9 @@ export class Relay {
           res.status(403).json({ error: 'Unauthorized' });
           return;
         }
+        // Adapter/provider cause stays server-side; the caller learns only that
+        // the attach did not happen.
+        console.error(`[voice] Sideband attach failed: ${errorDetail(err)}`);
         res.status(409).json({ error: 'Voice session attach denied' });
       }
     });
@@ -339,7 +524,11 @@ export class Relay {
       }
       const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId : '';
       const epoch = Number.isSafeInteger(req.body?.epoch) ? req.body.epoch : -1;
-      const reason = typeof req.body?.reason === 'string' ? req.body.reason.slice(0, 120) : 'client_request';
+      // Byte-bounded, and cut on a character boundary: the reason is caller
+      // supplied and is echoed back in the termination status and the
+      // `voice:hangup` payload, so a 120-*code-unit* cut through the middle of
+      // a surrogate pair put half a code point on the wire.
+      const reason = typeof req.body?.reason === 'string' ? truncateUtf8(req.body.reason, 120) : 'client_request';
       if (!sessionId || epoch < 1) {
         res.status(400).json({ error: 'sessionId and epoch required' });
         return;
@@ -353,7 +542,13 @@ export class Relay {
           res.status(403).json({ error: 'Unauthorized' });
           return;
         }
-        throw err;
+        // Re-throwing left this `async` handler — invoked as `void
+        // terminateVoice(req, res)` — with nobody to catch it: an unhandled
+        // rejection, and a request that never received a response at all, so
+        // the phone's Hang up button just stalled. The cause (ledger path,
+        // errno, provider status) is operator diagnostics and stays in the log.
+        console.error(`[voice] Termination failed: ${errorDetail(err)}`);
+        res.status(500).json({ error: 'Failed to end the voice session.' });
       }
     };
 
@@ -387,9 +582,9 @@ export class Relay {
       });
     });
 
-    this.app.get('/login', (_req, res) => {
+    this.app.get('/login', (req, res) => {
       if (!this.authEnabled) return res.redirect('/');
-      res.type('html').send(LOGIN_PAGE_HTML);
+      res.type('html').send(loginPageHtml(resolveLoginRedirect(req.query.next)));
     });
 
     // Open WebUI and other prior :3000 owners redirected failures to /error
@@ -417,9 +612,25 @@ export class Relay {
       if (!this.authEnabled) return res.json({ token: 'no-auth' });
 
       const ip = this.getClientIp(req);
-      const { allowed, retryAfter } = this.checkRateLimit(ip);
+      // Behind Tailscale Serve every request arrives from 127.0.0.1, so a
+      // peer-keyed limiter is one bucket for the whole tailnet: one operator's
+      // ten typos lock out every other device. Verified Serve identity splits
+      // that bucket — but only when the operator has declared the deployment
+      // and only from a loopback peer, because on a direct request to this port
+      // any header is simply whatever the caller typed. See request-identity.ts.
+      const identity = resolveLoginIdentity({
+        remoteAddress: req.socket.remoteAddress,
+        headers: req.headers,
+        trustTailscaleIdentity: this.config.trustTailscaleIdentity,
+      });
+      // Both counters are always consumed: the global guard has to see every
+      // attempt, or minting a fresh identity per request would slip past it.
+      const globalDecision = this.loginGlobalLimiter.check('all');
+      const identityDecision = this.loginLimiter.check(identity.key);
+      const { allowed, retryAfter } = globalDecision.allowed ? identityDecision : globalDecision;
       if (!allowed) {
-        console.warn(`[relay] Rate limited login from ${ip}`);
+        // The identity itself is a person's login and never reaches the log.
+        console.warn(`[relay] Rate limited login from ${ip} (${identity.source})`);
         res.set('Retry-After', String(retryAfter));
         return res.status(429).json({ error: `Too many attempts. Retry in ${retryAfter}s.` });
       }
@@ -521,18 +732,10 @@ export class Relay {
       }
     });
 
-    // --- Private voice PWA surface. Registered before express.static so the
-    // page and its script are never reachable without an authenticated
-    // session; the manifest, worker and icons carry no secrets and stay
-    // public so installability works before login. ---
-    const voicePageGuard: express.RequestHandler = (req, res, next) => {
-      if (this.authEnabled && this.resolveHttpSession(req) === undefined) {
-        res.redirect('/login');
-        return;
-      }
-      next();
-    };
-
+    // --- Private voice PWA surface. Claimed before express.static so the page
+    // and its script are never reachable without an authenticated session, in
+    // any spelling of their path; the manifest, worker and icons carry no
+    // secrets and stay public so installability works before login. ---
     const voiceSecurityHeaders = (res: express.Response): void => {
       res.setHeader('Content-Security-Policy', [
         "default-src 'self'",
@@ -562,15 +765,45 @@ export class Relay {
       }
     };
 
-    this.app.get(['/voice', '/voice.html'], voicePageGuard, (_req, res) => {
-      sendVoiceAsset(res, 'voice.html', 'html');
-    });
-    this.app.get('/voice.js', voicePageGuard, (_req, res) => {
-      sendVoiceAsset(res, 'voice.js', 'js');
-    });
-    this.app.get('/voice.css', voicePageGuard, (_req, res) => {
-      sendVoiceAsset(res, 'voice.css', 'css');
-    });
+    /**
+     * One gate for every URL that resolves to a private voice asset.
+     *
+     * Registered with `use`, not `get`, so it sees the request *before* the
+     * static mount regardless of how the path is spelled — and it compares the
+     * normalized path, so an alias cannot slip past by being a different string
+     * for the same file.
+     */
+    const voiceAssetGate: express.RequestHandler = (req, res, next) => {
+      if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+
+      const normalized = normalizeRequestPath(req.path);
+      if (normalized === null) {
+        // Undecodable or NUL-bearing. `send` refuses these too; refusing here
+        // means the static mount never gets to make its own decision about a
+        // path this gate could not evaluate.
+        res.status(400).send('Bad request');
+        return;
+      }
+
+      const asset = VOICE_PRIVATE_ASSETS.get(normalized);
+      if (!asset) return next();
+
+      // With voice enabled and no password there is no session to acquire, so
+      // redirecting to /login would loop. Refuse outright instead.
+      if (this.voiceUnprotected) {
+        this.refuseUnprotectedVoice(res);
+        return;
+      }
+      if (this.authEnabled && this.resolveHttpSession(req) === undefined) {
+        // Back to the voice page, not the origin root: the operator is in an
+        // installed PWA scoped to /voice and must not be dropped out of it.
+        res.redirect(`/login?next=${encodeURIComponent(VOICE_LOGIN_RETURN_PATH)}`);
+        return;
+      }
+      sendVoiceAsset(res, asset.file, asset.type);
+    };
+
+    this.app.use(voiceAssetGate);
 
     this.app.use(express.static(clientDir, {
       etag: true,
@@ -624,6 +857,9 @@ export class Relay {
       if (socketSessionToken) {
         this.activeSockets.set(socketSessionToken, (this.activeSockets.get(socketSessionToken) ?? 0) + 1);
       }
+      // Account-scoped delivery target for voice events. Unauthenticated relays
+      // have no token and share the `local` owner key used by VoiceTransport.
+      socket.join(Relay.accountRoom(socketSessionToken ?? 'local'));
 
       socket.emit('state:full', this.stateManager.getCurrentState());
 
